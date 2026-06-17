@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible bug in SafeSpace MCP
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Do not report security vulnerabilities here** —
+        use a private advisory (see `SECURITY.md`). Never paste OAuth tokens,
+        credentials, raw audit rows, or other people's email addresses.
+  - type: input
+    id: version
+    attributes:
+      label: SafeSpace version
+      description: From `.claude-plugin/package.json` or `safespace status`.
+      placeholder: e.g. 1.40.0
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Secret backend
+      options:
+        - macOS Keychain (default on macOS)
+        - Encrypted file (Linux / headless)
+        - Not sure
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: OS / runtime
+      placeholder: e.g. macOS 15.5, Bun 1.x
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect to happen, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / error output
+      description: Redact tokens, emails, and IDs before pasting.
+      render: shell
+    validations:
+      required: false
