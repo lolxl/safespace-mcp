@@ -1,0 +1,10 @@
+# Bun test runner config.
+#
+# `preload` ensures `src/google-api/test-utils.ts` (which calls `mock.module`
+# on `gaxios` at top level) is loaded BEFORE any test file. Without this,
+# tests that run earlier (alphabetically) cause googleapis → gaxios to be
+# cached, after which `mock.module("gaxios")` calls in later tests are a no-op.
+#
+# v1.11 Phase 1b — added when the googleapis SDK migration started.
+[test]
+preload = ["./src/google-api/test-utils.ts"]

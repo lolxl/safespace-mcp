@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "safespace": {
+      "command": "bun",
+      "args": [
+        "--env-file=${CLAUDE_PLUGIN_DATA}/safespace/.env",
+        "run",
+        "${CLAUDE_PLUGIN_ROOT}/src/proxy.ts"
+      ],
+      "env": {
+        "SAFESPACE_CONFIG_DIR": "${CLAUDE_PLUGIN_DATA}/safespace"
+      }
+    }
+  }
+}

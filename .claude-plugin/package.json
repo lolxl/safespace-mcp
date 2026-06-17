@@ -1,0 +1,59 @@
+{
+  "name": "safespace-mcp",
+  "version": "1.110.0",
+  "description": "SafeSpace MCP — the AI safety gateway for an agent's external surface. A provider-agnostic safety envelope (input sanitize + untrusted-content tagging, tier/scope/burst/recipient egress gates, autonomy hardening, run_id session forensics, tokens behind a SecretBackend, a full audit trail) between an AI agent and any source it touches. 111 tools across Google Workspace (Gmail, Drive, Docs, Calendar, Contacts, YouTube + Analytics, Tasks, Sheets, Slides, Forms — the flagship reference connector), GitHub read (repos, issues, PRs, commits, file content + PR diffs — every field sanitize-wrapped) + write (the 2nd OAuth source; issue create/comment/edit + PR open/merge + label triage behind default-deny repo allowlists), Notion read (search / pages / blocks / databases — every title, block, and property sanitize-wrapped), a keyless SSRF-gated web_fetch + a default-deny path-gated fs_read, and LINE / Telegram / Discord bot push. Three connector classes: OAuth-account, keyless, service-token. Tier-based tool exposure (read|write|share); tokens in the macOS Keychain or an encrypted file. Apache-2.0.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "lolxl",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lolxl/safespace-mcp.git"
+  },
+  "homepage": "https://github.com/lolxl/safespace-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/lolxl/safespace-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "google-workspace",
+    "gmail",
+    "drive",
+    "sheets",
+    "oauth",
+    "security"
+  ],
+  "bin": {
+    "safespace": "dist/cli.js",
+    "safespace-mcp": "dist/proxy.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "bash scripts/build-dist.sh",
+    "smoke": "node scripts/smoke-mcp.mjs",
+    "dev": "bun run --watch ./src/proxy.ts",
+    "consent": "bun run ./src/cli.ts consent",
+    "audit": "bun run ./src/cli.ts audit",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "test:coverage:sanitize": "bash scripts/check-sanitize-coverage.sh",
+    "typecheck": "tsc --noEmit",
+    "validate": "bash scripts/validate.sh",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@napi-rs/keyring": "^1.1.0",
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.8.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

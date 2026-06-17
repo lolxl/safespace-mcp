@@ -1,0 +1,27 @@
+# SafeSpace MCP — 4-account / 2-profile config
+#
+# Copy this file to `.safespace-accounts` (gitignored) and fill in your
+# actual email addresses. Used by:
+#   scripts/setup-profiles.sh   (one-time setup)
+#   scripts/renew-tokens.sh     (weekly re-consent — External + Testing
+#                                mode expires refresh tokens after 7 days)
+#
+# Naming: the four "roles" below are just labels — name them anything
+# that matches how you think about your accounts. The scripts only care
+# about the 4 ACCOUNT_* variables.
+
+ACCOUNT_PERSONAL=
+ACCOUNT_PROCURE=
+ACCOUNT_MANAGE=
+ACCOUNT_TECH=
+
+# Which accounts get loaded into the "send" profile (can send mail).
+# Comma-separated list of variable names from above. Leave out any
+# account whose send capability you want fully prevented at the proxy
+# layer (e.g. high-risk procurement). Default omits PROCURE.
+SEND_PROFILE_ACCOUNTS=ACCOUNT_PERSONAL,ACCOUNT_MANAGE,ACCOUNT_TECH
+
+# Which account is the default "active" for each profile.
+# This is what tools use when args.account_id is unset.
+READ_DEFAULT=ACCOUNT_MANAGE
+SEND_DEFAULT=ACCOUNT_MANAGE

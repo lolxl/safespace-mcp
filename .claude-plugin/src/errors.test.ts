@@ -1,0 +1,232 @@
+import { describe, expect, test } from "bun:test";
+import { ERROR_CODES, MCPError } from "./errors";
+
+describe("ERROR_CODES table", () => {
+  test("contains 51 names after v1.107 (added mattermost_api_failed)", () => {
+    expect(Object.keys(ERROR_CODES).sort()).toEqual([
+      "account_not_found",
+      "batch_too_large",
+      "comment_burst_limit_exceeded",
+      "comment_target_denied_by_policy",
+      "destructive_denied_in_autonomous_mode",
+      "discord_api_failed",
+      "download_stalled",
+      "egress_destination_blocked",
+      "file_too_large",
+      "file_unsupported_binary",
+      "formula_rejected",
+      "fs_read_failed",
+      "github_api_failed",
+      "github_approve_denied_by_policy",
+      "github_merge_denied_by_policy",
+      "github_write_denied_by_policy",
+      "inbox_read_failed",
+      "keychain_locked",
+      "label_limit_exceeded",
+      "line_api_failed",
+      "mattermost_api_failed",
+      "notion_api_failed",
+      "outbound_sanitize_rejected",
+      "outbound_secret_rejected",
+      "path_blocked_by_policy",
+      "rate_limited",
+      "recipient_denied_by_policy",
+      "recipient_lookup_failed",
+      "refresh_token_invalid",
+      "sanitize_failed",
+      "scope_mismatch",
+      "search_burst_limit_exceeded",
+      "secret_store_corrupt",
+      "send_approval_required",
+      "share_denied_by_policy",
+      "share_expiration_forbidden",
+      "share_expiration_required",
+      "share_role_forbidden",
+      "share_target_forbidden",
+      "slack_api_failed",
+      "system_label_forbidden",
+      "tainted_recipient_denied",
+      "tasks_delete_denied_by_policy",
+      "telegram_api_failed",
+      "tool_not_found",
+      "url_blocked_by_policy",
+      "value_render_option_rejected",
+      "video_target_denied_by_policy",
+      "web_fetch_failed",
+      "write_burst_limit_exceeded",
+      "youtube_quota_exceeded",
+    ]);
+  });
+
+  test("codes -32000..-32029 with gaps (v2.0 removed -32009/-32010/-32013; v1.21 Phase 1b adds -32029 formula_rejected)", () => {
+    // v2.0 removed send_disabled (-32009), modify_disabled (-32010),
+    // share_disabled (-32013). v2.1 added share_denied_by_policy (-32018).
+    // v2.2 added recipient_denied_by_policy (-32019).
+    // v2.3 PR-C added batch_too_large (-32020).
+    // v1.11 Phase 2 PR-5 added download_stalled (-32021).
+    // v1.15 Phase 3 added recipient_lookup_failed (-32022).
+    // v1.16 Phase 1b added youtube_quota_exceeded (-32024) and
+    // search_burst_limit_exceeded (-32026).
+    // v1.16 Phase 2a wired the previously-reserved Phase 2 codes:
+    //   -32023 comment_target_denied_by_policy
+    //   -32025 comment_burst_limit_exceeded
+    // v1.16 Phase 2b added -32027 outbound_sanitize_rejected — the FIRST
+    // outbound (compose-time) sanitize-reject code, distinct from the
+    // inbound sanitize_failed (-32000). Used by youtube_video_comment_post /
+    // youtube_comment_reply handlers when args.text fails the 6-step
+    // outbound pipeline (zero-width / length / wrapper-close / truncate
+    // marker / warning preamble).
+    // v1.20 Phase 1b-1 added -32028 value_render_option_rejected — the
+    // first error code of the v1.20 cycle. Used by sheets_get_values when
+    // value_render_option=FORMULA is supplied (design §11 Q4 LOCKED — formula
+    // text leaks user secrets). errorData carries closed-enum reason
+    // discriminator "formula_rendering_rejected" (mirrors -32027 pattern).
+    // v1.21 Phase 1b added -32029 formula_rejected — applied to
+    // USER_ENTERED cell strings starting with `=`/`+` whose outer function
+    // name matches the 11-function REJECT set. errorData carries closed-enum
+    // `reason: "formula_rejected"` + separate `rejected_formula_function`
+    // string field (UPPERCASED function name from the closed 11-item set).
+    // Numbers stay sparse — never renumber, downstream log readers may
+    // pattern-match on codes.
+    // v1.37 BLOCKER 1 added -32031 secret_store_corrupt (encrypted FileBackend
+    // non-retryable failure class). v1.39 BLOCKER 4 SPENT the previously-reserved
+    // -32030 on tasks_delete_denied_by_policy (the tasks-delete target allowlist;
+    // roadmap Q9). -32031 and -32030 are now both present, contiguous above -32029.
+    // v1.52 F1 (Autonomy Hardening) added -32032 write_burst_limit_exceeded.
+    // v1.54 F4 (Autonomy Hardening) added -32033
+    // destructive_denied_in_autonomous_mode — new most-negative (permanent-delete
+    // hard-deny under SAFESPACE_AUTONOMOUS; reuses F1's PERMANENT_DELETE_TOOLS).
+    // v1.57 (Autonomy Hardening) added -32034 tainted_recipient_denied (F3b-gate)
+    // + -32035 outbound_secret_rejected (F3a).
+    // v1.65 Phase C (web-fetch keyless connector) added -32036 url_blocked_by_policy
+    // (SSRF gate rejection) + -32037 web_fetch_failed (operational fetch failure).
+    // v1.66 Phase C PR 2 (LINE OA service-token connector) added -32038
+    // line_api_failed.
+    // v1.68 (Telegram Bot service-token connector) added -32039 telegram_api_failed.
+    // v1.69 (Discord) added -32040 discord_api_failed; v1.70 G2 added -32041
+    // github_api_failed; v1.71 (GitHub WRITE) added -32042
+    // github_write_denied_by_policy — new most-negative.
+    // v1.75 (fs_read keyless connector) added -32043 path_blocked_by_policy (the
+    // filesystem path gate) + -32044 fs_read_failed (operational).
+    // v1.77 (Notion service-token connector) added -32045 notion_api_failed.
+    // v1.82 (GitHub PR merge) added -32046 github_merge_denied_by_policy.
+    // v1.88 (centralized egress-destination registry) added -32047
+    // egress_destination_blocked (a SafeSpace-owned outbound fetch targeted an
+    // unregistered host; backstop, host echoed, no URL/token).
+    // v1.90 (github_create_pull_request_review) added -32048
+    // github_approve_denied_by_policy — new most-negative (the APPROVE-event review
+    // gate; its OWN default-deny allowlist, separate from -32042's write list).
+    // v1.95 (Slack service-token connector) added -32049 slack_api_failed — new
+    // most-negative (the chat.postMessage 200-but-ok:false body model maps here).
+    // v1.99 (enforced send-approval gate) added -32050 send_approval_required
+    // (supervised mode blocks an unapproved outbound message send).
+    // v1.102 (W0 inbound webhook listener) added -32051 inbox_read_failed — new
+    // most-negative (the durable webhook inbox store was missing/corrupt).
+    // v1.106 (youtube_video_update) added -32052 video_target_denied_by_policy — new
+    // most-negative (the deny-default video-metadata-write target allowlist).
+    // v1.107 (Mattermost self-hosted class-B connector) added -32053 mattermost_api_failed.
+    const codes = Object.values(ERROR_CODES).map((s) => s.code).sort((a, b) => a - b);
+    expect(codes).toEqual([
+      -32053,
+      -32052,
+      -32051,
+      -32050,
+      -32049,
+      -32048,
+      -32047,
+      -32046, -32045, -32044, -32043, -32042,
+      -32041, -32040, -32039, -32038, -32037, -32036, -32035, -32034, -32033, -32032, -32031, -32030,
+      -32029, -32028, -32027, -32026, -32025, -32024, -32023, -32022, -32021, -32020,
+      -32019, -32018, -32017, -32016, -32015, -32014,
+      -32012, -32011,
+      -32008, -32007, -32006, -32005, -32004, -32003, -32002, -32001, -32000,
+    ]);
+  });
+
+  test("every recovery hint is non-empty", () => {
+    for (const [name, spec] of Object.entries(ERROR_CODES)) {
+      expect(spec.recovery.length, `recovery for ${name}`).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("MCPError.toJsonRpc()", () => {
+  test("returns JSON-RPC shape with code/message/recovery", () => {
+    const err = new MCPError("keychain_locked");
+    const j = err.toJsonRpc();
+    expect(j.code).toBe(-32002);
+    expect(j.message).toBe("keychain_locked");
+    expect(j.data.recovery).toContain("Keychain");
+  });
+
+  test("merges custom data fields after recovery", () => {
+    const err = new MCPError("account_not_found", { email: "alice@example.com" });
+    const j = err.toJsonRpc();
+    expect(j.data.email).toBe("alice@example.com");
+    expect(j.data.recovery).toContain("safespace consent");
+  });
+
+  test("is throwable as an Error subclass", () => {
+    expect(() => {
+      throw new MCPError("tool_not_found");
+    }).toThrow(MCPError);
+  });
+});
+
+describe("formula_rejected — v1.21 Phase 1b new error code", () => {
+  test("code is -32029 and recovery is non-empty (closed-enum reason discriminator)", () => {
+    const spec = ERROR_CODES.formula_rejected;
+    expect(spec.code).toBe(-32029);
+    expect(spec.recovery.length).toBeGreaterThan(0);
+    // Recovery is generic — does NOT echo cell content per cross-API NO-PII
+    // invariant (design §10 hook #13).
+    expect(spec.recovery).toContain("Formula");
+    expect(spec.recovery).toContain("RAW");
+  });
+
+  test("errorData carries reason discriminator + rejected_formula_function field", () => {
+    const err = new MCPError("formula_rejected", {
+      reason: "formula_rejected",
+      rejected_formula_function: "IMPORTRANGE",
+    });
+    const j = err.toJsonRpc();
+    expect(j.code).toBe(-32029);
+    expect(j.message).toBe("formula_rejected");
+    expect(j.data.reason).toBe("formula_rejected");
+    expect(j.data.rejected_formula_function).toBe("IMPORTRANGE");
+  });
+});
+
+describe("secret_store_corrupt — v1.37 BLOCKER 1 new error code", () => {
+  test("code is -32031 (−32030 reserved for BLOCKER 4) and recovery is non-empty", () => {
+    const spec = ERROR_CODES.secret_store_corrupt;
+    expect(spec.code).toBe(-32031);
+    expect(spec.recovery.length).toBeGreaterThan(0);
+    // Generic recovery: re-consent guidance, no key material / path echo.
+    expect(spec.recovery).toContain("safespace consent");
+  });
+
+  test("recovery carries NO key material, path, or wrong-passphrase-vs-tamper oracle", () => {
+    const spec = ERROR_CODES.secret_store_corrupt;
+    // Must not distinguish wrong-passphrase from tamper (would be an oracle),
+    // and must not leak a filesystem path or hex key fragment.
+    expect(spec.recovery).not.toMatch(/\/(Users|home|root|tmp|var)\//);
+    expect(spec.recovery.toLowerCase()).not.toContain("secret.key");
+    expect(spec.recovery.toLowerCase()).not.toContain("secret.enc");
+  });
+
+  test("default toJsonRpc carries only recovery (no leaked data fields)", () => {
+    const j = new MCPError("secret_store_corrupt").toJsonRpc();
+    expect(j.code).toBe(-32031);
+    expect(j.message).toBe("secret_store_corrupt");
+    expect(Object.keys(j.data)).toEqual(["recovery"]);
+  });
+});
+
+describe("keychain_locked recovery — v1.37 BLOCKER 1 generalized (B9)", () => {
+  test("still contains 'Keychain' (back-compat) AND now mentions the passphrase path", () => {
+    const spec = ERROR_CODES.keychain_locked;
+    expect(spec.recovery).toContain("Keychain");
+    expect(spec.recovery).toContain("SAFESPACE_SECRET_PASSPHRASE");
+  });
+});

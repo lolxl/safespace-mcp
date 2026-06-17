@@ -1,0 +1,55 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+.env.local
+.env.read
+.env.send
+
+# Phase 1 multi-account setup — user-specific email list
+.safespace-accounts
+
+coverage/
+.nyc_output/
+
+# local runtime state (none should be in repo, but defensive)
+accounts.json
+audit.jsonl
+*.key
+*.pem
+
+# IDE
+.vscode/
+.idea/
+
+# Step 0 spike outputs (we keep the code but not its state)
+spike/**/tokens.json
+spike/**/output/
+
+# Bun build artefacts
+*.tsbuildinfo
+
+# Per-worktree Claude Code working files (review reports, plan drafts).
+# `.claude-plugin/` is the tracked plugin manifest — different directory.
+.claude/
+
+# Local-only Claude Code context for AI coding assistants. Auto-loaded beside
+# CLAUDE.md; kept out of the public repo.
+CLAUDE.local.md
+
+# Local mirror of the per-cycle design docs (not part of the public repo).
+# Convenience copy for local dev only.
+docs-archive/
+
+# Model B deployment (v1.74) — the Compose secret files (FileBackend passphrase,
+# OAuth client secrets) live here mode-600 and MUST NEVER be committed. The
+# committed templates are deploy/*.example.* only.
+secrets/
+operators.json
+
+# graphify knowledge-graph output — generated artifacts (graph data, HTML,
+# AST/semantic cache, cost tracker, temp interpreter paths). Rebuilt on demand
+# with `/graphify .`; never tracked.
+graphify-out/
+

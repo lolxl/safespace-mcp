@@ -1,0 +1,149 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref. Stops a fresh push from racing
+# an in-flight CI cycle for the same branch — wasted minutes on a private
+# repo, real cost guard once public.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Plugin runtime (package.json, src/, scripts/, tsconfig.json) lives under
+# .claude-plugin/ so `claude plugin install` copies exactly the right tree
+# into ~/.claude/plugins/cache. CI mirrors that by running all `run:`
+# steps from inside .claude-plugin/.
+defaults:
+  run:
+    working-directory: .claude-plugin
+    # bash on every OS. windows-latest ships Git Bash, so scripts/*.sh (notably
+    # build-dist.sh, invoked by `bun run build`) and the run: steps below behave
+    # identically across the smoke matrix. macOS/Linux already default to bash —
+    # a no-op there.
+    shell: bash
+
+jobs:
+  # Typecheck + full test suite. macos-latest because the suite includes
+  # @napi-rs/keyring tests that hit the real macOS Keychain; Linux would
+  # require gnome-keyring + dbus session setup for those to pass.
+  #
+  # No `needs:` clause — runs in parallel with sanitize-coverage. The
+  # parallel execution model speeds up the cycle by the duration of the
+  # shorter job when both are green. Cache miss on lockfile bump still
+  # pays the full install cost; cache hit reduces install to a fast extract.
+  test:
+    runs-on: macos-latest
+    # Per-job permissions redeclared on top of the workflow-level grant.
+    # Defense in depth: if the top-level block is ever broadened, jobs
+    # still hold to least-privilege.
+    permissions:
+      contents: read
+    steps:
+      # Third-party actions SHA-pinned (not tag-pinned) to defend against
+      # tag-hijacking. Update SHAs intentionally when bumping versions.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      # Cache the bun install store keyed on the lockfile hash so a green
+      # main commit + same deps = no re-download of node_modules tarballs.
+      # Restore-keys allows partial reuse across lockfile bumps (cheap
+      # extract for unchanged subtree of deps).
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('.claude-plugin/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+  # Sanitize coverage gate. Runs on ubuntu-latest because src/sanitize/
+  # has no Keychain dependency and ubuntu runners are ~10x cheaper than
+  # macos. The full-suite job above already proves the same tests pass
+  # natively on macOS.
+  #
+  # No `needs:` clause — runs in parallel with the test job.
+  sanitize-coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-1.3.14-${{ hashFiles('.claude-plugin/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-1.3.14-
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Sanitize 100% line coverage gate
+        run: bash scripts/check-sanitize-coverage.sh
+
+  # Cross-platform delivery smoke (PR 1d). Proves the multi-client path PR 1c
+  # built: the prebuilt dist/ bundle launches on PLAIN NODE (no Bun) and speaks
+  # MCP, on the three OSes Antigravity / Gemini / Codex run on. Build with Bun,
+  # then run the built bundle with the runner's Node — a green run means the
+  # consumer-facing Node path genuinely works on that OS (and on Windows it also
+  # proves S6: bootstrap reaches the FileBackend default without loading the
+  # native @napi-rs/keyring addon).
+  #
+  # Deliberately does NOT run the full `bun test` suite on Windows: that suite
+  # asserts POSIX 0o600/0o700 file modes + real-Keychain round-trips, which NTFS
+  # does not honor by design (the very reason S5/S7 exist). The smoke validates
+  # the cross-platform RUNTIME; the POSIX-semantics suite stays on macOS (the
+  # `test` job above). fail-fast off so one OS failing still reports the others.
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      # The runner's Node is what stands in for a consumer / Antigravity / Codex
+      # host — pinned to the engines.node floor so the smoke runs on the minimum
+      # supported runtime, not just the newest.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: 20
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Build dist (with Bun)
+        run: bun run build
+
+      - name: Smoke the built bundle on Node
+        run: node scripts/smoke-mcp.mjs
