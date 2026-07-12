@@ -28,8 +28,8 @@
  * NOT lifted.
  */
 
-import { google } from "googleapis";
 import type { OAuth2Client } from "googleapis-common";
+import { getGoogle } from "./lazy-google";
 import { refreshAccessToken, type RefreshDeps } from "../auth/refresh";
 import { mapGoogleError } from "./errors";
 
@@ -60,7 +60,7 @@ export async function getAuthClient(
 
   const tokens = await refreshAccessToken(email, deps);
 
-  const oauth = new google.auth.OAuth2(clientId, clientSecret);
+  const oauth = new (getGoogle().auth.OAuth2)(clientId, clientSecret);
   oauth.setCredentials({
     access_token: tokens.access_token,
     refresh_token: tokens.refresh_token,

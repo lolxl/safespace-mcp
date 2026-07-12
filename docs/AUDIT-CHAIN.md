@@ -32,7 +32,7 @@ the file's last `row_mac`.
 
 ```
 safespace audit verify           # walks the whole chain, prints INTACT + the tip MAC
-safespace audit verify --json    # {ok, chainedRows, legacyRows, tipMac, brokenAt, reason}
+safespace audit verify --json    # {ok, chainedRows, legacyRows, unchainedEventRows, tipMac, brokenAt, reason}
 ```
 
 Exit code is `0` when intact, `1` when broken (so cron/CI can gate on it). A broken
@@ -41,6 +41,18 @@ chain reports the **first** offending row index and whether it was an edit/delet
 
 Rows written *before* the upgrade have no `row_mac`; they are a tolerated legacy
 prefix, and the chain verifies from the first hashed row onward.
+
+**What joins the chain, and what doesn't.** Every `auditEnd` row (the per-call
+record) AND every **server-process** forensic / policy row — share / share-denied,
+recipient-denied, webhook receipt / rejected, the cross-account aggregate, and the
+supervised-send `pending` / `consumed` events — is chained. The owner's **CLI**
+send-approval actions (`safespace send approve` / `deny`, which write
+`send_approval_approved` / `_denied`) are emitted by a **separate process** and are
+deliberately **not** chained: chaining a second writer would fork the single-writer
+chain. The verifier recognises these as legitimately-unchained *event* rows (they
+carry an `event` field) and tolerates them — counted as `unchainedEventRows`, not a
+break. A row with no `row_mac` **and no `event` field** appearing mid-chain is still a
+break (a chained row stripped of its MAC, or a non-event insert).
 
 ## Threat model — what it does and does NOT defend (be honest)
 
@@ -62,13 +74,20 @@ token-at-rest hardening.
   end. `safespace audit verify` **prints the tip MAC** for exactly this reason: record
   it out-of-band (a monitoring system, a separate host) and compare — a tip that moved
   backward (or a shorter chain) reveals truncation.
+- **Unchained `event` rows.** The CLI's send-approval approve/deny rows are written by
+  a separate process and are not chained, so editing or deleting one is not detected.
+  The *server-side* record of the same supervised-send decision (the `pending` /
+  `consumed` events) **is** chained, so the trail is anchored on the server side.
 
 ## Assumptions
 
-- **Single writer.** The chain assumes one process appends to a given `audit.jsonl`
-  (both supported topologies are single-writer: Model A = one stdio process; Model B =
-  one in-process container). Two processes appending to the same file would fork the
-  chain — which `verify` surfaces as a break (correctly: it *is* an anomaly).
+- **Single writer (the server).** The chain assumes one process appends the *chained*
+  rows to a given `audit.jsonl` (both supported topologies are single-writer: Model A =
+  one stdio process; Model B = one in-process container). Two processes appending
+  *chained* rows would fork the chain — which `verify` surfaces as a break (correctly:
+  it *is* an anomaly). The `safespace` CLI may append **unchained** `event` rows
+  (send-approval approve/deny) to the same file from a separate process; those are not
+  part of the chain and are tolerated by `verify`, so they do not fork it.
 - The `row_mac` field is additive; every existing audit reader (`safespace audit
   recent / stats / deletes / suspicious / sessions`, `doctor`) ignores it.
 

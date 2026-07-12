@@ -25,6 +25,7 @@ import { discordTools } from "./discord";
 import { slackTools } from "./slack";
 import { mattermostTools } from "./mattermost";
 import { notionTools } from "./notion";
+import { xTools } from "./x";
 import { crossAccountTools } from "./cross-account";
 
 export type { ToolDef } from "./types";
@@ -75,6 +76,7 @@ const FRAGMENTS: Record<string, ToolDef> = {
   ...slackTools,
   ...mattermostTools,
   ...notionTools,
+  ...xTools,
   ...crossAccountTools,
 };
 
@@ -228,6 +230,10 @@ const TOOL_ORDER: readonly string[] = [
   "notion_create_page",
   "notion_append_blocks",
   "notion_update_page",
+  // v1.114 — X (Twitter) READ (the first tools of the 4th OAuth source).
+  "x_get_me",
+  "x_post_create",
+  "x_search_recent",
 ];
 
 export const TOOL_REGISTRY: Record<string, ToolDef> = Object.fromEntries(

@@ -5,28 +5,29 @@
 The problem it solves: the moment you connect an LLM agent to your real email, files, the open web, or a messaging channel, a prompt-injection payload hidden in that data can try to make the agent exfiltrate secrets, send mail, or delete things. SafeSpace sits between the agent and the outside world as a hardened envelope that enforces **least privilege**, **untrusted-content tagging**, **egress control**, and **full auditability** — regardless of which source is behind it. **The envelope is the product; sources are connectors behind it.**
 
 ```
-AI agent ──stdio MCP (Model A, local)──────▶  SafeSpace envelope  ──▶  Google Workspace      (OAuth · flagship · 85)
-         ──HTTP MCP over a tailnet─────────▶       │                   GitHub · Notion       (OAuth · 18 + 8)
+AI agent ──stdio MCP (Model A, local)──────▶  SafeSpace envelope  ──▶  Google Workspace      (OAuth · flagship · 84)
+         ──HTTP MCP over a tailnet─────────▶       │                   GitHub · Notion       (OAuth · 14 + 5)
            (Model B · multi-operator)              │                   web-fetch · fs-read   (keyless · SSRF/path-gated)
-   sanitize · tier · scope · operator              │                   LINE·Telegram·Discord·Slack·Mattermost (service-token)
+   sanitize · tier · scope · operator              │                   LINE · Telegram · Discord  (service-token push)
    egress gates · burst · autonomy                 │
    hardening · audit ──────────────────────────────┘
 ```
 
-**Status:** v1.110.0 — **127 tools** across **10 connectors**: **Google Workspace** (Gmail · Drive · Docs · Calendar · Contacts · YouTube + Analytics · Tasks · Sheets · Slides · Forms — the flagship reference connector, 85 tools), **GitHub** (18), **Notion** (8, multi-workspace), **web-fetch** + **fs-read** (keyless), and **LINE · Telegram · Discord · Slack · Mattermost** (service-token messaging) — plus an inbound webhook inbox. Three connector classes — **OAuth-account · service-token · keyless** — and two deployment models: **Model A** (local, stdio) and **Model B** (a shared multi-operator server on a private tailnet). Apache-2.0 licensed.
+**Status:** v1.80.0 — **108 tools** across **8 connectors**: **Google Workspace** (Gmail · Drive · Docs · Calendar · Contacts · YouTube + Analytics · Tasks · Sheets · Slides · Forms — the flagship reference connector, 84 tools), **GitHub** (14), **Notion** (5, multi-workspace), **web-fetch** + **fs-read** (keyless), and **LINE · Telegram · Discord** push (service-token). Three connector classes — **OAuth-account · service-token · keyless** — and two deployment models: **Model A** (local, stdio) and **Model B** (a shared multi-operator server on a private tailnet). Apache-2.0 licensed.
 
 | Connector | Class | Tools | Auth |
 |-----------|-------|------:|------|
 | Google Workspace | OAuth-account | 84 | OAuth — multi-account |
 | GitHub | OAuth-account | 14 | GitHub OAuth App — single account |
 | Notion | OAuth-account | 5 | Notion public integration — multi-workspace |
+| X (Twitter) | OAuth-account | 3 | X OAuth 2.0 PKCE — multi-account (`x_get_me` + `x_search_recent` + `x_post_create`) |
 | web-fetch | keyless | 1 | none — SSRF-gated |
 | fs-read | keyless | 1 | none — default-deny path allowlist |
 | LINE Official Account | service-token | 1 | channel token in `SecretBackend` |
 | Telegram Bot | service-token | 1 | bot token in `SecretBackend` |
 | Discord Bot | service-token | 1 | bot token in `SecretBackend` |
 
-> Per-version history lives in the GitHub Releases. This README describes the current release.
+> Per-version history lives in [`docs/CHANGELOG.md`](docs/CHANGELOG.md). The north-star framing is in [`docs/safety-gateway-thesis.md`](docs/safety-gateway-thesis.md). This README describes the current release.
 
 ---
 
@@ -102,6 +103,7 @@ The **GitHub** connector uses GitHub's flat OAuth scopes — `read:user` + `repo
 
 - **A runtime** — **Bun** 1.3+ for the Claude Code plugin path (`brew install oven-sh/bun/bun`); or **Node ≥ 20** for the `npx` / other-MCP-client path (the published package ships a prebuilt bundle, so consumers need no Bun — see [`docs/CLIENTS.md`](docs/CLIENTS.md)).
 - **Google Cloud OAuth client** (Desktop app type) — `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` in `.env`. See [`.env.example`](.env.example).
+  - ⚠️ **Publish the OAuth consent screen to "In production"** (Google Cloud Console → *APIs & Services → OAuth consent screen* → **Publish app**). An app left in the default **"Testing"** status issues **refresh tokens that expire after 7 days** — you would have to re-run `safespace consent` every week. Because SafeSpace is **self-hosted with _your own_ OAuth client**, the "Google hasn't verified this app" prompt is expected and correct — you are the app's author *and* its only user, so you are the right party to trust it; click *Advanced → Go to \<app\>*. **No Google verification is required** (that process targets public multi-tenant SaaS, which SafeSpace is not). **Google Workspace users** can instead set the **user type to "Internal"** — no 7-day expiry and no warning at all, but it requires a Workspace org and confines the app to that org's accounts. After changing either setting, re-run `safespace consent <email> --re-auth` to mint a fresh long-lived token.
 - **GCP APIs enabled** in the same project as the OAuth client: Gmail, Drive, Docs, Calendar, People (Contacts), YouTube Data API v3 + YouTube Analytics API, Tasks, Sheets, Slides, and Forms.
 - **(optional) GitHub OAuth App** — `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET` in `.env`, then `safespace consent --provider github` (only for the GitHub tools).
 - **(optional) Notion public integration** — `NOTION_CLIENT_ID` + `NOTION_CLIENT_SECRET` in `.env`, then `safespace consent --provider notion` (only for the Notion tools; multi-workspace = consent once per workspace).
@@ -354,12 +356,14 @@ SafeSpace returns stable JSON-RPC `code` values for proxy-layer rejections — l
 
 ## Documentation
 
+- [`docs/safety-gateway-thesis.md`](docs/safety-gateway-thesis.md) — the north-star framing (envelope = product, sources = connectors)
 - [`SECURITY.md`](SECURITY.md) — security policy + threat model
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture overview + full tool list
 - [`docs/DESIGN.md`](docs/DESIGN.md) — full design + addenda chain
 - [`docs/CLIENTS.md`](docs/CLIENTS.md) — running SafeSpace from any MCP client (Antigravity / Gemini, Codex, Cursor, Claude Desktop) via `npx`
 - [`docs/DEPLOY.md`](docs/DEPLOY.md) — Model B operator runbook (Docker / Tailscale / operators.json)
 - [`docs/model-b-deployment.md`](docs/model-b-deployment.md) — Model B design + rationale
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — per-version history and per-cycle design-doc index
 - [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) — test inventory
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute · [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 

@@ -28,7 +28,7 @@ v1.35**, n/h gap shut, Devanagari formally closed).
 > *actionable* carry-forward; the open set has been items 1–3 since.
 
 > **Note (open-source + multi-user pivot):** the 4 architectural BLOCKERs of the
-> identity/tenancy layer are tracked in the project's design history,
+> identity/tenancy layer are tracked in the private archive's design docs,
 > NOT here — this file is the *security-review* deferred list. All four shipped
 > behaviorally: BLOCKER 2 (audit actor) v1.36.0 · BLOCKER 1 (`SecretBackend` +
 > encrypted Linux `FileBackend`) v1.37.0 · BLOCKER 3 (per-operator `ctx.tier`)

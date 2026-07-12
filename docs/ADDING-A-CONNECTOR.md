@@ -68,8 +68,8 @@ A read-only tool on an existing connector is just a registry fragment + a handle
 8. **Env vars** — every `SAFESPACE_*` name lives in `src/config.ts` (CI fails on a
    `SAFESPACE_` literal read outside it).
 9. **Tests** — sentinel style (see Step 3).
-10. **Version + docs** — bump the three manifests in lockstep, note the change in
-    the release notes, and update the tool count in the manifest descriptions.
+10. **Version + docs** — bump the three manifests in lockstep, add a `CHANGELOG.md`
+    entry, and update the tool count in the manifest descriptions.
 
 ## Step 2 — the non-negotiable: gate every outbound write
 

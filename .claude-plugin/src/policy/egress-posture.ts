@@ -50,6 +50,10 @@ import {
   getGithubApproveAllowlistState,
   summarizeGithubApproveAllowlist,
 } from "./github-approve-targets";
+import {
+  getXPostAllowlistState,
+  summarizeXPostAllowlist,
+} from "./x-post-allowlist";
 import { fsRootsSummary } from "./fs-gate";
 import { webfetchAllowlistSummary } from "./url-gate";
 
@@ -125,6 +129,7 @@ export async function evaluateEgressPosture(): Promise<EgressRow[]> {
   const ghWrite = summarizeGithubWriteAllowlist(getGithubWriteAllowlistState());
   const ghMerge = summarizeGithubMergeAllowlist(getGithubMergeAllowlistState());
   const ghApprove = summarizeGithubApproveAllowlist(getGithubApproveAllowlistState());
+  const xPost = summarizeXPostAllowlist(getXPostAllowlistState());
   const fsRoots = fsRootsSummary();
   const webfetch = webfetchAllowlistSummary();
 
@@ -147,6 +152,7 @@ export async function evaluateEgressPosture(): Promise<EgressRow[]> {
     classifyEgress("github-write", ghWrite.kind === "active", ghWrite.count, "deny", auto),
     classifyEgress("github-merge", ghMerge.kind === "active", ghMerge.count, "deny", auto),
     classifyEgress("github-approve", ghApprove.kind === "active", ghApprove.count, "deny", auto),
+    classifyEgress("x-post", xPost.kind === "active", xPost.count, "deny", auto),
     classifyEgress("fs-read", fsRoots.kind === "active", fsRoots.count, "deny", auto),
     classifyEgress("web-fetch", webfetch.kind === "active", webfetch.count, "allow", auto),
   ];

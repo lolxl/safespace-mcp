@@ -184,7 +184,7 @@ describe("notion write — credential narrow (R8) + token-no-leak", () => {
     const f = fetchStub();
     await expect(
       notionCreatePage(googleCtx, { parent_page_id: PARENT, title: "T" }, { fetchImpl: f.impl }),
-    ).rejects.toThrow(/notion handler received a 'google'/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 

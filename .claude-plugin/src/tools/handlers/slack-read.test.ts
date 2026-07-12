@@ -198,7 +198,7 @@ describe("Slack READ — credential narrow (R6) + token-no-leak", () => {
   test("a non-service-token credential (OAuth) is refused", async () => {
     const oauthCtx: ToolContext = { allowedAccounts: null, credential: oauthCred(), tier: "read", audit: NOOP_AUDIT };
     const f = fetchStub(LIST_BODY);
-    await expect(slackListChannels(oauthCtx, {}, { fetchImpl: f.impl })).rejects.toThrow(/service-token/);
+    await expect(slackListChannels(oauthCtx, {}, { fetchImpl: f.impl })).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 

@@ -188,7 +188,7 @@ describe("telegramGetUpdates — error mapping + no-leak", () => {
   test("a non-service-token credential (OAuth) is refused — no fetch", async () => {
     const oauthCtx: ToolContext = { allowedAccounts: null, credential: oauthCred(), tier: "read", audit: NOOP_AUDIT };
     const f = fetchStub(UPDATES_BODY);
-    await expect(telegramGetUpdates(oauthCtx, {}, { fetchImpl: f.impl })).rejects.toThrow(/service-token/);
+    await expect(telegramGetUpdates(oauthCtx, {}, { fetchImpl: f.impl })).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 });

@@ -8,9 +8,16 @@
 // `.getAccessToken()`; this file pins the union + helper in isolation.
 
 import { describe, expect, test } from "bun:test";
+import { MCPError } from "../errors";
 import { requireGithub, requireGoogle, requireOAuth } from "./handlers/shared";
 import type { Credential, ToolContext } from "./types";
 import { NOOP_AUDIT, oauthCred } from "./test-audit";
+
+/** v1.112.8 — provider/credential guards throw a stable MCPError, not a plain Error. */
+const ROUTING_MISMATCH = {
+  errorName: "internal_routing_error",
+  errorData: { reason: "credential_mismatch" },
+} as const;
 
 type OAuthCred = Extract<Credential, { kind: "oauth" }>;
 
@@ -40,12 +47,21 @@ describe("Credential union + requireOAuth (B2)", () => {
   });
 
   test("requireOAuth throws on a non-oauth credential (R6 — no fabricated email/token)", () => {
-    expect(() => requireOAuth(ctxWith({ kind: "none" }))).toThrow(
-      /requires an OAuth credential/,
-    );
+    expect(() => requireOAuth(ctxWith({ kind: "none" }))).toThrow(MCPError);
+    try {
+      requireOAuth(ctxWith({ kind: "none" }));
+    } catch (e) {
+      expect(e).toMatchObject(ROUTING_MISMATCH);
+      expect((e as MCPError).code).toBe(-32055);
+    }
     expect(() =>
       requireOAuth(ctxWith({ kind: "service-token", token: () => "t" })),
-    ).toThrow(/requires an OAuth credential/);
+    ).toThrow(MCPError);
+    try {
+      requireOAuth(ctxWith({ kind: "service-token", token: () => "t" }));
+    } catch (e) {
+      expect(e).toMatchObject(ROUTING_MISMATCH);
+    }
   });
 
   test("the bearer token is a GETTER, not a serializable field (review #2)", () => {
@@ -88,7 +104,14 @@ describe("requireGoogle / requireGithub — the cross-provider-token backstop (v
   });
 
   test("requireGoogle THROWS on a github credential — a GitHub bearer can never reach a googleapis handler", () => {
-    expect(() => requireGoogle(ctxWith(githubCred))).toThrow(/received a 'github'/);
+    expect(() => requireGoogle(ctxWith(githubCred))).toThrow(MCPError);
+    try {
+      requireGoogle(ctxWith(githubCred));
+    } catch (e) {
+      expect(e).toMatchObject(ROUTING_MISMATCH);
+      // No provider name leak to the client-facing surface.
+      expect(JSON.stringify((e as MCPError).toJsonRpc())).not.toContain("github");
+    }
   });
 
   test("requireGithub returns a github oauth credential", () => {
@@ -98,13 +121,29 @@ describe("requireGoogle / requireGithub — the cross-provider-token backstop (v
   });
 
   test("requireGithub THROWS on a google credential", () => {
-    expect(() => requireGithub(ctxWith(googleCred))).toThrow(/received a 'google'/);
+    expect(() => requireGithub(ctxWith(googleCred))).toThrow(MCPError);
+    try {
+      requireGithub(ctxWith(googleCred));
+    } catch (e) {
+      expect(e).toMatchObject(ROUTING_MISMATCH);
+      expect(JSON.stringify((e as MCPError).toJsonRpc())).not.toContain("google");
+    }
   });
 
   test("both still throw on a non-oauth credential (the base requireOAuth guard fires first)", () => {
-    expect(() => requireGoogle(ctxWith({ kind: "none" }))).toThrow(/requires an OAuth credential/);
+    expect(() => requireGoogle(ctxWith({ kind: "none" }))).toThrow(MCPError);
+    try {
+      requireGoogle(ctxWith({ kind: "none" }));
+    } catch (e) {
+      expect(e).toMatchObject(ROUTING_MISMATCH);
+    }
     expect(() =>
       requireGithub(ctxWith({ kind: "service-token", token: () => "t" })),
-    ).toThrow(/requires an OAuth credential/);
+    ).toThrow(MCPError);
+    try {
+      requireGithub(ctxWith({ kind: "service-token", token: () => "t" }));
+    } catch (e) {
+      expect(e).toMatchObject(ROUTING_MISMATCH);
+    }
   });
 });

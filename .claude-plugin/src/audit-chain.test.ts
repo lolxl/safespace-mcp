@@ -7,6 +7,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   auditEnd,
+  auditRecipientDeniedEvent,
+  auditSendApprovalEvent,
   canonicalJson,
   chainGenesis,
   computeRowMac,
@@ -175,5 +177,74 @@ describe("verifyChain", () => {
     const r = await verifyChain(auditPath(), await getOrCreateAuditSalt());
     expect(r.ok).toBe(true); // undetectable from inside the file — needs the out-of-band tip
     expect(r.chainedRows).toBe(3);
+  });
+
+  // v1.111 (#3) — an unchained row carrying an `event` field, interleaved AFTER the
+  // chain started, is a LEGITIMATELY-unchained row (the CLI's send-approval
+  // approved/denied actions; a separate writer process). It must be TOLERATED, not
+  // reported as a false BROKEN. (Contrast: the "INSERTING an unhashed row mid-chain"
+  // test above — a row with NO event field — stays a break.)
+  test("an unchained EVENT row interleaved mid-chain is TOLERATED (not false-BROKEN)", async () => {
+    await writeRows(2); // 2 chained rows
+    const rows = await readLines();
+    // a CLI send-approval row: has `event`, no `row_mac` (a separate writer process)
+    rows.splice(1, 0, { ts: "t", event: "send_approval_approved", tool: "gmail_send" });
+    await writeLines(rows);
+    const r = await verifyChain(auditPath(), await getOrCreateAuditSalt());
+    expect(r.ok).toBe(true);
+    expect(r.chainedRows).toBe(2);
+    expect(r.unchainedEventRows).toBe(1);
+    expect(r.brokenAt).toBeNull();
+  });
+
+  // v1.111 (#3) — the server-process forensic appenders (recipient-denied, share,
+  // webhook, cross-account) now join the tamper-evident chain, closing the deletion
+  // gap on exactly the denial rows an attacker would strip. The appender row carries
+  // a row_mac and the chain verifies end-to-end through it.
+  test("server-process appender rows join the chain (recipient-denied chained + verifies)", async () => {
+    await auditEnd(ctx("gmail_search"));
+    await auditRecipientDeniedEvent({
+      tool: "gmail_send",
+      email: "alice@example.com",
+      rejected_recipient_hashes: [],
+      rejected_count: 1,
+      total_recipients: 1,
+      duration_ms: 1,
+    });
+    await auditEnd(ctx("gmail_search"));
+    const rows = await readLines();
+    expect(rows).toHaveLength(3);
+    expect(rows[1]!.event).toBe("recipient_denied_by_policy");
+    expect(rows.every((r) => typeof r.row_mac === "string")).toBe(true); // appender now chained
+    const r = await verifyChain(auditPath(), await getOrCreateAuditSalt());
+    expect(r.ok).toBe(true);
+    expect(r.chainedRows).toBe(3);
+    expect(r.unchainedEventRows).toBe(0);
+  });
+
+  // v1.111 (#3) — send-approval is process-scoped: the SERVER's pending/consumed
+  // events join the chain; the CLI's approved/denied stay unchained (a separate
+  // writer). The chain still verifies, tolerating the unchained CLI row.
+  test("send-approval pending is chained; approved stays unchained but verify tolerates it", async () => {
+    const base = {
+      pending_id: "p1",
+      tool: "gmail_send",
+      fingerprint: "fp",
+      recipients: ["x@example.com"],
+      operator: "",
+    };
+    await auditEnd(ctx("gmail_search"));
+    await auditSendApprovalEvent({ ...base, event: "pending" }); // server → chained
+    await auditSendApprovalEvent({ ...base, event: "approved" }); // CLI → unchained
+    await auditEnd(ctx("gmail_search"));
+    const rows = await readLines();
+    const pending = rows.find((r) => r.event === "send_approval_pending")!;
+    const approved = rows.find((r) => r.event === "send_approval_approved")!;
+    expect(typeof pending.row_mac).toBe("string"); // server-process → chained
+    expect(approved.row_mac).toBeUndefined(); // CLI-process → unchained
+    const r = await verifyChain(auditPath(), await getOrCreateAuditSalt());
+    expect(r.ok).toBe(true);
+    expect(r.chainedRows).toBe(3); // 2 auditEnd + 1 pending
+    expect(r.unchainedEventRows).toBe(1); // the approved row, tolerated
   });
 });

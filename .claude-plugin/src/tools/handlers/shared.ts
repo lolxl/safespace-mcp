@@ -4,7 +4,15 @@
 
 import * as crypto from "node:crypto";
 
+import { MCPError } from "../../errors";
 import type { Credential, ToolContext } from "../types";
+
+/** v1.112.8 — stable fail-closed throw for the provider/credential guards below.
+ *  Generic MCPError (never a plain Error that leaks internal detail as -32603).
+ *  Does NOT echo which credential kind/provider arrived. */
+function throwCredentialMismatch(): never {
+  throw new MCPError("internal_routing_error", { reason: "credential_mismatch" });
+}
 
 /** v1.64 Phase B (B2 — Credential union, D3b). Base narrow: `ctx.credential` →
  *  the OAuth variant (kind only, provider-agnostic). The PROVIDER-asserting
@@ -13,15 +21,16 @@ import type { Credential, ToolContext } from "../types";
  *  handler that would send its token to the wrong API.
  *
  *  A non-oauth credential reaching an OAuth handler is an INTERNAL routing bug
- *  (the proxy routes by `authModel`), not a user-facing condition — hence a plain
- *  `Error` (never surfaced in practice). This is the R6 guard: a handler can never
- *  fabricate an accountId/token for a non-oauth kind, because the only path to
- *  those values runs through this narrow. */
+ *  (the proxy routes by `authModel`), not a user-facing condition. v1.112.8:
+ *  throws `internal_routing_error{credential_mismatch}` (stable MCPError) so the
+ *  client never sees a plain -32603 with internal message text. This is the R6
+ *  guard: a handler can never fabricate an accountId/token for a non-oauth kind,
+ *  because the only path to those values runs through this narrow. */
 export function requireOAuth(
   ctx: ToolContext,
 ): Extract<Credential, { kind: "oauth" }> {
   if (ctx.credential.kind !== "oauth") {
-    throw new Error("internal: handler requires an OAuth credential");
+    throwCredentialMismatch();
   }
   return ctx.credential;
 }
@@ -37,9 +46,7 @@ export function requireGoogle(
 ): Extract<Credential, { kind: "oauth" }> {
   const cred = requireOAuth(ctx);
   if (cred.provider !== "google") {
-    throw new Error(
-      `internal: a google-workspace handler received a '${cred.provider}' OAuth credential`,
-    );
+    throwCredentialMismatch();
   }
   return cred;
 }
@@ -52,9 +59,7 @@ export function requireGithub(
 ): Extract<Credential, { kind: "oauth" }> {
   const cred = requireOAuth(ctx);
   if (cred.provider !== "github") {
-    throw new Error(
-      `internal: a github handler received a '${cred.provider}' OAuth credential`,
-    );
+    throwCredentialMismatch();
   }
   return cred;
 }
@@ -68,9 +73,21 @@ export function requireNotion(
 ): Extract<Credential, { kind: "oauth" }> {
   const cred = requireOAuth(ctx);
   if (cred.provider !== "notion") {
-    throw new Error(
-      `internal: a notion handler received a '${cred.provider}' OAuth credential`,
-    );
+    throwCredentialMismatch();
+  }
+  return cred;
+}
+
+/** v1.114 (X) — the x analogue of {@link requireNotion}: narrow + assert
+ *  the x provider. The x read handlers narrow via this; a google / github / notion (or
+ *  any non-x) credential reaching one throws before its token is read (the
+ *  cross-provider backstop — a Google bearer can never reach api.x.com). */
+export function requireX(
+  ctx: ToolContext,
+): Extract<Credential, { kind: "oauth" }> {
+  const cred = requireOAuth(ctx);
+  if (cred.provider !== "x") {
+    throwCredentialMismatch();
   }
   return cred;
 }
@@ -82,17 +99,16 @@ export function requireNotion(
  *  A service-token handler is routed through `withNonOAuthContext`, whose
  *  `source.resolveCredential` only ever produces a `service-token` credential — so
  *  any other kind reaching such a handler is an INTERNAL routing bug, not a
- *  user-facing condition (hence a plain `Error`). This is the R6 guard for class B:
- *  a LINE handler can never fabricate / reach for an OAuth account, and an OAuth
- *  handler that mistakenly called this would throw. The token is read ONLY here,
- *  inline when building the Authorization header — never stored as a field. */
+ *  user-facing condition. v1.112.8: throws `internal_routing_error{credential_mismatch}`
+ *  (stable MCPError). This is the R6 guard for class B: a LINE handler can never
+ *  fabricate / reach for an OAuth account, and an OAuth handler that mistakenly
+ *  called this would throw. The token is read ONLY here, inline when building the
+ *  Authorization header — never stored as a field. */
 export function requireServiceToken(
   ctx: ToolContext,
 ): Extract<Credential, { kind: "service-token" }> {
   if (ctx.credential.kind !== "service-token") {
-    throw new Error(
-      "internal: service-token handler requires a service-token credential",
-    );
+    throwCredentialMismatch();
   }
   return ctx.credential;
 }

@@ -85,10 +85,12 @@ export async function enforceWebhookSecretsPresent(
   hasSecret: (p: WebhookProvider) => Promise<boolean> = async (p) =>
     (await readWebhookSigningSecret(p)) !== null,
 ): Promise<void> {
-  const missing: WebhookProvider[] = [];
-  for (const p of enabledWebhookProviders()) {
-    if (!(await hasSecret(p))) missing.push(p);
-  }
+  // Probe every enabled provider's secret in parallel (independent SecretBackend
+  // reads, no ordering dependency), then derive `missing` by filtering in
+  // provider order — same result + same reported order as the sequential loop.
+  const providers = enabledWebhookProviders();
+  const present = await Promise.all(providers.map((p) => hasSecret(p)));
+  const missing = providers.filter((_, i) => !present[i]);
   if (missing.length > 0) {
     throw new Error(
       `${ENV_WEBHOOK_PORT} is set but no signing secret is configured for: ${missing.join(", ")}. ` +

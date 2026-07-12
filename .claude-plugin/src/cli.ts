@@ -44,6 +44,12 @@ import {
   runNotionAccountSwitch,
   runNotionConsent,
 } from "./cli/notion";
+import {
+  runXAccountList,
+  runXAccountRevoke,
+  runXAccountSwitch,
+  runXConsent,
+} from "./cli/x";
 import { runRecipientCmd } from "./cli/recipient";
 import { runWhitelistCmd } from "./cli/whitelist";
 import { migrateV2, MigrationError } from "./migrate";
@@ -105,19 +111,22 @@ export interface CliDeps {
   runTool?: RunToolFn;
 }
 
-/** Pull an optional `--provider google|github` flag out of an arg list (default
- *  `google`), returning the provider + the remaining args. v1.70 (G3): OAuth
- *  accounts share the `consent` mental model across providers via a FLAG, not new
- *  subcommands. An unknown value fails LOUD (a typo can't silently fall back to
- *  google and consent the wrong provider). */
-function extractProvider(rest: string[]): { provider: "google" | "github" | "notion"; rest: string[] } {
+/** Pull an optional `--provider google|github|notion|x` flag out of an arg list
+ *  (default `google`), returning the provider + the remaining args. v1.70 (G3):
+ *  OAuth accounts share the `consent` mental model across providers via a FLAG, not
+ *  new subcommands. An unknown value fails LOUD (a typo can't silently fall back to
+ *  google and consent the wrong provider). v1.113 adds `x`. */
+function extractProvider(rest: string[]): {
+  provider: "google" | "github" | "notion" | "x";
+  rest: string[];
+} {
   const out: string[] = [];
-  let provider: "google" | "github" | "notion" = "google";
+  let provider: "google" | "github" | "notion" | "x" = "google";
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === "--provider") {
       const v = rest[++i];
-      if (v !== "google" && v !== "github" && v !== "notion") {
-        throw new CliError("--provider must be 'google', 'github', or 'notion'");
+      if (v !== "google" && v !== "github" && v !== "notion" && v !== "x") {
+        throw new CliError("--provider must be 'google', 'github', 'notion', or 'x'");
       }
       provider = v;
     } else {
@@ -150,6 +159,11 @@ export async function runCli(
       await runNotionConsent(io);
       return;
     }
+    if (provider === "x") {
+      // X consent takes NO positional — the user is discovered via GET /2/users/me.
+      await runXConsent(io);
+      return;
+    }
     const email = r[0];
     if (!email || !EMAIL_RE.test(email)) {
       throw new CliError("usage: safespace consent <email> [--re-auth]\n       email must be a valid address");
@@ -169,6 +183,10 @@ export async function runCli(
       await runNotionAccountList(io);
       return;
     }
+    if (provider === "x") {
+      await runXAccountList(io);
+      return;
+    }
     await runAccountList(io);
     return;
   }
@@ -186,6 +204,11 @@ export async function runCli(
     if (provider === "notion") {
       // v1.79 multi-workspace: a <id-or-name> positional selects which to activate.
       await runNotionAccountSwitch(r[0], io);
+      return;
+    }
+    if (provider === "x") {
+      // Multi-account: a <id-or-username> positional selects which to activate.
+      await runXAccountSwitch(r[0], io);
       return;
     }
     const email = r[0];
@@ -209,6 +232,11 @@ export async function runCli(
     if (provider === "notion") {
       // v1.79 multi-workspace: a <id-or-name> positional selects which to revoke.
       await runNotionAccountRevoke(r[0], io);
+      return;
+    }
+    if (provider === "x") {
+      // Multi-account: a <id-or-username> positional selects which to revoke.
+      await runXAccountRevoke(r[0], io);
       return;
     }
     const email = r[0];

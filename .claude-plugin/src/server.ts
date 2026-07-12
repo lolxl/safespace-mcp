@@ -13,7 +13,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { MCPError } from "./errors";
-import { tierSatisfies } from "./tier";
+import { tierSatisfies, type Tier } from "./tier";
 import { EnvOperatorResolver, type OperatorResolver } from "./identity/operator-context";
 import { IMPLEMENTED_TOOLS, TOOL_REGISTRY } from "./tools/registry";
 import { sourceFor } from "./tools/source";
@@ -27,6 +27,31 @@ import pkg from "../package.json" with { type: "json" };
 
 const SERVER_NAME = "safespace-mcp";
 const SERVER_VERSION = pkg.version;
+
+// Cold-path: the tools/list projection is a PURE function of one of exactly 3
+// tier values, yet the handler re-walked all of TOOL_REGISTRY + re-allocated the
+// projected array on EVERY request (wasteful under HTTP polling). Precompute one
+// array per tier at module load — iterating Object.values in registry order so
+// the on-wire TOOL_ORDER stays byte-identical — and the handler becomes a keyed
+// lookup. The per-request operator.resolve() stays live (below), so tier
+// freshness (env re-read each request under Model A) is unchanged; only the
+// projection is memoized. Treat the per-tier arrays as read-only — the SDK
+// serializes them without mutation (same shared-reference convention as the
+// inputSchema objects, which were already shared via def.inputSchema).
+const TOOLS_BY_TIER = (() => {
+  const implemented = Object.values(TOOL_REGISTRY).filter((def) =>
+    IMPLEMENTED_TOOLS.has(def.name),
+  );
+  const build = (tier: Tier) =>
+    implemented
+      .filter((def) => tierSatisfies(tier, def.min_tier))
+      .map((def) => ({
+        name: def.name,
+        description: def.description,
+        inputSchema: def.inputSchema,
+      }));
+  return { read: build("read"), write: build("write"), share: build("share") };
+})();
 
 function renderMcpError(err: MCPError): {
   content: Array<{ type: "text"; text: string }>;
@@ -67,17 +92,10 @@ export function createMcpServer(
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     // v1.74 PR-2a — filter by THIS operator's tier (was the process-global
     // currentTier()). Model A default re-reads env per request → byte-identical.
+    // The tier resolve stays per-request; only the projection is memoized
+    // (TOOLS_BY_TIER, built once at module load), so freshness is unchanged.
     const tier = operator.resolve().tier;
-    return {
-      tools: Object.values(TOOL_REGISTRY)
-        .filter((def) => IMPLEMENTED_TOOLS.has(def.name))
-        .filter((def) => tierSatisfies(tier, def.min_tier))
-        .map((def) => ({
-          name: def.name,
-          description: def.description,
-          inputSchema: def.inputSchema,
-        })),
-    };
+    return { tools: TOOLS_BY_TIER[tier] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {

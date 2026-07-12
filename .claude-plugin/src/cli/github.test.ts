@@ -57,14 +57,14 @@ describe("--provider parsing", () => {
   test("--provider bogus → CliError on every account command", async () => {
     const { io } = captureIO();
     await expect(runCli(["account-list", "--provider", "bogus"], io)).rejects.toThrow(
-      /--provider must be 'google', 'github', or 'notion'/,
+      /--provider must be 'google', 'github', 'notion', or 'x'/,
     );
   });
 
   test("--provider with no value → CliError", async () => {
     const { io } = captureIO();
     await expect(runCli(["account-list", "--provider"], io)).rejects.toThrow(
-      /--provider must be 'google', 'github', or 'notion'/,
+      /--provider must be 'google', 'github', 'notion', or 'x'/,
     );
   });
 

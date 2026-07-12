@@ -68,10 +68,10 @@ async function seed(workspaceId: string, workspaceName: string, token = "ntn_x")
 }
 
 describe("--provider parsing (notion)", () => {
-  test("--provider bogus → CliError naming the three providers", async () => {
+  test("--provider bogus → CliError naming the four providers", async () => {
     const { io } = captureIO();
     await expect(runCli(["account-list", "--provider", "bogus"], io)).rejects.toThrow(
-      /--provider must be 'google', 'github', or 'notion'/,
+      /--provider must be 'google', 'github', 'notion', or 'x'/,
     );
   });
 });

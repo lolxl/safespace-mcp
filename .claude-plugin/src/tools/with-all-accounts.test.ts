@@ -414,6 +414,54 @@ describe("withAllAccounts — audit shape (design §8, sec-rev hooks 4 + 11)", (
       fx2.outerAuditCalls[0]?.argsHash,
     );
   });
+
+  // v1.111 (#2) — forensic parity with the single-account choke point. The inner
+  // row for a per-account FAILURE that threw a real MCPError now carries the precise
+  // numeric error_code + the Source id; both branches carry source. Without the
+  // error_code, the suspicious / policy-decisions readers (which key off it) were
+  // blind to *_all per-account failures.
+  test("#2: inner rows carry source on both branches + numeric error_code on failure", async () => {
+    const fx = makeFixture({ emails: ["a@x.com", "c@x.com"] });
+    await withAllAccounts<{ ok: true }>(
+      "gmail_search_all",
+      { query: "x" },
+      async (sub) => {
+        if (sub.email === "c@x.com") throw new MCPError("rate_limited"); // -32005
+        return { ok: true };
+      },
+      { requiredScopes: SCOPES },
+      fx.deps,
+    );
+    const okRow = fx.innerAuditCalls.find((r) => r.status === "ok")!;
+    const failRow = fx.innerAuditCalls.find((r) => r.status === "error")!;
+    expect(okRow.source).toBe("google-workspace");
+    expect(failRow.source).toBe("google-workspace");
+    // the precise code, not absent — rate_limited.
+    expect(failRow.errorCode).toBe(new MCPError("rate_limited").code);
+    // ok rows have no errorCode (presence-as-signal, mirrors with-context.ts).
+    expect(okRow.errorCode).toBeUndefined();
+  });
+
+  // v1.111 (#2) — a PRE-CALL plan failure (scope_mismatch, never reaches fn())
+  // reaches forensic parity too: its inner row carries the numeric code.
+  test("#2: pre-call scope_mismatch inner row carries the numeric error_code", async () => {
+    const fx = makeFixture({
+      emails: ["a@x.com"],
+      // granted a real-but-unrelated scope → does NOT satisfy the required gmail.readonly
+      scopesPerAccount: { "a@x.com": ["https://www.googleapis.com/auth/drive.readonly"] },
+    });
+    await withAllAccounts<{ ok: true }>(
+      "gmail_search_all",
+      { query: "x" },
+      async () => ({ ok: true }),
+      { requiredScopes: SCOPES },
+      fx.deps,
+    );
+    const failRow = fx.innerAuditCalls.find((r) => r.status === "error")!;
+    expect(failRow).toBeDefined();
+    expect(failRow.errorCode).toBe(new MCPError("scope_mismatch").code); // -32004
+    expect(failRow.source).toBe("google-workspace");
+  });
 });
 
 describe("withAllAccounts — does NOT mutate lastUsedAccount (design §3)", () => {

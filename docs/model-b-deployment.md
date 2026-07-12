@@ -18,7 +18,8 @@
 > single-user Model A, and single-user / multi-user must NOT be mixed — a
 > deployment is either all-local or all-shared; the A→B move is a CUTOVER,
 > not a blend.**
-> Companion to `docs/ARCHITECTURE.md` (as-built structure). Written against `51ae726`
+> Companion to `docs/safety-gateway-thesis.md` (north star) and
+> `docs/ARCHITECTURE.md` (as-built structure). Written against `51ae726`
 > (post-v1.70.4).
 
 ---

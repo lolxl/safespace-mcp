@@ -17,7 +17,9 @@
 // NONE of the registry's channel discriminators match (e.g., future-channel
 // drift), the row is bucketed under "unknown" + a stderr warning fires.
 
-import { AUDIT_META_CHANNELS } from "../../audit";
+// Import the META-CHANNEL registry from the PURE leaf, NOT the barrel — keeps the
+// v1.89 chain WRITER (audit.ts) off this CLI reader's import path (the edge break).
+import { AUDIT_META_CHANNELS } from "../../audit/meta-channels";
 import { CliError, type CliIO } from "../../cli";
 import { strictParseIso8601, streamAuditRows, type AuditRow } from "./reader";
 

@@ -30,13 +30,15 @@ export interface ToolDef {
    *  authorize / mapError / skipFields strategies from this field. Only a
    *  label this cycle — nothing branches on it yet. */
   source?: string;
-  /** v1.64 Phase B (B0 relabel) — the data-flow direction, the label the
-   *  centralized egress gate (B3) will key off. "outbound-write" = the call
-   *  sends agent-authored content to a recipient OUTSIDE the user's own
-   *  surface (gmail_send / gmail_create_draft — a draft is a latent send) and
-   *  so must pass the recipient/secret/tainted egress gates. "inbound-read"
-   *  (or unset) = no egress gate. ONLY a label this cycle: B3 wires it to
-   *  enforceEgressGates; until then nothing reads it (the gates stay inline in
-   *  handlers/gmail.ts, the as-built §1 reality). */
+  /** Classification LABEL for the data-flow direction — read by the test-only
+   *  egress sentinels (`egress-coverage.test.ts` + `egress-callsite.test.ts`),
+   *  NOT by any runtime choke point today. `"outbound-write"` ⇔ membership in
+   *  `CENTRALIZED_EGRESS` (the tool reaches an external party and is gated by
+   *  a centralized `enforce*EgressGates` call in its handler). Handler-gated
+   *  external tools (`HANDLER_GATED_EXTERNAL` — drive share, YouTube comment/
+   *  video writes) MUST leave this field unset; the coverage sentinel enforces
+   *  both directions of that invariant. `"inbound-read"` (or unset on a non-
+   *  external tool) means no egress classification. Pipeline-fired egress
+   *  (auto-routing off this field inside with-context) remains future work. */
   direction?: "inbound-read" | "outbound-write";
 }

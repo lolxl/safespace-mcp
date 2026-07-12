@@ -24,6 +24,11 @@ interface VerifyResult {
   ok: boolean;
   chainedRows: number;
   legacyRows: number;
+  /** Rows with no `row_mac` but carrying an `event` field, seen AFTER the chain
+   *  started — legitimately unchained (the CLI's send-approval approved/denied
+   *  actions, a separate writer process; or pre-chain-upgrade bare-appender rows in
+   *  existing logs). Tolerated + counted, NOT a break. */
+  unchainedEventRows: number;
   /** The chain tip: on an intact chain the last row's MAC; on a BROKEN chain the
    *  last VERIFIED row's MAC (the known-good prefix tip, not the file's raw last row). */
   tipMac: string | null;
@@ -37,33 +42,50 @@ function rowWithoutMac(row: AuditRow): Record<string, unknown> {
 }
 
 /** Walk the chain. Legacy rows (no `row_mac`) BEFORE the chain starts are a
- *  pre-upgrade prefix (skipped); a row with no `row_mac` AFTER the chain has
- *  started is a break (an inserted/legacy row mid-chain). */
+ *  pre-upgrade prefix (skipped). AFTER the chain has started, a row with no
+ *  `row_mac` is tolerated IFF it carries an `event` field (a legitimately-
+ *  unchained event row — the CLI's send-approval actions, a separate writer; or a
+ *  pre-upgrade bare-appender row in an existing log); a no-mac row with NO `event`
+ *  field mid-chain is a break (a chained row stripped of its MAC, or an insert). */
 export async function verifyChain(filePath: string, salt: Buffer): Promise<VerifyResult> {
   let prevMac: string | null = null; // null = chain not yet started
   let chainedRows = 0;
   let legacyRows = 0;
+  let unchainedEventRows = 0;
   let index = 0;
   for await (const row of streamAuditRows(filePath)) {
     index++;
     const mac = row.row_mac;
     if (typeof mac !== "string") {
       if (prevMac === null) {
-        legacyRows++; // pre-upgrade unhashed prefix
+        legacyRows++; // pre-upgrade unhashed prefix (chain not yet started)
         continue;
       }
-      return { ok: false, chainedRows, legacyRows, tipMac: prevMac, brokenAt: index, reason: "unhashed_after_chain" };
+      // Unchained row AFTER the chain started. An `event:` row is legitimately
+      // unchained — the `safespace` CLI's send-approval approved/denied actions are
+      // a SEPARATE writer process that must not extend the single-writer chain, and
+      // pre-upgrade bare-appender rows persist in existing logs. Tolerate it (skip
+      // WITHOUT advancing prevMac, so the chained subsequence still verifies
+      // end-to-end). A no-mac row with NO `event` field stays a break: it is a
+      // chained row stripped of its MAC or a non-event insert — and stripping a
+      // chained row's MAC ALSO breaks the NEXT chained row's verify, so tolerating
+      // event rows does not weaken tamper detection of the chained subsequence.
+      if (typeof (row as Record<string, unknown>).event === "string") {
+        unchainedEventRows++;
+        continue;
+      }
+      return { ok: false, chainedRows, legacyRows, unchainedEventRows, tipMac: prevMac, brokenAt: index, reason: "unhashed_after_chain" };
     }
     const expected = computeRowMac(salt, prevMac ?? chainGenesis(), rowWithoutMac(row));
     // Plain string `!==` (not timingSafeEqual): this is OFFLINE forensic verification,
     // not an online auth oracle — there is no attacker timing the comparison.
     if (expected !== mac) {
-      return { ok: false, chainedRows, legacyRows, tipMac: prevMac, brokenAt: index, reason: "mac_mismatch" };
+      return { ok: false, chainedRows, legacyRows, unchainedEventRows, tipMac: prevMac, brokenAt: index, reason: "mac_mismatch" };
     }
     prevMac = mac;
     chainedRows++;
   }
-  return { ok: true, chainedRows, legacyRows, tipMac: prevMac, brokenAt: null, reason: null };
+  return { ok: true, chainedRows, legacyRows, unchainedEventRows, tipMac: prevMac, brokenAt: null, reason: null };
 }
 
 export async function runAuditVerify(args: string[], io: CliIO): Promise<void> {
@@ -80,7 +102,12 @@ export async function runAuditVerify(args: string[], io: CliIO): Promise<void> {
   if (json) {
     io.out(JSON.stringify(r));
   } else if (r.ok) {
-    const legacy = r.legacyRows > 0 ? ` (${r.legacyRows} legacy unhashed prefix row${r.legacyRows === 1 ? "" : "s"} skipped)` : "";
+    const skips: string[] = [];
+    if (r.legacyRows > 0)
+      skips.push(`${r.legacyRows} legacy unhashed prefix row${r.legacyRows === 1 ? "" : "s"}`);
+    if (r.unchainedEventRows > 0)
+      skips.push(`${r.unchainedEventRows} unchained event row${r.unchainedEventRows === 1 ? "" : "s"}`);
+    const legacy = skips.length > 0 ? ` (${skips.join(", ")} skipped)` : "";
     if (r.chainedRows === 0) {
       io.out(`audit chain: no chained rows yet${legacy} — nothing to verify`);
     } else {

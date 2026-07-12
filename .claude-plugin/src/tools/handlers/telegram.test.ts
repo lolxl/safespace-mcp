@@ -99,7 +99,7 @@ describe("telegramSendMessage — credential narrow (R6)", () => {
     const oauthCtx: ToolContext = { allowedAccounts: null, credential: oauthCred(), tier: "share", audit: NOOP_AUDIT };
     await expect(
       telegramSendMessage(oauthCtx, { chat_id: CHAT, text: "x" }, { fetchImpl: f.impl }),
-    ).rejects.toThrow(/requires a service-token credential/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
   });
 });
 

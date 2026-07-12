@@ -12,7 +12,7 @@ untrusted-content tagging, scope·tier·burst·recipient egress gates, autonomy 
 full audit trail on every call. **The envelope is the product; sources are connectors behind it.**
 
 Connectors are evaluated by **credential class**:
-- **A. OAuth-account** — Google Workspace (the flagship reference connector), GitHub, Notion.
+- **A. OAuth-account** — Google Workspace (the flagship reference connector), GitHub, Notion, X.
 - **B. service-token** — one token in the `SecretBackend`, no OAuth (LINE · Telegram · Discord · Slack · Mattermost).
 - **C. keyless** — no credential, pure inbound-sanitize (web-fetch, filesystem read).
 
@@ -24,9 +24,9 @@ of the Model B multi-operator engine (axis 2).
 
 ## Current surface
 
-127 MCP tools across 10 connectors — Google Workspace (Gmail · Drive · Docs · Calendar ·
+130 MCP tools across 11 connectors — Google Workspace (Gmail · Drive · Docs · Calendar ·
 Contacts · YouTube + Analytics · Tasks · Sheets · Slides · Forms, the flagship · 85) · GitHub
-(18) · Notion (8) · web-fetch · fs-read · LINE · Telegram · Discord · Slack · Mattermost — plus an
+(18) · Notion (8) · X (3, OAuth PKCE) · web-fetch · fs-read · LINE · Telegram · Discord · Slack · Mattermost — plus an
 inbound webhook inbox (`inbox_read`). Two deployment models: **Model A** (single-user, stdio,
 the default) and **Model B** (a shared multi-operator server over a private tailnet). Tokens live
 behind a `SecretBackend` (macOS Keychain / encrypted Linux `FileBackend`).
@@ -38,7 +38,7 @@ The envelope's controls (full detail + threat model in [`SECURITY.md`](SECURITY.
 - **Privilege tier** (`SAFESPACE_TIER=read|write|share`, read default) — filters the exposed tool set; no per-call escalation.
 - **Recipient allowlist** — gates `gmail_send` / `gmail_create_draft` / `drive_share_file` (user shares); rejected recipients are HMAC-hashed in the audit log.
 - **Drive share whitelist** — folder-subtree + file-ID allowlist at the `drive_share_file` boundary.
-- **Per-target write allowlists** — default-deny gates on the public-surface writes (GitHub issue / PR / approve, YouTube comment / video).
+- **Per-target write allowlists** — default-deny gates on the public-surface writes (GitHub issue / PR / approve, YouTube comment / video, X post).
 - **Filesystem read gate** — default-deny, realpath-contained root allowlist, no path-existence oracle.
 - **Outbound URL / SSRF gate** — the `web_fetch` scheme / port / private-IP / DNS-rebind / per-hop-redirect gate.
 - **Inbound sanitize pipeline** — zero-width strip → confusables normalize → pattern flag → truncate → `<untrusted-source-${nonce}>` wrap, with per-source `skipFields`.

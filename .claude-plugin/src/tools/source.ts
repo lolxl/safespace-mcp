@@ -41,7 +41,7 @@ import { readActive } from "../auth/active";
 import { loadIndex } from "../auth/keychain";
 import { refreshAccessToken, type RefreshDeps } from "../auth/refresh";
 import { scopeSatisfies } from "../auth/scopes";
-import { readServiceToken } from "../auth/service-token-store";
+import { readServiceToken, type ServiceName } from "../auth/service-token-store";
 import { readGithubAccount, readGithubToken } from "../auth/github/store";
 import {
   findNotionWorkspace,
@@ -49,7 +49,13 @@ import {
   readNotionActiveWorkspace,
   readNotionToken,
 } from "../auth/notion/oauth";
-import { MCPError } from "../errors";
+import {
+  findXAccount,
+  getValidAccessToken,
+  readXAccounts,
+  readXActiveAccount,
+} from "../auth/x/oauth";
+import { MCPError, type ErrorName } from "../errors";
 import { toGoogleError, type GoogleErrorContext } from "../google-api/errors";
 import { mapWebFetchError } from "../policy/url-gate";
 import { mapFsReadError } from "../policy/fs-gate";
@@ -181,6 +187,58 @@ export interface NonOAuthSource extends BaseSource {
  *  so each choke point narrows to exactly the strategies it consumes. */
 export type Source = OAuthSource | NonOAuthSource;
 
+/** The SHARED per-connector error mapper (D4): pass an `MCPError` through unchanged
+ *  (a handler's own validation reject keeps its precise code), else wrap ANY other
+ *  thrown value as `errorName` carrying ONLY a closed-set `reason` (default
+ *  `"api_error"`). The generic branch NEVER echoes a token, request URL, recipient
+ *  id, or message content — the entire `err` is discarded. v1.112.4 collapses the 8
+ *  byte-identical `map*Error` clones (line/telegram/discord/slack/mattermost/notion/
+ *  github + the webhook inbox's `"store_unavailable"`) onto this one factory. */
+function passthroughOrGeneric(errorName: ErrorName, reason = "api_error") {
+  return (err: unknown, _ctx: GoogleErrorContext): Error => {
+    if (err instanceof MCPError) return err;
+    return new MCPError(errorName, { reason });
+  };
+}
+
+/** v1.112.4 — the class-B SERVICE-TOKEN source factory. The 5 service-token
+ *  connectors (LINE / Telegram / Discord / Slack / Mattermost) are byte-identical
+ *  modulo `id`, `skipFields`, the `*_api_failed` error code, and the SecretBackend
+ *  `storeKey` — so they collapse onto this one constructor (mirrors the v1.112.3
+ *  service-token ALLOWLIST factory). `storeKey` is kept a SEPARATE param from `id`
+ *  (today they coincide) so a future connector whose audit id ≠ its store key cannot
+ *  silently cross-wire. The produced descriptor's `authorize` is the service-token
+ *  no-op (no OAuth scope; tier is proxy-enforced; token PRESENCE is enforced here in
+ *  `resolveCredential`, throwing `errorName{no_token}`). NOT used for the OAuth
+ *  sources — their `resolveAccount`/confinement logic stays hand-written. */
+function makeServiceTokenSource(opts: {
+  readonly id: ServiceName;
+  readonly storeKey: ServiceName;
+  readonly errorName: ErrorName;
+  readonly skipFields: ReadonlySet<string>;
+}): NonOAuthSource {
+  return {
+    id: opts.id,
+    authModel: "service-token",
+    skipFields: opts.skipFields,
+    mapError: passthroughOrGeneric(opts.errorName),
+    authorize() {
+      // service-token — no OAuth scope to check; tier is enforced by the proxy +
+      // min_tier. Token PRESENCE is enforced in resolveCredential (throws
+      // <id>_api_failed{no_token}), so authorize stays a no-op.
+    },
+    async resolveCredential(): Promise<Credential> {
+      const token = await readServiceToken(opts.storeKey);
+      if (token === null) {
+        throw new MCPError(opts.errorName, { reason: "no_token" });
+      }
+      // token is a GETTER, never a serializable field (types.ts) — JSON.stringify of
+      // a ToolContext can't leak the bearer token.
+      return { kind: "service-token", token: () => token };
+    },
+  };
+}
+
 /** The flagship reference connector — Google Workspace (84 tools across Gmail /
  *  Drive / Docs / Calendar / Contacts / YouTube / Tasks / Sheets / Slides /
  *  Forms). Its strategies are today's choke-point code, lifted verbatim. */
@@ -259,7 +317,8 @@ export const googleWorkspace: OAuthSource = {
       // v1.72 — type-unreachable backstop: OAuthResolveDeps.accountId is REQUIRED,
       // so the choke point cannot reach here without a resolved id. Kept (defense in
       // depth) to catch an `as any` bypass; a missing id is an internal wiring bug.
-      throw new Error("internal: google-workspace resolveCredential requires accountId");
+      // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
+      throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
     }
     // First call: deps.force falsy → pass deps.refresh unchanged. 401 retry:
     // deps.force true → {...refresh, force:true}.
@@ -329,14 +388,6 @@ const WEBHOOK_SKIP_FIELDS: ReadonlySet<string> = new Set([
   "channel_id",
 ]);
 
-/** Per-source error mapper for the webhook inbox — MCPError passthrough (the handler
- *  already maps a corrupt-store throw to inbox_read_failed); any other thrown value
- *  becomes a generic inbox_read_failed. NEVER echoes message content. */
-function mapInboxError(err: unknown, _ctx: GoogleErrorContext): Error {
-  if (err instanceof MCPError) return err;
-  return new MCPError("inbox_read_failed", { reason: "store_unavailable" });
-}
-
 /** v1.102 (W0) — the inbound-webhook inbox as a KEYLESS source. `inbox_read` reads a
  *  LOCAL store the listener populated → `authModel:"none"` (no account, no token; the
  *  signing secret is LISTENER infra, not a tool credential — docs/v1.102 §5.0). Routes
@@ -347,7 +398,10 @@ export const webhook: NonOAuthSource = {
   id: "webhook",
   authModel: "none",
   skipFields: WEBHOOK_SKIP_FIELDS,
-  mapError: mapInboxError,
+  // MCPError passthrough (the handler already maps a corrupt-store throw to
+  // inbox_read_failed); else a generic inbox_read_failed{store_unavailable}. NEVER
+  // echoes message content.
+  mapError: passthroughOrGeneric("inbox_read_failed", "store_unavailable"),
   authorize() {
     // keyless — no scope, no token; tier is enforced by the proxy + min_tier.
   },
@@ -368,40 +422,17 @@ const LINE_SKIP_FIELDS: ReadonlySet<string> = new Set([
   "quoteToken",
 ]);
 
-/** Per-source error mapper for LINE — MCPError passthrough (the handler already
- *  maps HTTP-status-specific failures to line_api_failed with a closed-set reason);
- *  any other thrown value becomes a generic line_api_failed. Mirrors
- *  mapWebFetchError. NEVER echoes the token or recipient id. */
-function mapLineError(err: unknown, _ctx: GoogleErrorContext): Error {
-  if (err instanceof MCPError) return err;
-  return new MCPError("line_api_failed", { reason: "api_error" });
-}
-
 /** v1.66 Phase C PR 2 — the first class-B SERVICE-TOKEN connector: LINE Official
- *  Account (Messaging API). One long-lived channel access token in the
- *  service-token store (env → SecretBackend), no OAuth. `authModel:"service-token"`
- *  routes its tools through `withNonOAuthContext`; `direction:"outbound-write"` on
- *  line_push_message fires the egress gates. */
-export const line: NonOAuthSource = {
+ *  Account (Messaging API). One long-lived channel access token in the service-token
+ *  store (env → SecretBackend), no OAuth. `authModel:"service-token"` routes its tools
+ *  through `withNonOAuthContext`; `direction:"outbound-write"` on line_push_message
+ *  fires the egress gates. */
+export const line: NonOAuthSource = makeServiceTokenSource({
   id: "line",
-  authModel: "service-token",
+  storeKey: "line",
+  errorName: "line_api_failed",
   skipFields: LINE_SKIP_FIELDS,
-  mapError: mapLineError,
-  authorize() {
-    // service-token — no OAuth scope to check; tier is enforced by the proxy +
-    // min_tier. Token PRESENCE is enforced in resolveCredential (throws
-    // line_api_failed{no_token}), so authorize stays a no-op.
-  },
-  async resolveCredential(): Promise<Credential> {
-    const token = await readServiceToken("line");
-    if (token === null) {
-      throw new MCPError("line_api_failed", { reason: "no_token" });
-    }
-    // token is a GETTER, never a serializable field (types.ts) — JSON.stringify
-    // of a ToolContext can't leak the bearer token.
-    return { kind: "service-token", token: () => token };
-  },
-};
+});
 
 /** Opaque/structural Telegram keys the sanitize tree-walk passes through unwrapped (R8(b):
  *  each connector owns its set; per-source skipFields REPLACES the global SKIP_FIELDS, so
@@ -424,39 +455,16 @@ const TELEGRAM_SKIP_FIELDS: ReadonlySet<string> = new Set([
   "type",
 ]);
 
-/** Per-source error mapper for Telegram — MCPError passthrough (the handler already
- *  maps HTTP-status-specific failures to telegram_api_failed with a closed-set reason);
- *  any other thrown value becomes a generic telegram_api_failed. Mirrors mapLineError.
- *  NEVER echoes the token, the request URL, or the recipient id. */
-function mapTelegramError(err: unknown, _ctx: GoogleErrorContext): Error {
-  if (err instanceof MCPError) return err;
-  return new MCPError("telegram_api_failed", { reason: "api_error" });
-}
-
 /** v1.68 — the SECOND class-B SERVICE-TOKEN connector: Telegram Bot (Bot API). One
  *  long-lived bot token in the service-token store (env → SecretBackend), no OAuth.
  *  `authModel:"service-token"` routes its tools through `withNonOAuthContext`;
  *  `direction:"outbound-write"` on telegram_send_message fires the egress gates. */
-export const telegram: NonOAuthSource = {
+export const telegram: NonOAuthSource = makeServiceTokenSource({
   id: "telegram",
-  authModel: "service-token",
+  storeKey: "telegram",
+  errorName: "telegram_api_failed",
   skipFields: TELEGRAM_SKIP_FIELDS,
-  mapError: mapTelegramError,
-  authorize() {
-    // service-token — no OAuth scope to check; tier is enforced by the proxy +
-    // min_tier. Token PRESENCE is enforced in resolveCredential (throws
-    // telegram_api_failed{no_token}), so authorize stays a no-op.
-  },
-  async resolveCredential(): Promise<Credential> {
-    const token = await readServiceToken("telegram");
-    if (token === null) {
-      throw new MCPError("telegram_api_failed", { reason: "no_token" });
-    }
-    // token is a GETTER, never a serializable field (types.ts) — JSON.stringify of a
-    // ToolContext can't leak the bot token.
-    return { kind: "service-token", token: () => token };
-  },
-};
+});
 
 /** Opaque Discord snowflakes that must NOT be confusable-normalized by sanitize
  *  (R8(b): each connector owns its opaque-key set). `channel_id` is the only id in
@@ -466,39 +474,16 @@ export const telegram: NonOAuthSource = {
  *  aren't in the constructed response). Revisit when an inbound/read Discord tool ships. */
 const DISCORD_SKIP_FIELDS: ReadonlySet<string> = new Set(["channel_id"]);
 
-/** Per-source error mapper for Discord — MCPError passthrough (the handler already
- *  maps HTTP-status-specific failures to discord_api_failed with a closed-set reason);
- *  any other thrown value becomes a generic discord_api_failed. Mirrors mapTelegramError.
- *  NEVER echoes the bot token or the channel id. */
-function mapDiscordError(err: unknown, _ctx: GoogleErrorContext): Error {
-  if (err instanceof MCPError) return err;
-  return new MCPError("discord_api_failed", { reason: "api_error" });
-}
-
 /** v1.69 — the THIRD class-B SERVICE-TOKEN connector: Discord Bot (REST API). One
  *  long-lived bot token in the service-token store (env → SecretBackend), no OAuth.
  *  `authModel:"service-token"` routes its tools through `withNonOAuthContext`;
  *  `direction:"outbound-write"` on discord_send_message fires the egress gates. */
-export const discord: NonOAuthSource = {
+export const discord: NonOAuthSource = makeServiceTokenSource({
   id: "discord",
-  authModel: "service-token",
+  storeKey: "discord",
+  errorName: "discord_api_failed",
   skipFields: DISCORD_SKIP_FIELDS,
-  mapError: mapDiscordError,
-  authorize() {
-    // service-token — no OAuth scope to check; tier is enforced by the proxy +
-    // min_tier. Token PRESENCE is enforced in resolveCredential (throws
-    // discord_api_failed{no_token}), so authorize stays a no-op.
-  },
-  async resolveCredential(): Promise<Credential> {
-    const token = await readServiceToken("discord");
-    if (token === null) {
-      throw new MCPError("discord_api_failed", { reason: "no_token" });
-    }
-    // token is a GETTER, never a serializable field (types.ts) — JSON.stringify of a
-    // ToolContext can't leak the bot token.
-    return { kind: "service-token", token: () => token };
-  },
-};
+});
 
 /** Opaque Slack ids/timestamps/cursors that must NOT be wrapped/normalized by sanitize
  *  (R8(b): each connector owns its opaque-key set). Per-source skipFields REPLACES the
@@ -524,39 +509,16 @@ const SLACK_SKIP_FIELDS: ReadonlySet<string> = new Set([
   "tz",
 ]);
 
-/** Per-source error mapper for Slack — MCPError passthrough (the handler already maps
- *  HTTP-status + the chat.postMessage `{ok:false}` body to slack_api_failed with a
- *  closed-set reason); any other thrown value becomes a generic slack_api_failed. Mirrors
- *  mapDiscordError. NEVER echoes the bot token or the channel id. */
-function mapSlackError(err: unknown, _ctx: GoogleErrorContext): Error {
-  if (err instanceof MCPError) return err;
-  return new MCPError("slack_api_failed", { reason: "api_error" });
-}
-
 /** v1.95 — the FOURTH class-B SERVICE-TOKEN connector: Slack Bot (Web API). One
  *  long-lived bot token in the service-token store (env → SecretBackend), no OAuth.
  *  `authModel:"service-token"` routes its tools through `withNonOAuthContext`;
  *  `direction:"outbound-write"` on slack_send_message fires the egress gates. */
-export const slack: NonOAuthSource = {
+export const slack: NonOAuthSource = makeServiceTokenSource({
   id: "slack",
-  authModel: "service-token",
+  storeKey: "slack",
+  errorName: "slack_api_failed",
   skipFields: SLACK_SKIP_FIELDS,
-  mapError: mapSlackError,
-  authorize() {
-    // service-token — no OAuth scope to check; tier is enforced by the proxy + min_tier.
-    // Token PRESENCE is enforced in resolveCredential (throws slack_api_failed{no_token}),
-    // so authorize stays a no-op.
-  },
-  async resolveCredential(): Promise<Credential> {
-    const token = await readServiceToken("slack");
-    if (token === null) {
-      throw new MCPError("slack_api_failed", { reason: "no_token" });
-    }
-    // token is a GETTER, never a serializable field (types.ts) — JSON.stringify of a
-    // ToolContext can't leak the bot token.
-    return { kind: "service-token", token: () => token };
-  },
-};
+});
 
 /** v1.107 — the per-source opaque-key set for Mattermost. REPLACES the global SKIP_FIELDS,
  *  so it MUST list every opaque/structural key the mattermost shapers emit — and ONLY those:
@@ -577,38 +539,19 @@ const MATTERMOST_SKIP_FIELDS: ReadonlySet<string> = new Set([
   "prev_post_id",
 ]);
 
-/** Per-source error mapper for Mattermost — MCPError passthrough (the handler/client already
- *  map HTTP-status to mattermost_api_failed with a closed-set reason); any other thrown value
- *  becomes a generic mattermost_api_failed. NEVER echoes the token, server URL, or any id. */
-function mapMattermostError(err: unknown, _ctx: GoogleErrorContext): Error {
-  if (err instanceof MCPError) return err;
-  return new MCPError("mattermost_api_failed", { reason: "api_error" });
-}
-
 /** v1.107 — the FIFTH class-B SERVICE-TOKEN connector, and the FIRST self-hosted one: a
  *  Mattermost bot/personal-access token in the service-token store (env → SecretBackend),
  *  no OAuth. `authModel:"service-token"` routes its tools through `withNonOAuthContext`;
  *  `direction:"outbound-write"` on mattermost_send_message fires the egress gates. The
  *  per-deployment server URL is config (SAFESPACE_MATTERMOST_SERVER_URL), resolved by the
- *  client/handlers; resolveCredential enforces only the TOKEN's presence. */
-export const mattermost: NonOAuthSource = {
+ *  client/handlers; resolveCredential enforces only the TOKEN's presence (the server-URL
+ *  presence is enforced later, by the client → no_server_url). */
+export const mattermost: NonOAuthSource = makeServiceTokenSource({
   id: "mattermost",
-  authModel: "service-token",
+  storeKey: "mattermost",
+  errorName: "mattermost_api_failed",
   skipFields: MATTERMOST_SKIP_FIELDS,
-  mapError: mapMattermostError,
-  authorize() {
-    // service-token — no OAuth scope to check; tier is enforced by the proxy + min_tier.
-    // Token PRESENCE is enforced in resolveCredential (throws mattermost_api_failed{no_token});
-    // the server-URL presence is enforced later, by the client (no_server_url).
-  },
-  async resolveCredential(): Promise<Credential> {
-    const token = await readServiceToken("mattermost");
-    if (token === null) {
-      throw new MCPError("mattermost_api_failed", { reason: "no_token" });
-    }
-    return { kind: "service-token", token: () => token };
-  },
-};
+});
 
 /** v1.77 — the per-source opaque-key set for Notion. Per-source skipFields REPLACES the
  *  global SKIP_FIELDS (the choke point passes source.skipFields to sanitize), so this MUST
@@ -627,15 +570,6 @@ const NOTION_SKIP_FIELDS: ReadonlySet<string> = new Set([
   "next_cursor", // pagination cursor — MUST skip so the agent can page
 ]);
 
-/** Per-source error mapper for Notion — MCPError passthrough (a notion handler's client
- *  maps HTTP-status-specific failures to notion_api_failed with a closed-set reason); any
- *  other thrown value becomes a generic notion_api_failed. Mirrors mapDiscordError.
- *  NEVER echoes the token or any id. */
-function mapNotionError(err: unknown, _ctx: GoogleErrorContext): Error {
-  if (err instanceof MCPError) return err;
-  return new MCPError("notion_api_failed", { reason: "api_error" });
-}
-
 /** v1.78 (Notion B) — the THIRD OAuth source: Notion (a public integration). Routes
  *  through `withToolContext` (`authModel:"oauth"`) like google-workspace + github, but its
  *  token does NOT refresh (`refreshable:false` → the choke point skips the 401
@@ -649,7 +583,10 @@ export const notion: OAuthSource = {
   authModel: "oauth",
   refreshable: false,
   skipFields: NOTION_SKIP_FIELDS,
-  mapError: mapNotionError,
+  // MCPError passthrough (a notion handler's client maps HTTP-status to
+  // notion_api_failed{closed-set reason}); else generic notion_api_failed. NEVER
+  // echoes the token or any id.
+  mapError: passthroughOrGeneric("notion_api_failed"),
   authorize() {
     // No-op: Notion OAuth has no scope param (an integration's capabilities are configured
     // Notion-side). A token lacking access to a page yields a Notion 403/404 → the client
@@ -705,7 +642,8 @@ export const notion: OAuthSource = {
     if (accountId == null) {
       // Type-unreachable backstop (OAuthResolveDeps.accountId REQUIRED); kept to catch an
       // `as any` bypass, mirrors google-workspace + github.
-      throw new Error("internal: notion resolveCredential requires accountId");
+      // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
+      throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
     }
     const token = await readNotionToken(accountId);
     if (token === null) {
@@ -714,6 +652,100 @@ export const notion: OAuthSource = {
     // token is a GETTER, never a serializable field (types.ts) — JSON.stringify of a
     // ToolContext can't leak the notion token.
     return { kind: "oauth", provider: "notion", accountId, getAccessToken: () => token };
+  },
+};
+
+/** v1.113 — X (Twitter) OAuth skipFields: opaque machine fields only (ids, timestamps,
+ *  pagination cursors, result counts). Free-text fields like `name`, `description`,
+ *  `text` are NOT skipped — they must be sanitize-wrapped when tools arrive in C2. */
+export const X_SKIP_FIELDS: ReadonlySet<string> = new Set([
+  "id",
+  "created_at",
+  "edit_history_tweet_ids",
+  "newest_id",
+  "oldest_id",
+  "next_token",
+  "result_count",
+]);
+
+/** v1.113 — the FOURTH OAuth source: X (Twitter). Routes through `withToolContext`
+ *  (`authModel:"oauth"`) like google-workspace + github + notion, but its access
+ *  token expires every 2h. Refresh is PROACTIVE inside `resolveCredential` (via
+ *  `getValidAccessToken`) — the Source stays `refreshable: false` so the choke-point
+ *  401-retry path remains Google-only. ZERO tools this PR (skeleton Source only);
+ *  `sourceFor("x")` is ready for C2 tool registration. Multi-account (mirror Notion). */
+export const x: OAuthSource = {
+  id: "x",
+  authModel: "oauth",
+  refreshable: false,
+  skipFields: X_SKIP_FIELDS,
+  // MCPError passthrough; else generic x_api_failed. NEVER echoes a token / user id.
+  mapError: passthroughOrGeneric("x_api_failed"),
+  authorize() {
+    // No-op: X scopes are a fixed MVP set requested at consent time; tier is
+    // proxy-enforced. A token lacking a needed capability yields an X 403 →
+    // x_api_failed{api_error} once tools land.
+  },
+  async resolveAccount(_toolDef, deps): Promise<ResolvedAccount> {
+    // Multi-account — mirrors notion.resolveAccount: explicit args.account_id
+    // (resolved id-OR-username) → active account → per-source last-used; then
+    // validate against the x index + the operator's confinement set. Cross-provider
+    // safety: reads ONLY the x store, never google accounts.json / notion.
+    const allowSet = deps.allowedAccounts == null ? null : new Set(deps.allowedAccounts);
+    const allowed = (id: string | null): id is string =>
+      id != null && (allowSet == null || allowSet.has(id));
+    const accounts = await readXAccounts();
+    // Confine the LOOKUP SCOPE to the operator's set (sec-rev nit): name/id resolution
+    // only ever sees the operator's own accounts, so an explicit name can never even
+    // resolve to another operator's account (no cross-operator name-match) — and an
+    // "ambiguous" name only reflects the operator's OWN duplicates. Model A
+    // (allowSet null) → visible == accounts.
+    const visible = allowSet == null ? accounts : accounts.filter((a) => allowSet.has(a.id));
+    // Explicit account_id may be a user id OR a case-insensitive username → resolve it
+    // within the operator's set. An unknown / ambiguous value → account_not_found
+    // echoing the caller's OWN input (byte-identical to "unknown" → no oracle about
+    // which accounts exist).
+    let explicitId: string | null = null;
+    if (deps.explicitAccountId != null) {
+      const match = findXAccount(deps.explicitAccountId, visible);
+      if (match === "ambiguous" || match == null) {
+        throw new MCPError("account_not_found", { email: deps.explicitAccountId });
+      }
+      explicitId = match.id;
+    }
+    // Default-selection fallbacks (active, last-used) are CONFINED: a shared default
+    // the operator can't use is skipped (not an error). Model A (allow == null) →
+    // byte-identical.
+    const activeRaw = explicitId ? null : await readXActiveAccount();
+    const active = allowed(activeRaw) ? activeRaw : null;
+    const lastUsed = allowed(deps.lastUsed) ? deps.lastUsed : null;
+    const accountId = explicitId ?? active ?? lastUsed;
+    if (!accountId) {
+      throw new MCPError("account_not_found", { reason: "no_active_account" });
+    }
+    // The single confinement + index-validation backstop: `accountId` must name an
+    // account in the operator's VISIBLE set. Echoes the caller's OWN input,
+    // byte-identical to the unknown throws above → no oracle.
+    if (!visible.some((a) => a.id === accountId)) {
+      throw new MCPError("account_not_found", { email: deps.explicitAccountId ?? accountId });
+    }
+    return { accountId, scopes: [] };
+  },
+  async resolveCredential(_toolDef, deps): Promise<Credential> {
+    const accountId = deps.accountId;
+    if (accountId == null) {
+      // Type-unreachable backstop (OAuthResolveDeps.accountId REQUIRED); kept to catch
+      // an `as any` bypass, mirrors google-workspace + github + notion.
+      // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
+      throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
+    }
+    // Proactive refresh lives inside getValidAccessToken (rotation-safe + single-
+    // flight). refreshable:false on this Source keeps the choke-point 401-retry
+    // Google-only.
+    const token = await getValidAccessToken(accountId);
+    // token is a GETTER, never a serializable field (types.ts) — JSON.stringify of a
+    // ToolContext can't leak the x access token.
+    return { kind: "oauth", provider: "x", accountId, getAccessToken: () => token };
   },
 };
 
@@ -743,21 +775,14 @@ const GITHUB_SKIP_FIELDS: ReadonlySet<string> = new Set([
   "status",
 ]);
 
-/** Per-source error mapper for GitHub — MCPError passthrough (a github handler maps
- *  HTTP-status-specific failures to github_api_failed with a closed-set reason); any
- *  other thrown value becomes a generic github_api_failed. Mirrors mapDiscordError.
- *  NEVER echoes the token. */
-function mapGithubError(err: unknown, _ctx: GoogleErrorContext): Error {
-  if (err instanceof MCPError) return err;
-  return new MCPError("github_api_failed", { reason: "api_error" });
-}
-
 export const github: OAuthSource = {
   id: "github",
   authModel: "oauth",
   refreshable: false,
   skipFields: GITHUB_SKIP_FIELDS,
-  mapError: mapGithubError,
+  // MCPError passthrough (a github handler maps HTTP-status to github_api_failed{closed-
+  // set reason}); else generic github_api_failed. NEVER echoes the token.
+  mapError: passthroughOrGeneric("github_api_failed"),
   authorize() {
     // No-op: GitHub OAuth scopes are requested wholesale at consent (G3 requests the
     // v1 read set). A token lacking a scope yields a GitHub 403 → the handler maps it
@@ -788,7 +813,8 @@ export const github: OAuthSource = {
     if (accountId == null) {
       // v1.72 — type-unreachable backstop (OAuthResolveDeps.accountId REQUIRED);
       // kept to catch an `as any` bypass, mirrors google-workspace.
-      throw new Error("internal: github resolveCredential requires accountId");
+      // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
+      throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
     }
     const token = await readGithubToken(accountId);
     if (token === null) {
@@ -814,12 +840,22 @@ const SOURCES: Readonly<Record<string, Source>> = {
   mattermost,
   github,
   notion,
+  x,
 };
 
 /** Resolve a tool's Source from its `ToolDef.source` (B0 relabel), defaulting to
- *  google-workspace. An unknown id falls back to google-workspace — defensive: a
- *  typo'd `source` label can never strip a tool of its envelope. */
+ *  google-workspace when `source` is omitted/undefined. An unknown id is FAIL-
+ *  CLOSED (v1.112.8): throw `internal_routing_error{unknown_source}` rather than
+ *  silently routing a typo'd label onto google-workspace (which would send the
+ *  wrong OAuth token / skip the right envelope). Never echoes the bogus id. */
 export function sourceFor(toolDef: Pick<ToolDef, "source"> | undefined): Source {
-  const id = toolDef?.source ?? "google-workspace";
-  return SOURCES[id] ?? googleWorkspace;
+  // Omitted / undefined → google-workspace default (google tools omit `source`).
+  if (toolDef?.source === undefined) {
+    return googleWorkspace;
+  }
+  const source = SOURCES[toolDef.source];
+  if (source === undefined) {
+    throw new MCPError("internal_routing_error", { reason: "unknown_source" });
+  }
+  return source;
 }

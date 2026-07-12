@@ -194,5 +194,5 @@ large.
 
 - **Threat model & trust boundary** → [`SECURITY.md`](../SECURITY.md)
 - **Locked design decisions** → [`docs/DESIGN.md`](DESIGN.md)
-- **Per-version history** → the GitHub Releases page
+- **Per-version history** → [`docs/CHANGELOG.md`](CHANGELOG.md)
 - **PR-level history** → `git log --oneline`

@@ -99,7 +99,7 @@ export interface AuditSink {
 export type Credential =
   | {
       readonly kind: "oauth";
-      readonly provider: "google" | "github" | "notion";
+      readonly provider: "google" | "github" | "notion" | "x";
       readonly accountId: string;
       readonly getAccessToken: () => string;
     }

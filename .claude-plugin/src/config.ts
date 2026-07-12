@@ -163,6 +163,12 @@ export const ENV_GITHUB_MERGE_TARGETS_EXTRA = "SAFESPACE_GITHUB_MERGE_TARGETS_EX
 export const ENV_GITHUB_APPROVE_TARGETS = "SAFESPACE_GITHUB_APPROVE_TARGETS";
 /** GitHub APPROVE target allowlist shell-only overlay. */
 export const ENV_GITHUB_APPROVE_TARGETS_EXTRA = "SAFESPACE_GITHUB_APPROVE_TARGETS_EXTRA";
+/** X (Twitter) POST account (numeric user id) allowlist base (v1.115; off→DENY —
+ *  PUBLIC surface, mirrors github-write / youtube-video default-deny). Entries are
+ *  numeric user ids only (`^[0-9]{1,32}$`) — usernames rotate. */
+export const ENV_X_POST_ACCOUNTS = "SAFESPACE_X_POST_ACCOUNTS";
+/** X POST account allowlist shell-only overlay. */
+export const ENV_X_POST_ACCOUNTS_EXTRA = "SAFESPACE_X_POST_ACCOUNTS_EXTRA";
 
 // ── Family 6: numeric tuning (burst + webfetch) ────────────────────────────
 /** Universal write-burst sliding-window cap (v1.52 F1; default 60/60s). */
@@ -229,6 +235,16 @@ export const ENV_SLACK_WEBHOOK_SECRET = "SAFESPACE_SLACK_WEBHOOK_SECRET";
 export const ENV_LINE_WEBHOOK_SECRET = "SAFESPACE_LINE_WEBHOOK_SECRET";
 // (v1.77 ENV_NOTION_TOKEN retired in v1.78 — Notion became an OAuth source using
 //  NOTION_CLIENT_ID / NOTION_CLIENT_SECRET, read raw via process.env like GitHub's.)
+
+// ── X (Twitter) OAuth client (v1.113 — class-A OAuth provider; ZERO tools yet) ──
+// Unlike GitHub/Notion (which use bare GITHUB_/NOTION_ prefixes, pre-catalog), X
+// is SAFESPACE_-prefixed so it rides the config catalog + drift sentinel. CLIENT_ID
+// is required for consent/refresh; CLIENT_SECRET is OPTIONAL (unset → public client
+// with client_id in the form body; set → confidential client with HTTP Basic).
+/** X OAuth 2.0 client id (required for `safespace consent --provider x` + proactive refresh). */
+export const ENV_X_CLIENT_ID = "SAFESPACE_X_CLIENT_ID";
+/** X OAuth 2.0 client secret (optional — set for a confidential client; omit for a public/PKCE-only client). */
+export const ENV_X_CLIENT_SECRET = "SAFESPACE_X_CLIENT_SECRET";
 
 // ── Model B transport (v1.73 — PR-1) ───────────────────────────────────────
 // The opt-in Streamable HTTP transport. Default (unset) = stdio = Model A

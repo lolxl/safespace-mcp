@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ERROR_CODES, MCPError } from "./errors";
 
 describe("ERROR_CODES table", () => {
-  test("contains 51 names after v1.107 (added mattermost_api_failed)", () => {
+  test("contains 54 names after v1.115 (added x_post_denied_by_policy)", () => {
     expect(Object.keys(ERROR_CODES).sort()).toEqual([
       "account_not_found",
       "batch_too_large",
@@ -21,6 +21,7 @@ describe("ERROR_CODES table", () => {
       "github_merge_denied_by_policy",
       "github_write_denied_by_policy",
       "inbox_read_failed",
+      "internal_routing_error",
       "keychain_locked",
       "label_limit_exceeded",
       "line_api_failed",
@@ -54,6 +55,8 @@ describe("ERROR_CODES table", () => {
       "video_target_denied_by_policy",
       "web_fetch_failed",
       "write_burst_limit_exceeded",
+      "x_api_failed",
+      "x_post_denied_by_policy",
       "youtube_quota_exceeded",
     ]);
   });
@@ -125,8 +128,15 @@ describe("ERROR_CODES table", () => {
     // v1.106 (youtube_video_update) added -32052 video_target_denied_by_policy — new
     // most-negative (the deny-default video-metadata-write target allowlist).
     // v1.107 (Mattermost self-hosted class-B connector) added -32053 mattermost_api_failed.
+    // v1.112.8 added -32055 internal_routing_error (fail-closed sourceFor + provider-guard
+    // throws; -32054 was skipped, reserved for the X connector).
+    // v1.113 (X/Twitter OAuth provider, class A — ZERO tools yet) added -32054 x_api_failed.
+    // v1.115 (x_post_create) added -32056 x_post_denied_by_policy.
     const codes = Object.values(ERROR_CODES).map((s) => s.code).sort((a, b) => a - b);
     expect(codes).toEqual([
+      -32056,
+      -32055,
+      -32054,
       -32053,
       -32052,
       -32051,
@@ -228,5 +238,28 @@ describe("keychain_locked recovery — v1.37 BLOCKER 1 generalized (B9)", () => 
     const spec = ERROR_CODES.keychain_locked;
     expect(spec.recovery).toContain("Keychain");
     expect(spec.recovery).toContain("SAFESPACE_SECRET_PASSPHRASE");
+  });
+});
+
+describe("internal_routing_error — v1.112.8 fail-closed source routing", () => {
+  test("code is -32055 (skipping reserved -32054) and recovery is generic / non-user-actionable", () => {
+    const spec = ERROR_CODES.internal_routing_error;
+    expect(spec.code).toBe(-32055);
+    expect(spec.recovery).toMatch(/internal source-routing misconfiguration/i);
+    expect(spec.recovery).toMatch(/bug/i);
+    // Closed reasons documented; no provider/credential detail in the recovery text.
+    expect(spec.recovery).toContain("unknown_source");
+    expect(spec.recovery).toContain("credential_mismatch");
+    // v1.115.3 — residual envelope tripwires (choke-point authModel / cross_account /
+    // resolveCredential accountId backstops).
+    expect(spec.recovery).toContain("invariant_violation");
+  });
+
+  test("toJsonRpc merges closed-set reason without leaking identifiers", () => {
+    const j = new MCPError("internal_routing_error", { reason: "unknown_source" }).toJsonRpc();
+    expect(j.code).toBe(-32055);
+    expect(j.message).toBe("internal_routing_error");
+    expect(j.data.reason).toBe("unknown_source");
+    expect(j.data.recovery).toMatch(/misconfiguration/i);
   });
 });

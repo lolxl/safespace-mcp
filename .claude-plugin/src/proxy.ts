@@ -67,12 +67,6 @@ try {
   process.exit(1);
 }
 
-// v1.8.2 #7: write the startup marker BEFORE the MCP handshake so
-// `safespace doctor` can detect "policy file modified after proxy started"
-// and surface a restart-pending warn. Best-effort — write failure is
-// logged to stderr and swallowed; never blocks proxy startup.
-await writeStartupMarker(configDir());
-
 // v1.102 (W0) — inbound webhook listener startup guards (Model B only; fail-loud
 // BEFORE serving). The listener is a SEPARATE public surface that must be reachable by
 // the provider, so it needs the hosted HTTP transport; and a public listener with no
@@ -170,3 +164,12 @@ if (transportMode() === "http") {
 } else {
   await createMcpServer().connect(new StdioServerTransport());
 }
+
+// v1.8.2 #7 / cold-path: write the startup marker AFTER the transport is
+// connected (stdio) / listening (http + webhook), not before the handshake.
+// `safespace doctor` reads it to detect "policy file modified after proxy
+// started"; marking "serving began" a few ms later is equally valid and keeps
+// the 2 best-effort disk syscalls (mkdir + write) off the time-to-first-tool
+// path. Best-effort — write failure is logged to stderr and swallowed; never
+// blocks proxy startup.
+await writeStartupMarker(configDir());

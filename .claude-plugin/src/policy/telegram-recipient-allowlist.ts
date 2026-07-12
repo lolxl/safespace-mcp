@@ -1,31 +1,26 @@
 // v1.68 — Telegram recipient (chat_id / @username) allowlist.
 //
-// The v2.2 recipient-allowlist (policy/recipient-allowlist.ts) is EMAIL-shaped and the
-// v1.66 LINE allowlist is LINE-id-shaped; a Telegram chat target is neither (a signed
-// integer chat id, or a public `@username`). So Telegram gets its own allowlist, the
-// SAME two-layer env idiom (persistent + shell-only EXTRA) the recipient / LINE / v1.65
-// web-fetch allowlists use:
+// The per-connector ID regex + the two env-var names; the parse / state /
+// membership / summary logic is the shared policy/service-token-allowlist.ts
+// factory. The Telegram chat-id regex stays a named export here —
+// tools/handlers/telegram.ts imports it for pre-egress syntactic validation.
 //
 //   SAFESPACE_TELEGRAM_RECIPIENT_ALLOW        (persistent)
 //   SAFESPACE_TELEGRAM_RECIPIENT_ALLOW_EXTRA  (shell-only, additive, per-session)
 //
-// POLICY (matches docs/v1.68-telegram-connector.md §0 Q4 — identical posture to LINE):
-//   - Default unset/empty = ALLOW any syntactically-valid chat id. A Telegram bot push
-//     is a PRIVATE, tier-gated surface (min_tier "share"), so the default is OFF=allow —
-//     the tasks-delete / LINE posture, NOT the public youtube-comment deny-default.
-//   - Under SAFESPACE_AUTONOMOUS an unset/empty allowlist DENIES ALL (the F2
-//     deny-by-default idiom — unattended, an un-configured allowlist must not be a
-//     blank cheque; mirrors LINE + the v1.65 web-fetch autonomous deny).
-//   - When configured, only listed ids pass (exact match).
-//
-// SECURITY: ids never appear in errors / doctor output (counts only); a denied id is
-// HMAC-hashed into the audit denied-event by the egress gate, never echoed.
+// POLICY: unset/empty = ALLOW any valid chat id (a Telegram bot push is a PRIVATE,
+// tier-gated min_tier "share" surface → OFF=allow, the LINE posture, NOT the
+// public youtube-comment deny-default); under SAFESPACE_AUTONOMOUS unset/empty
+// DENIES ALL (F2 deny-by-default). See service-token-allowlist.ts for detail.
 
-import { isAutonomousMode } from "./autonomous-mode";
 import {
   ENV_TELEGRAM_RECIPIENT_ALLOW as ENV_TG_ALLOW,
   ENV_TELEGRAM_RECIPIENT_ALLOW_EXTRA as ENV_TG_ALLOW_EXTRA,
 } from "../config";
+import {
+  makeServiceTokenAllowlist,
+  type ServiceTokenAllowlistState,
+} from "./service-token-allowlist";
 
 export { ENV_TG_ALLOW, ENV_TG_ALLOW_EXTRA };
 
@@ -38,51 +33,29 @@ export { ENV_TG_ALLOW, ENV_TG_ALLOW_EXTRA };
  *  implicitly rejected (the gmail/LINE recipient-gate invariant). */
 export const TELEGRAM_CHAT_ID_RE = /^(?:-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$/;
 
-export type TelegramAllowlistState =
-  | { kind: "off" }
-  | { kind: "active"; ids: ReadonlySet<string> };
+export type TelegramAllowlistState = ServiceTokenAllowlistState;
 
-/** Parse a comma-separated env value into the set of syntactically-VALID ids.
- *  Malformed tokens are dropped at parse time (never matched, never echoed). */
-function parseIds(raw: string | undefined): string[] {
-  if (raw == null || raw.trim() === "") return [];
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s !== "" && TELEGRAM_CHAT_ID_RE.test(s));
-}
+const allowlist = makeServiceTokenAllowlist({
+  idRe: TELEGRAM_CHAT_ID_RE,
+  envAllow: ENV_TG_ALLOW,
+  envExtra: ENV_TG_ALLOW_EXTRA,
+});
 
-/** Resolve the current allowlist state from the two env layers. `off` when neither
- *  layer yields a valid id; `active` (the union) otherwise. Read per-call (cheap env
- *  reads), like the LINE / recipient-allowlist loaders — no caching, so a shell that
- *  exports the EXTRA var mid-session takes effect on the next call. */
+/** Resolve the current Telegram allowlist state from the two env layers. */
 export function getTelegramAllowlistState(): TelegramAllowlistState {
-  const ids = new Set<string>([
-    ...parseIds(process.env[ENV_TG_ALLOW]),
-    ...parseIds(process.env[ENV_TG_ALLOW_EXTRA]),
-  ]);
-  return ids.size === 0 ? { kind: "off" } : { kind: "active", ids };
+  return allowlist.getState();
 }
 
-/** Is this Telegram chat id allowed to receive a push?
- *   - `active`: exact membership.
- *   - `off`: ALLOW in interactive mode (private tier-gated surface, default-allow);
- *     DENY in autonomous mode (F2 deny-by-default — an un-configured allowlist is not
- *     a blank cheque when unattended).
- *  Syntactic validity of `id` is the handler's job (TELEGRAM_CHAT_ID_RE, before egress);
- *  this decides POLICY membership only. */
+/** Is this Telegram chat id allowed to receive a push? POLICY membership only
+ *  (syntactic validity is the handler's job, via TELEGRAM_CHAT_ID_RE, before egress). */
 export function isTelegramRecipientAllowed(
   id: string,
   state: TelegramAllowlistState,
 ): boolean {
-  if (state.kind === "active") return state.ids.has(id);
-  return !isAutonomousMode();
+  return allowlist.isAllowed(id, state);
 }
 
 /** Count-only summary for `safespace status` / `doctor` (never the ids). */
 export function telegramAllowlistSummary(): { kind: "off" | "active"; id_count: number } {
-  const state = getTelegramAllowlistState();
-  return state.kind === "off"
-    ? { kind: "off", id_count: 0 }
-    : { kind: "active", id_count: state.ids.size };
+  return allowlist.summary();
 }

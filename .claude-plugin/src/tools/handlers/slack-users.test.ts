@@ -150,7 +150,7 @@ describe("slackUserInfo", () => {
   test("an OAuth credential is refused (R6 service-token narrow)", async () => {
     const oauthCtx: ToolContext = { allowedAccounts: null, credential: oauthCred(), tier: "read", audit: NOOP_AUDIT };
     const f = fetchStub(INFO_BODY);
-    await expect(slackUserInfo(oauthCtx, { user: USER }, { fetchImpl: f.impl })).rejects.toThrow(/service-token/);
+    await expect(slackUserInfo(oauthCtx, { user: USER }, { fetchImpl: f.impl })).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 });

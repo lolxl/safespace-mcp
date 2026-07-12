@@ -258,9 +258,8 @@ attestation makes that boundary your responsibility, identical to `SOLE-EGRESS.m
 > to a distinct SafeSpace operator off-tailnet **today**, mint **one bearer token per
 > operator** (above) and let the gateway authenticate the human while SafeSpace
 > authenticates the token. Per-user identity passthrough from the gateway is a possible
-> future "trusted-header" auth mode, intentionally deferred (the north/south
-> split: SafeSpace is the south-side egress + content envelope; the fronting
-> gateway owns the north-side OAuth).
+> future "trusted-header" auth mode, intentionally deferred — see
+> `docs/safety-gateway-thesis.md` (the north/south split).
 
 ## Backups & updates
 

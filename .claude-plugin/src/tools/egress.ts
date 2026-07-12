@@ -68,6 +68,11 @@ import {
   getGithubApproveAllowlistState,
   isGithubApproveTargetAllowed,
 } from "../policy/github-approve-targets";
+import {
+  getXPostAllowlistState,
+  isXPostAccountAllowed,
+} from "../policy/x-post-allowlist";
+import { outboundSanitize } from "../sanitize/outbound";
 import { scanOutboundSecret } from "../policy/outbound-secret";
 import { getAllowlistState, isRecipientAllowed } from "../policy/recipient-allowlist";
 import { isTaintedRecipient } from "../policy/tainted-source";
@@ -429,4 +434,31 @@ export function enforceGithubReviewEgressGates(
   }
   // F3a secret-shape on the review body — autonomous → throw -32035; interactive → flag.
   enforceOutboundSecret(ctx, egress.body);
+}
+
+/** v1.115 — the X POST egress gate (PUBLIC-surface OAuth source). DEFAULT-DENY account
+ *  allowlist (numeric user id — usernames rotate), then F3a secret-shape, then the
+ *  6-step `outboundSanitize` REJECT. Order is locked: allowlist FIRST (fail fast before
+ *  any body work), then secret-shape, then sanitize. Returns the sanitized text for the
+ *  allowlist-constructed request body.
+ *
+ *  On an allowlist miss → throw `x_post_denied_by_policy` (-32056) with a closed-set
+ *  reason; the account id is NEVER echoed (PII-oracle defense, mirroring -32042). */
+export function enforceXPostEgressGates(
+  ctx: ToolContext,
+  accountId: string,
+  text: string,
+): string {
+  const state = getXPostAllowlistState();
+  if (!isXPostAccountAllowed(accountId, state)) {
+    throw new MCPError("x_post_denied_by_policy", {
+      tool: "x_post_create",
+      reason: state.kind === "off" ? "no_allowlist" : "not_in_allowlist",
+    });
+  }
+  // F3a secret-shape — autonomous → throw -32035; interactive → record outbound_secret_shape.
+  enforceOutboundSecret(ctx, text);
+  // Public-surface 6-step REJECT (-32027 on failure). Weighted-280 is pre-checked in the
+  // handler (before this gate); the byte cap here is a defense-in-depth backstop.
+  return outboundSanitize(text, { tool: "x_post_create", maxBytes: 2000 });
 }

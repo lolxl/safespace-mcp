@@ -581,4 +581,5 @@ Every tool call writes a structured JSONL audit row (`src/audit.ts`):
 
 ---
 
-_For the full security-control design and rationale, see `docs/DESIGN.md`._
+_For the full security-control design and rationale, see `docs/DESIGN.md`
+and `docs/CHANGELOG.md`._

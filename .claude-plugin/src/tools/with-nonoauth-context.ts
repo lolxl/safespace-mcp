@@ -69,9 +69,8 @@ export async function withNonOAuthContext(
   // takes NO deps (an OAuth source's account/refresh deps are structurally absent
   // here). Unreachable in production, mirroring the with-context.ts narrow.
   if (source.authModel === "oauth") {
-    throw new Error(
-      `internal: the non-OAuth choke point reached an OAuth source '${source.id}'`,
-    );
+    // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
+    throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
   }
 
   // args is the caller-supplied MCP args; no token is ever merged into it (keyless

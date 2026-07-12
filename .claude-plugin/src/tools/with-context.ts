@@ -139,9 +139,8 @@ export async function withToolContext(
   // diverge silently. Fail loud.
   const earlyToolDef = TOOL_REGISTRY[toolName];
   if (earlyToolDef?.cross_account) {
-    throw new Error(
-      `internal: cross_account tool '${toolName}' should bypass withToolContext`,
-    );
+    // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
+    throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
   }
   const start = Date.now();
 
@@ -163,9 +162,8 @@ export async function withToolContext(
   // throw` tripwires in source.ts with a compile-time guarantee. Unreachable in
   // production exactly like the old `!resolveAccount` throw.
   if (source.authModel !== "oauth") {
-    throw new Error(
-      `internal: the OAuth choke point reached a non-OAuth source '${source.id}'`,
-    );
+    // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
+    throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
   }
   // Account resolution lifted VERBATIM into source.resolveAccount (order: explicit
   // args.account_id → active-account file → per-source in-memory last-used →

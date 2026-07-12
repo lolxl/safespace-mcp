@@ -8,10 +8,11 @@ import { __internal as ytInternal } from "./youtube-comment-targets";
 import { __internal as ghWriteInternal } from "./github-write-targets";
 import { __internal as ghMergeInternal } from "./github-merge-targets";
 import { __internal as ghApproveInternal } from "./github-approve-targets";
+import { __internal as xPostInternal } from "./x-post-allowlist";
 import { __internal as fsInternal } from "./fs-gate";
 
 // Every egress env var the aggregator reads — snapshot + clear so a test is
-// hermetic, and reset the 7 CACHED allowlist singletons so a stale cache can't
+// hermetic, and reset the CACHED allowlist singletons so a stale cache can't
 // leak a prior env across the boundary.
 const ENV_VARS = [
   "SAFESPACE_AUTONOMOUS",
@@ -24,6 +25,7 @@ const ENV_VARS = [
   "SAFESPACE_GITHUB_WRITE_TARGETS", "SAFESPACE_GITHUB_WRITE_TARGETS_EXTRA",
   "SAFESPACE_GITHUB_MERGE_TARGETS", "SAFESPACE_GITHUB_MERGE_TARGETS_EXTRA",
   "SAFESPACE_GITHUB_APPROVE_TARGETS", "SAFESPACE_GITHUB_APPROVE_TARGETS_EXTRA",
+  "SAFESPACE_X_POST_ACCOUNTS", "SAFESPACE_X_POST_ACCOUNTS_EXTRA",
   "SAFESPACE_FS_READ_ROOTS", "SAFESPACE_FS_READ_ROOTS_EXTRA",
   "SAFESPACE_WEBFETCH_ALLOW", "SAFESPACE_WEBFETCH_ALLOW_EXTRA",
 ] as const;
@@ -35,6 +37,7 @@ function resetCaches(): void {
   ghWriteInternal.resetSingletons();
   ghMergeInternal.resetSingletons();
   ghApproveInternal.resetSingletons();
+  xPostInternal.resetSingletons();
   fsInternal.resetSingletons();
 }
 
@@ -87,10 +90,10 @@ describe("classifyEgress (pure)", () => {
 const rowOf = (rows: EgressRow[], name: string): EgressRow => rows.find((r) => r.connector.startsWith(name))!;
 
 describe("evaluateEgressPosture", () => {
-  test("enumerates all 14 connectors", async () => {
+  test("enumerates all 15 connectors", async () => {
     const rows = await evaluateEgressPosture();
-    expect(rows.length).toBe(14);
-    for (const name of ["recipient", "tasks-delete", "youtube-comment", "youtube-video", "line", "telegram", "discord", "slack", "mattermost", "github-write", "github-merge", "github-approve", "fs-read", "web-fetch"]) {
+    expect(rows.length).toBe(15);
+    for (const name of ["recipient", "tasks-delete", "youtube-comment", "youtube-video", "line", "telegram", "discord", "slack", "mattermost", "github-write", "github-merge", "github-approve", "x-post", "fs-read", "web-fetch"]) {
       expect(rows.some((r) => r.connector.startsWith(name)), name).toBe(true);
     }
   });
@@ -102,7 +105,7 @@ describe("evaluateEgressPosture", () => {
       expect(rowOf(rows, n).status, n).toBe("warn");
     }
     // off→deny lists, unset → pass (deny-all)
-    for (const n of ["youtube-comment", "youtube-video", "github-write", "github-merge", "github-approve", "fs-read"]) {
+    for (const n of ["youtube-comment", "youtube-video", "github-write", "github-merge", "github-approve", "x-post", "fs-read"]) {
       expect(rowOf(rows, n).status, n).toBe("pass");
     }
   });
@@ -122,9 +125,18 @@ describe("evaluateEgressPosture", () => {
     expect(row.detail).toBe("restricted — 1 entry allowlisted");
   });
 
+  test("x-post populated allowlist → restricted pass with the count", async () => {
+    process.env.SAFESPACE_X_POST_ACCOUNTS = "2244994945";
+    resetCaches();
+    const row = rowOf(await evaluateEgressPosture(), "x-post");
+    expect(row.status).toBe("pass");
+    expect(row.detail).toBe("restricted — 1 entry allowlisted");
+  });
+
   test("NO-PII-ECHO: the actual allowlist VALUES never appear in any row", async () => {
     process.env.SAFESPACE_RECIPIENT_ALLOW = "topsecret@evil.example";
     process.env.SAFESPACE_GITHUB_WRITE_TARGETS = "megacorp/secret-repo";
+    process.env.SAFESPACE_X_POST_ACCOUNTS = "999888777666";
     process.env.SAFESPACE_WEBFETCH_ALLOW = "internal.corp.example";
     resetCaches();
     const joined = (await evaluateEgressPosture()).map((r) => `${r.connector} ${r.detail}`).join("\n");
@@ -132,6 +144,7 @@ describe("evaluateEgressPosture", () => {
     expect(joined).not.toContain("evil.example");
     expect(joined).not.toContain("megacorp");
     expect(joined).not.toContain("secret-repo");
+    expect(joined).not.toContain("999888777666");
     expect(joined).not.toContain("internal.corp");
   });
 });

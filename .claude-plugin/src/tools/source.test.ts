@@ -5,7 +5,7 @@ import { MCPError } from "../errors";
 import { toGoogleError } from "../google-api/errors";
 import { SKIP_FIELDS } from "../sanitize/patterns";
 import { IMPLEMENTED_TOOLS, TOOL_REGISTRY } from "./registry";
-import { discord, github, googleWorkspace, line, notion, slack, sourceFor, telegram, webFetch } from "./source";
+import { discord, github, googleWorkspace, line, notion, slack, sourceFor, telegram, webFetch, x } from "./source";
 import type { NonOAuthSource, OAuthResolveDeps, OAuthSource } from "./source";
 
 describe("Source descriptor — googleWorkspace (v1.64 B6)", () => {
@@ -80,8 +80,30 @@ describe("Source descriptor — sourceFor (v1.64 B6)", () => {
     expect(sourceFor({ source: "google-workspace" })).toBe(googleWorkspace);
   });
 
-  test("unknown source id → falls back to google-workspace (a typo'd label can never strip a tool of its envelope)", () => {
-    expect(sourceFor({ source: "telegram-bot-not-wired-yet" })).toBe(googleWorkspace);
+  test("unknown source id → throws internal_routing_error{unknown_source} (fail-closed; never echoes the bogus id)", () => {
+    // v1.112.8 flipped the silent google-workspace fallback: a typo'd `source`
+    // must NOT route onto Google OAuth. Closed reason only — no source string echo.
+    try {
+      sourceFor({ source: "telegram-bot-not-wired-yet" });
+      expect.unreachable("sourceFor must throw on unknown source");
+    } catch (e) {
+      expect(e).toBeInstanceOf(MCPError);
+      const m = e as MCPError;
+      expect(m.errorName).toBe("internal_routing_error");
+      expect(m.code).toBe(-32055);
+      expect(m.errorData).toEqual({ reason: "unknown_source" });
+      // No echo of the bogus source string anywhere on the rendered surface.
+      const j = m.toJsonRpc();
+      expect(JSON.stringify(j)).not.toContain("telegram-bot-not-wired-yet");
+    }
+  });
+
+  // v1.112.8 behavioral sentinel — load-time-equivalent guarantee that no
+  // TOOL_REGISTRY entry carries a typo'd `source` (sourceFor would throw).
+  test("every TOOL_REGISTRY entry resolves via sourceFor without throwing", () => {
+    for (const name of Object.keys(TOOL_REGISTRY)) {
+      expect(() => sourceFor(TOOL_REGISTRY[name]), `sourceFor(${name})`).not.toThrow();
+    }
   });
 });
 
@@ -280,6 +302,45 @@ describe("Source descriptor — notion (v1.78 — the 3rd OAuth source)", () => 
   });
 });
 
+describe("Source descriptor — x (v1.113 — the 4th OAuth source; ZERO tools yet)", () => {
+  test("id 'x', authModel 'oauth', refreshable FALSE (proactive refresh lives in resolveCredential, not the choke-point 401 path)", () => {
+    expect(x.id).toBe("x");
+    expect(x.authModel).toBe("oauth");
+    expect((x as { refreshable?: boolean }).refreshable).toBe(false);
+  });
+
+  test("sourceFor('x') resolves the x connector", () => {
+    expect(sourceFor({ source: "x" })).toBe(x);
+  });
+
+  test("implements resolveAccount + resolveCredential (it IS an OAuth source)", () => {
+    expect(typeof (x as { resolveAccount?: unknown }).resolveAccount).toBe("function");
+    expect(typeof x.resolveCredential).toBe("function");
+  });
+
+  test("skipFields skips ONLY opaque machine fields (ids/timestamps/cursors/counts)", () => {
+    for (const k of ["id", "created_at", "edit_history_tweet_ids", "newest_id", "oldest_id", "next_token", "result_count"]) {
+      expect(x.skipFields.has(k)).toBe(true);
+    }
+    // free-text / attacker-influenced content stays OUT of the set → it wraps when tools land:
+    for (const k of ["name", "description", "text", "username"]) {
+      expect(x.skipFields.has(k)).toBe(false);
+    }
+  });
+
+  test("mapError passes an MCPError through + wraps a non-MCPError as x_api_failed", () => {
+    const e = new MCPError("x_api_failed", { reason: "consent_required" });
+    expect(x.mapError(e, { tool: "x_placeholder" })).toBe(e);
+    const wrapped = x.mapError(new Error("boom"), { tool: "x_placeholder" });
+    expect((wrapped as MCPError).errorName).toBe("x_api_failed");
+    expect((wrapped as MCPError).errorData.reason).toBe("api_error");
+  });
+
+  test("authorize is a no-op (fixed MVP scopes at consent; tier proxy-enforced)", () => {
+    expect(() => x.authorize(undefined, {})).not.toThrow();
+  });
+});
+
 describe("Source strategies — authorize / resolveCredential (v1.66 Phase C PR 2)", () => {
   const driveRead = TOOL_REGISTRY["drive_search"]; // requiredScopes: [drive.readonly]
 
@@ -309,9 +370,10 @@ describe("Source strategies — authorize / resolveCredential (v1.66 Phase C PR 
     // v1.72 — OAuthResolveDeps.accountId is now REQUIRED, so a typed caller cannot
     // omit it (the with-context.ts choke point always resolves it first). The
     // runtime throw is kept as a defense-in-depth backstop; force it with a cast.
+    // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
     await expect(
       googleWorkspace.resolveCredential(driveRead, {} as unknown as OAuthResolveDeps),
-    ).rejects.toThrow(/requires accountId/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "invariant_violation" } });
   });
 
   test("webFetch.resolveCredential → {kind:'none'} (no deps); authorize no-op", async () => {
@@ -441,9 +503,10 @@ describe("Source descriptor — github (v1.70 G2 — the 2nd OAuth source skelet
   test("resolveCredential backstop still throws on an `as any` bypass of the required accountId", async () => {
     // v1.72 — OAuthResolveDeps.accountId REQUIRED; force the defense-in-depth
     // backstop with a cast (a typed caller cannot omit accountId).
+    // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
     await expect(
       github.resolveCredential(undefined, {} as unknown as OAuthResolveDeps),
-    ).rejects.toThrow(/requires accountId/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "invariant_violation" } });
   });
 
   test("v1.72 — the Source union variant-shape pin: OAuth sources are OAuthSource, non-OAuth are NonOAuthSource", () => {

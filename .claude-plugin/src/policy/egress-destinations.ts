@@ -46,6 +46,7 @@ export type EgressEnforcement = "enforced" | "declared" | "configured";
 export type ConnectorId =
   | "github"
   | "notion"
+  | "x"
   | "line"
   | "telegram"
   | "discord"
@@ -69,6 +70,10 @@ export interface EgressDestination {
 export const EGRESS_DESTINATIONS: readonly EgressDestination[] = [
   { connector: "github", hosts: ["api.github.com"], enforcement: "enforced" },
   { connector: "notion", hosts: ["api.notion.com"], enforcement: "enforced" },
+  // v1.113 — X (Twitter) OAuth. Process-owned fetches are token exchange / refresh /
+  // users/me against api.x.com. The authorize URL (x.com/i/oauth2/authorize) is opened
+  // in the USER's browser, not a process fetch — so it is not an egress host here.
+  { connector: "x", hosts: ["api.x.com"], enforcement: "enforced" },
   { connector: "line", hosts: ["api.line.me"], enforcement: "enforced" },
   { connector: "telegram", hosts: ["api.telegram.org"], enforcement: "enforced" },
   { connector: "discord", hosts: ["discord.com"], enforcement: "enforced" },

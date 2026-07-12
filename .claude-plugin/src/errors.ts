@@ -54,8 +54,11 @@ export type ErrorName =
   | "path_blocked_by_policy"
   | "fs_read_failed"
   | "notion_api_failed"
+  | "x_api_failed"
+  | "x_post_denied_by_policy"
   | "egress_destination_blocked"
-  | "inbox_read_failed";
+  | "inbox_read_failed"
+  | "internal_routing_error";
 
 interface Spec {
   code: number;
@@ -74,7 +77,7 @@ export const ERROR_CODES: Record<ErrorName, Spec> = {
   account_not_found:     { code: -32003, recovery: "That account is not authorized yet; run `safespace consent <email>`." },
   scope_mismatch:        { code: -32004, recovery: "The tool needs new permissions (v1.12 added the `documents` scope; v1.13 added `calendar.events`; v1.15 added `contacts.readonly`; v1.16 Phase 1a added `youtube.readonly`; v1.16 Phase 2a added `youtube.force-ssl`; v1.19 Phase 1a added `tasks`; v1.20 Phase 1a added `spreadsheets`; v1.45 added `calendar.freebusy` + `calendar.calendarlist.readonly`; v1.50 upgraded `contacts.readonly` to full `contacts` (write); v1.51 added `gmail.settings.basic` (Gmail filters); v1.59 added `yt-analytics.readonly` (YouTube Analytics read-only); v1.60 added `presentations` (Google Slides); v1.61 added `yt-analytics-monetary.readonly` (YouTube Analytics revenue read-only; requested only when opt-in SAFESPACE_YOUTUBE_ANALYTICS_MONETARY=true); v1.62 added `forms.body.readonly` + `forms.responses.readonly` (Google Forms read-only); v1.63 upgraded `forms.body.readonly` to `forms.body` (Forms write: create/edit forms)). Run `safespace consent <email> --re-auth` to re-authorize (the --re-auth flag is required so Google shows the consent screen again to add the new scopes)." },
   rate_limited:          { code: -32005, recovery: "API rate limit reached; retry later." },
-  refresh_token_invalid: { code: -32006, recovery: "Authorization expired or revoked; re-run `safespace consent <email>`." },
+  refresh_token_invalid: { code: -32006, recovery: "Authorization expired or revoked; re-run `safespace consent <email>`. A very common cause is a Google OAuth app left in 'Testing' publishing status — Google expires those refresh tokens after 7 days. Fix it once: in the Google Cloud Console, publish your OAuth consent screen to 'In production' (the 'unverified app' prompt is expected for a self-hosted client you authored — click Advanced then 'Go to app'; NO Google verification is required), or set the user type to 'Internal' on Google Workspace. See the README 'Google Cloud OAuth client' note." },
   file_too_large:        { code: -32007, recovery: "File exceeds the 5 MB cap and cannot be downloaded. Open it directly in the Drive web UI." },
   file_unsupported_binary: { code: -32008, recovery: "This file type (PDF / image / binary) is not parsed in v1. Open it in the Drive web UI." },
   // -32009 (send_disabled), -32010 (modify_disabled), -32013 (share_disabled)
@@ -260,6 +263,18 @@ export const ERROR_CODES: Record<ErrorName, Spec> = {
   // v1.77 — Notion API call failure. v1.78: Notion is now an OAuth source. errorData.reason
   // ∈ {no_token, auth_failed, rate_limited, not_found, api_error}. No token / id is echoed.
   notion_api_failed: { code: -32045, recovery: "A Notion API call failed (errorData.reason: no_token = no Notion workspace authorized — run `safespace consent --provider notion`; auth_failed = the token was rejected or the integration lacks access to the page/database (share the page with the integration in Notion); rate_limited = Notion API rate limit, slow down; not_found = the page/database/block does not exist or is not shared with the integration; api_error = other API failure). No token or id is echoed." },
+  // v1.113 — X (Twitter) OAuth provider (class A). v1.114 adds rate_limited (HTTP 429 from
+  // the tools client). errorData.reason ∈ {api_error, consent_required, no_account,
+  // rate_limited}. consent_required covers invalid_grant / expired-or-revoked refresh OR
+  // a 401 from api.x.com (re-run `safespace consent --provider x`); no_account = no stored
+  // token for the resolved user; rate_limited = X API rate limit, slow down. No token /
+  // refresh_token / user id is echoed.
+  x_api_failed: { code: -32054, recovery: "An X (Twitter) API call failed (errorData.reason: no_account = no X account authorized — run `safespace consent --provider x`; consent_required = the refresh token was rejected or expired, or api.x.com returned 401 — re-run `safespace consent --provider x`; rate_limited = X API rate limit, slow down; api_error = other API failure). No token, refresh token, or user id is echoed." },
+  // v1.115 — X post-create account allowlist (PUBLIC-surface default-deny, gate for
+  // x_post_create). The posting account id is NEVER echoed (PII-oracle defense).
+  // errorData.reason ∈ {no_allowlist, not_in_allowlist}. Code -32056 (skip -32055 —
+  // reserved by an in-flight PR).
+  x_post_denied_by_policy: { code: -32056, recovery: "The X posting account is not in the SAFESPACE_X_POST_ACCOUNTS allowlist. X posts are DEFAULT-DENY (a PUBLIC surface): add the account as a numeric user id (comma-separated) to SAFESPACE_X_POST_ACCOUNTS in your .env, or per-session via SAFESPACE_X_POST_ACCOUNTS_EXTRA. Default empty = no X posts permitted even with write tier + consent. The account id is not echoed." },
   // v1.88 — a SafeSpace-owned outbound fetch targeted a host NOT in the enforced
   // egress-destination registry (policy/egress-destinations.ts) for that connector.
   // This is an INTERNAL invariant breach (a connector bug or a path-injection host
@@ -269,6 +284,15 @@ export const ERROR_CODES: Record<ErrorName, Spec> = {
   egress_destination_blocked: { code: -32047, recovery: "A SafeSpace outbound request was blocked because its destination host is not in the enforced egress-destination registry for that connector (errorData.host = the blocked hostname). This is a defense-in-depth backstop against a connector targeting an unexpected host (a bug or a host-injection escape), not a user-configurable allowlist — the expected provider hosts are fixed in code. If this fires for a legitimate host, the registry in policy/egress-destinations.ts is out of date with the connector. Run `safespace doctor --posture` to see the registered destinations." },
   // v1.102 (W0) — inbox_read could not read the durable webhook inbox store.
   inbox_read_failed: { code: -32051, recovery: "inbox_read could not read the inbound-webhook inbox (errorData.reason: store_unavailable = the inbox store is missing, unreadable, or corrupt). The inbox is populated by the inbound webhook listener (SAFESPACE_WEBHOOK_PORT); if no webhook listener is configured the inbox is simply empty. No message content is echoed." },
+  // v1.112.8 / v1.115.3 — fail-closed source routing / provider-guard / envelope
+  // invariant tripwires. A should-never-fire internal misconfiguration (unknown
+  // ToolDef.source, a handler that received the wrong credential kind/provider,
+  // or an envelope choke-point / resolveCredential invariant breach).
+  // errorData.reason ∈ {unknown_source, credential_mismatch, invariant_violation}
+  // (closed set). NEVER echoes the bogus source string, which credential
+  // kind/provider arrived, or which invariant fired — those details must not
+  // reach a client. -32054 is reserved by an in-flight X-connector PR; this takes -32055.
+  internal_routing_error: { code: -32055, recovery: "Internal source-routing misconfiguration; this is a bug — report it. errorData.reason ∈ {unknown_source, credential_mismatch, invariant_violation}. Not a user-actionable condition (no tool args or env can fix it)." },
 };
 
 export class MCPError extends Error {

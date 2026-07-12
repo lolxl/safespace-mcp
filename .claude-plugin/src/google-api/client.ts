@@ -11,21 +11,21 @@
  * personal-use scale we target.
  */
 
-import {
-  google,
-  type calendar_v3,
-  type docs_v1,
-  type forms_v1,
-  type slides_v1,
-  type drive_v3,
-  type gmail_v1,
-  type people_v1,
-  type sheets_v4,
-  type tasks_v1,
-  type youtube_v3,
-  type youtubeAnalytics_v2,
+import type {
+  calendar_v3,
+  docs_v1,
+  forms_v1,
+  slides_v1,
+  drive_v3,
+  gmail_v1,
+  people_v1,
+  sheets_v4,
+  tasks_v1,
+  youtube_v3,
+  youtubeAnalytics_v2,
 } from "googleapis";
 import type { OAuth2Client } from "googleapis-common";
+import { getGoogle } from "./lazy-google";
 import { getAuthClient, type AuthDeps } from "./auth";
 
 /**
@@ -40,15 +40,15 @@ import { getAuthClient, type AuthDeps } from "./auth";
  * the handler.
  */
 export function gmailClientFromToken(accessToken: string): gmail_v1.Gmail {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.gmail({ version: "v1", auth: oauth });
+  return getGoogle().gmail({ version: "v1", auth: oauth });
 }
 
 export function driveClientFromToken(accessToken: string): drive_v3.Drive {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.drive({ version: "v3", auth: oauth });
+  return getGoogle().drive({ version: "v3", auth: oauth });
 }
 
 /**
@@ -61,9 +61,9 @@ export function driveClientFromToken(accessToken: string): drive_v3.Drive {
  * rather than starting with `documents.readonly`.
  */
 export function docsClientFromToken(accessToken: string): docs_v1.Docs {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.docs({ version: "v1", auth: oauth });
+  return getGoogle().docs({ version: "v1", auth: oauth });
 }
 
 /**
@@ -73,9 +73,9 @@ export function docsClientFromToken(accessToken: string): docs_v1.Docs {
  * `slides_create` / `slides_modify` (write). See docs/v1.60-slides.md §1.
  */
 export function slidesClientFromToken(accessToken: string): slides_v1.Slides {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.slides({ version: "v1", auth: oauth });
+  return getGoogle().slides({ version: "v1", auth: oauth });
 }
 
 /**
@@ -86,9 +86,9 @@ export function slidesClientFromToken(accessToken: string): slides_v1.Slides {
  * `forms.responses.readonly` (responses). See docs/v1.62-forms-readonly.md §1.
  */
 export function formsClientFromToken(accessToken: string): forms_v1.Forms {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.forms({ version: "v1", auth: oauth });
+  return getGoogle().forms({ version: "v1", auth: oauth });
 }
 
 /**
@@ -104,9 +104,9 @@ export function formsClientFromToken(accessToken: string): forms_v1.Forms {
  * over full `calendar` (admin scope, far beyond SafeSpace's surface needs).
  */
 export function calendarClientFromToken(accessToken: string): calendar_v3.Calendar {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.calendar({ version: "v3", auth: oauth });
+  return getGoogle().calendar({ version: "v3", auth: oauth });
 }
 
 /**
@@ -123,9 +123,9 @@ export function calendarClientFromToken(accessToken: string): calendar_v3.Calend
  * `contacts.other.readonly` / `directory.readonly` (locked rejected §14).
  */
 export function peopleClientFromToken(accessToken: string): people_v1.People {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.people({ version: "v1", auth: oauth });
+  return getGoogle().people({ version: "v1", auth: oauth });
 }
 
 /**
@@ -147,9 +147,9 @@ export function peopleClientFromToken(accessToken: string): people_v1.People {
  * docs/v1.16-youtube-api.md §13 Risk 3.
  */
 export function youtubeClientFromToken(accessToken: string): youtube_v3.Youtube {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.youtube({ version: "v3", auth: oauth });
+  return getGoogle().youtube({ version: "v3", auth: oauth });
 }
 
 /**
@@ -161,9 +161,9 @@ export function youtubeClientFromToken(accessToken: string): youtube_v3.Youtube 
 export function youtubeAnalyticsClientFromToken(
   accessToken: string,
 ): youtubeAnalytics_v2.Youtubeanalytics {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.youtubeAnalytics({ version: "v2", auth: oauth });
+  return getGoogle().youtubeAnalytics({ version: "v2", auth: oauth });
 }
 
 /**
@@ -185,9 +185,9 @@ export function youtubeAnalyticsClientFromToken(
  * heavy (no `youtube_search` equivalent at 100 units / call).
  */
 export function tasksClientFromToken(accessToken: string): tasks_v1.Tasks {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.tasks({ version: "v1", auth: oauth });
+  return getGoogle().tasks({ version: "v1", auth: oauth });
 }
 
 /**
@@ -212,9 +212,9 @@ export function tasksClientFromToken(accessToken: string): tasks_v1.Tasks {
  * `sheets_append_values` / `sheets_create` patterns show abuse.
  */
 export function sheetsClientFromToken(accessToken: string): sheets_v4.Sheets {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
-  return google.sheets({ version: "v4", auth: oauth });
+  return getGoogle().sheets({ version: "v4", auth: oauth });
 }
 
 /**
@@ -230,7 +230,7 @@ export function sheetsClientFromToken(accessToken: string): sheets_v4.Sheets {
  * from `ctx.getAccessToken()`. Middleware handles 401 retry.
  */
 export function oauth2ClientFromToken(accessToken: string): OAuth2Client {
-  const oauth = new google.auth.OAuth2();
+  const oauth = new (getGoogle().auth.OAuth2)();
   oauth.setCredentials({ access_token: accessToken, token_type: "Bearer" });
   return oauth;
 }
@@ -248,7 +248,7 @@ export async function getGmailClient(
   deps?: AuthDeps,
 ): Promise<gmail_v1.Gmail> {
   const auth = await getAuthClient(email, deps);
-  return google.gmail({ version: "v1", auth });
+  return getGoogle().gmail({ version: "v1", auth });
 }
 
 export async function getDriveClient(
@@ -256,5 +256,5 @@ export async function getDriveClient(
   deps?: AuthDeps,
 ): Promise<drive_v3.Drive> {
   const auth = await getAuthClient(email, deps);
-  return google.drive({ version: "v3", auth });
+  return getGoogle().drive({ version: "v3", auth });
 }

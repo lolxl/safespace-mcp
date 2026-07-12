@@ -21,6 +21,13 @@ Node — Bun is not required** on the consumer machine.
   `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET`. (Only for the Google connectors;
   GitHub / Notion / service-token connectors are optional and configured the
   same way.) See [`.env.example`](../.env.example) for the full variable list.
+  - ⚠️ **Publish the OAuth consent screen to "In production"** (Cloud Console →
+    *APIs & Services → OAuth consent screen* → **Publish app**). The default
+    **"Testing"** status expires refresh tokens after **7 days**, forcing a weekly
+    re-`consent`. The "unverified app" prompt is expected for a self-hosted client
+    you authored (click *Advanced → Go to app*); **no Google verification is
+    needed**. **Workspace** users can use **user type "Internal"** instead (no
+    expiry, no warning; org-confined). Re-run `consent … --re-auth` after changing.
 - A stable **config directory** (`SAFESPACE_CONFIG_DIR`) where OAuth tokens and
   state persist between runs. Pick any path you control, e.g. `~/.safespace`.
 

@@ -69,7 +69,10 @@
 //   -32004 / -32022) below NO LONGER no-op against synthetic test
 //   fixtures alone — they fire against real production audit.jsonl rows.
 
-import { AUDIT_META_CHANNELS, type SuspiciousClassification } from "../../audit";
+// Import the META-CHANNEL registry from the PURE leaf, NOT the barrel — this is
+// the read-side that the extraction was for: it keeps the v1.89 chain WRITER
+// (audit.ts) off this CLI reader's import path.
+import { AUDIT_META_CHANNELS, type SuspiciousClassification } from "../../audit/meta-channels";
 import { CliError, type CliIO } from "../../cli";
 import {
   parseWindow,

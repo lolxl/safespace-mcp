@@ -144,7 +144,7 @@ describe("github read handlers — cross-provider-token backstop (R8)", () => {
   test("a GOOGLE credential handed to a github handler THROWS before any fetch", async () => {
     const f = fetchStub([]);
     const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("alice@example.com", () => "g-token"), tier: "read", audit: NOOP_AUDIT };
-    await expect(githubListRepos(googleCtx, {}, { fetchImpl: f.impl })).rejects.toThrow(/github handler received a 'google'/);
+    await expect(githubListRepos(googleCtx, {}, { fetchImpl: f.impl })).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 });
@@ -334,7 +334,7 @@ describe("v1.76 — GitHub READ-deepening handlers", () => {
       () => githubGetFileContent(googleCtx, { owner: "o", repo: "r", path: "a.ts" }, { fetchImpl: f.impl }),
       () => githubGetCommit(googleCtx, { owner: "o", repo: "r", ref: "abc" }, { fetchImpl: f.impl }),
     ]) {
-      await expect(call()).rejects.toThrow(/github handler received a 'google'/);
+      await expect(call()).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     }
     expect(f.calls).toHaveLength(0);
   });
@@ -470,7 +470,7 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
     const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubCreateIssue(googleCtx, { owner: "octo", repo: "repo", title: "x" }, { fetchImpl: f.impl }),
-    ).rejects.toThrow(/github handler received a 'google'/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 
@@ -561,7 +561,7 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
     const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubCreatePullRequest(googleCtx, { owner: "octo", repo: "repo", title: "x", head: "f", base: "main" }, { fetchImpl: f.impl }),
-    ).rejects.toThrow(/github handler received a 'google'/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 
@@ -623,7 +623,7 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
     const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubSetIssueLabels(googleCtx, { owner: "octo", repo: "repo", number: 7, labels: ["x"] }, { fetchImpl: f.impl }),
-    ).rejects.toThrow(/github handler received a 'google'/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 });
@@ -748,7 +748,7 @@ describe("github MERGE handler — github_merge_pull_request (v1.82, IRREVERSIBL
     const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubMergePullRequest(googleCtx, { owner: "octo", repo: "repo", number: 7 }, { fetchImpl: f.impl }),
-    ).rejects.toThrow(/github handler received a 'google'/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 });
@@ -938,7 +938,7 @@ describe("github REVIEW handler — github_create_pull_request_review (v1.90, EV
     const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubCreatePullRequestReview(googleCtx, { owner: "octo", repo: "repo", number: 7, event: "APPROVE" }, { fetchImpl: f.impl }),
-    ).rejects.toThrow(/github handler received a 'google'/);
+    ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
 });

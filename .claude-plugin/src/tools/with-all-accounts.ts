@@ -6,7 +6,7 @@
 // + #121 code-rev L3). No setLastUsed() call anywhere in this file.
 
 import * as crypto from "node:crypto";
-import { auditCrossAccountAggregate, auditEnd } from "../audit";
+import { auditCrossAccountAggregate, auditEnd, pickAuditErrorForensics } from "../audit";
 import { loadIndex } from "../auth/keychain";
 import { refreshAccessToken, type RefreshDeps, type TokenSet } from "../auth/refresh";
 import { MCPError } from "../errors";
@@ -158,7 +158,19 @@ interface SubResult {
   plan: Plan;
   outcome:
     | { kind: "ok"; sanitized: unknown }
-    | { kind: "failed"; code: string; message: string };
+    // v1.111 (#2) — `errorCode` (numeric MCPError.code) + `errorForensics`
+    // (whitelisted MCPError.data fields) ride alongside the flattened public
+    // `code`/`message` so the INNER audit row reaches forensic parity with the
+    // single-account choke point (with-context.ts). They feed ONLY the durable
+    // audit row — the returned `failures[]` shape stays flattened by
+    // `mapRejectedReason` (anti-enumeration), unchanged.
+    | {
+        kind: "failed";
+        code: string;
+        message: string;
+        errorCode?: number;
+        errorForensics?: Record<string, unknown>;
+      };
   durationMs: number;
 }
 
@@ -167,7 +179,10 @@ function failureFromPlan(plan: Plan, subStart: number): SubResult {
   const code = plan.kind as "account_not_found" | "scope_mismatch";
   return {
     plan,
-    outcome: { kind: "failed", code, message: code },
+    // The numeric MCPError code (via the public accessor) so the inner audit row
+    // carries `error_code` for these pre-call plan failures too — the
+    // suspicious / policy-decisions readers key off it.
+    outcome: { kind: "failed", code, message: code, errorCode: new MCPError(code).code },
     durationMs: Date.now() - subStart,
   };
 }
@@ -342,9 +357,22 @@ export async function withAllAccounts<T>(
       };
     } catch (err) {
       const mapped = mapRejectedReason(err, tool);
+      // Capture the PRECISE numeric MCPError code + whitelisted forensic fields for
+      // the inner audit row BEFORE `mapRejectedReason` flattens to the anti-
+      // enumeration failures[] shape (mirrors with-context.ts). A non-MCPError
+      // (plain Error) leaves both undefined → auditEnd omits them (presence-as-signal).
+      const errorCode = err instanceof MCPError ? err.code : undefined;
+      const errorForensics =
+        err instanceof MCPError ? pickAuditErrorForensics(err.errorData) : undefined;
       return {
         plan,
-        outcome: { kind: "failed" as const, code: mapped.code, message: mapped.message },
+        outcome: {
+          kind: "failed" as const,
+          code: mapped.code,
+          message: mapped.message,
+          errorCode,
+          errorForensics,
+        },
         durationMs: Date.now() - subStart,
       };
     }
@@ -366,6 +394,12 @@ export async function withAllAccounts<T>(
       successes.push(subSuccess);
       void auditInnerImpl({
         tool,
+        // v1.111 (#2) — the Source connector id, mirroring the single-account
+        // choke point. source.id === "google-workspace" for every current `_all`
+        // tool, so auditEnd's `?? "google-workspace"` default made the old row
+        // byte-identical; threading it explicitly is byte-identical TODAY and
+        // correct the moment a non-Google `_all` tool exists.
+        source: source.id,
         email: r.plan.email,
         // v1.64 Phase B (B6 — R10 audit upgrade) — attribute the operator on the
         // inner row (byte-stable null when $SAFESPACE_OPERATOR_ID is unset).
@@ -383,6 +417,8 @@ export async function withAllAccounts<T>(
       // (status: "error") so forensic audit can reconstruct what was queried.
       void auditInnerImpl({
         tool,
+        // v1.111 (#2) — source parity with the ok branch / single-account path.
+        source: source.id,
         email: r.plan.email,
         // v1.64 Phase B (B6 — R10 audit upgrade) — operator on the inner row too
         // (byte-stable null when $SAFESPACE_OPERATOR_ID is unset).
@@ -390,6 +426,13 @@ export async function withAllAccounts<T>(
         argsHash: innerHash,
         status: "error",
         durationMs: r.durationMs,
+        // v1.111 (#2) — the precise numeric MCPError code + whitelisted forensic
+        // fields (captured pre-flatten above). Without these the inner error row
+        // carried `status:"error"` but NO `error_code`, so a `*_all` per-account
+        // failure was invisible to the suspicious / policy-decisions readers (which
+        // key off error_code). undefined for a non-MCPError → auditEnd omits them.
+        errorCode: r.outcome.errorCode,
+        errorForensics: r.outcome.errorForensics,
       });
     }
   }

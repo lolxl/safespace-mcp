@@ -114,6 +114,9 @@ describe("TOOL_REGISTRY", () => {
       "telegram_get_updates",
       "telegram_send_message",
       "web_fetch",
+      "x_get_me",
+      "x_post_create",
+      "x_search_recent",
       "youtube_analytics_query",
       "youtube_channel_uploads",
       "youtube_comment_delete",
@@ -1443,6 +1446,7 @@ describe("v1.64 Phase B (B0) — ToolDef.direction outbound-write labels", () =>
     // v1.95 — slack_send_message joins the egress surface.
     // v1.96 — the 3 Notion WRITE tools join the egress surface.
     // v1.107 — mattermost_send_message joins the egress surface.
+    // v1.115 — x_post_create joins the egress surface (PUBLIC-surface X write).
     expect(outbound).toEqual([
       "discord_send_message",
       "github_create_issue",
@@ -1461,6 +1465,7 @@ describe("v1.64 Phase B (B0) — ToolDef.direction outbound-write labels", () =>
       "notion_update_page",
       "slack_send_message",
       "telegram_send_message",
+      "x_post_create",
     ]);
   });
 
@@ -1591,8 +1596,8 @@ describe("v1.97 — Slack READ tools (the first service-token READ)", () => {
     expect(TOOL_REGISTRY.slack_users_list!.inputSchema.required).toBeUndefined();
   });
 
-  test("127 implemented tools (v1.104 +2 Slack users.*; v1.106 +1 youtube_video_update; v1.107 +4 Mattermost)", () => {
-    expect(IMPLEMENTED_TOOLS.size).toBe(127);
+  test("130 implemented tools (v1.107 +4 Mattermost; v1.114 +2 X read; v1.115 +1 X post)", () => {
+    expect(IMPLEMENTED_TOOLS.size).toBe(130);
   });
 });
 

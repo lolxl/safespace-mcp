@@ -35,12 +35,17 @@ describe("EGRESS_DESTINATIONS registry", () => {
     }
   });
 
-  test("the 5 socket-owned connectors are enforced; google + web-fetch are declared", () => {
-    for (const c of ["github", "notion", "line", "telegram", "discord"]) {
+  test("the socket-owned connectors are enforced; google + web-fetch are declared", () => {
+    for (const c of ["github", "notion", "x", "line", "telegram", "discord", "slack"]) {
       expect(byConnector(c).enforcement, c).toBe("enforced");
     }
     expect(byConnector("google-workspace").enforcement).toBe("declared");
     expect(byConnector("web-fetch").enforcement).toBe("declared");
+  });
+
+  test("v1.113 — x is enforced against api.x.com", () => {
+    expect(byConnector("x").hosts).toEqual(["api.x.com"]);
+    expect(byConnector("x").enforcement).toBe("enforced");
   });
 
   test("v1.107 — mattermost is 'configured' (self-hosted; host pinned at runtime, not a fixed constant)", () => {
@@ -57,6 +62,7 @@ describe("assertEgressHost", () => {
   test("the registered host for a connector passes (no throw)", () => {
     expect(() => assertEgressHost("api.github.com", "github")).not.toThrow();
     expect(() => assertEgressHost("api.notion.com", "notion")).not.toThrow();
+    expect(() => assertEgressHost("api.x.com", "x")).not.toThrow();
     expect(() => assertEgressHost("api.line.me", "line")).not.toThrow();
     expect(() => assertEgressHost("api.telegram.org", "telegram")).not.toThrow();
     expect(() => assertEgressHost("discord.com", "discord")).not.toThrow();

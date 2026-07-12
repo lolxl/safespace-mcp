@@ -166,7 +166,7 @@ describe("notion read handlers — cross-provider backstop (requireNotion, R6)",
       () => notionSearch(googleCtx, {}, { fetchImpl: f.impl }),
       () => notionGetDatabase(googleCtx, { database_id: DB_ID }, { fetchImpl: f.impl }),
     ]) {
-      await expect(call()).rejects.toThrow(/notion handler received a 'google'/);
+      await expect(call()).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     }
     expect(f.calls).toHaveLength(0);
   });
