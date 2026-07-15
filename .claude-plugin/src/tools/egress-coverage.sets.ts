@@ -8,34 +8,83 @@
 
 // ── Bucket 1: CENTRALIZED_EGRESS ──────────────────────────────────────────────
 // Reaches an external party AND is gated by `tools/egress.ts` (the F3a
-// secret-shape scan + a recipient / target allowlist). This set MUST stay
-// identical to the `direction:"outbound-write"` label set — the cross-check
-// in egress-coverage.test.ts pins that, so the two can never drift apart.
-//   gmail_send / gmail_create_draft  → enforceEgressGates  (recipient + secret)
-//   line_push_message                → enforceLineEgressGates
-//   telegram_send_message            → enforceTelegramEgressGates
-//   discord_send_message             → enforceDiscordEgressGates
-//   slack_send_message               → enforceSlackEgressGates
-//   mattermost_send_message          → enforceMattermostEgressGates (self-hosted; the
-//                                        configured-host pin lives in the client)
-//   github_create_issue / _comment / update_issue / create_pull_request
-//                                    → enforceGithubWriteEgressGates
-//   github_merge_pull_request         → enforceGithubMergeEgressGates (SEPARATE
-//                                        default-deny merge allowlist; IRREVERSIBLE)
-//   github_create_pull_request_review → enforceGithubReviewEgressGates (EVENT-CONDITIONAL:
-//                                        APPROVE → SEPARATE default-deny approve allowlist;
-//                                        COMMENT / REQUEST_CHANGES → the write allowlist)
+// secret-shape scan + a recipient / target allowlist), with the gate
+// HANDLER-CALLED (the B3 posture). CENTRALIZED_EGRESS ∪ PIPELINE_EGRESS (bucket
+// 1b below) MUST stay identical to the `direction:"outbound-write"` label set,
+// and the two buckets disjoint — the cross-checks in egress-coverage.test.ts pin
+// both, so none can drift apart.
+//
+// B6.1 wave A (github + notion sweep) — the LAST 10 handler-called egress tools
+// (github_create_issue / _comment / update_issue / create_pull_request /
+// merge_pull_request / create_pull_request_review / set_issue_labels;
+// notion_create_page / _append_blocks / _update_page) MIGRATED to PIPELINE_EGRESS:
+// their handler-called enforceGithub*/enforceNotionWriteEgressGates calls became
+// PIPELINE-FIRED by withToolContext via each write tool's egress descriptor
+// (tools/egress-pipeline.ts). This bucket is now EMPTY — the B3 handler-called
+// posture retired for every OAuth write. The bucket + its sentinels stay (a future
+// connector could reintroduce a handler-called gate); an empty set trivially
+// satisfies every cross-check.
+export const CENTRALIZED_EGRESS: ReadonlySet<string> = new Set([]);
+
+// ── Bucket 1b: PIPELINE_EGRESS (B6.1 wave A1; A2a adds x_post_create) ─────────
+// Reaches an external party AND is gated by `tools/egress.ts`, but the gate is
+// PIPELINE-FIRED: the tool's registry def carries an egress descriptor
+// (tools/egress-pipeline.ts) and the tool's choke point (withNonOAuthContext for
+// the service-token sends; withToolContext for x_post_create) fires
+// extract → gate BEFORE the handler runs. The handler must NOT call the gate
+// itself (anti-double-fire — a double fire would double requireSendApproval + the
+// denial audit rows); the call-site sentinel (egress-callsite.test.ts) enforces
+// both directions, and the coverage sentinel pins CENTRALIZED ∪ PIPELINE == the
+// outbound-write label set with the two disjoint.
+//   line_push_message       → enforceLineEgressGates       (via lineEgressDescriptor)
+//   telegram_send_message   → enforceTelegramEgressGates   (via telegramEgressDescriptor)
+//   discord_send_message    → enforceDiscordEgressGates    (via discordEgressDescriptor)
+//   slack_send_message      → enforceSlackEgressGates      (via slackEgressDescriptor;
+//                              gate input = the RAW text, escaping is wire-only)
+//   mattermost_send_message → enforceMattermostEgressGates (via mattermostEgressDescriptor;
+//                              self-hosted; the configured-host pin lives in the client)
+//   x_post_create           → enforceXPostEgressGates      (via xPostEgressDescriptor;
+//                              TRANSFORMING: the gate RETURNS the sanitized text →
+//                              ctx.egress; OAuth-routed, fired by withToolContext)
+//   youtube_video_comment_post / youtube_comment_reply
+//                           → enforceYoutubeCommentEgressGates (B6.1 wave A2b; shared
+//                              wrapper, distinct `tool` literals; TRANSFORMING: allowlist
+//                              → burst pre-check → outboundSanitize; OAuth-routed)
+//   youtube_video_update    → enforceYoutubeVideoUpdateEgressGates (B6.1 wave A2b;
+//                              TRANSFORMING per-FIELD: allowlist → per-field
+//                              outboundSanitize → F3a secret-shape; OAuth-routed)
+//   gmail_send / gmail_create_draft
+//                           → enforceGmailComposeEgressGates (B6.1 wave A3+D; shared
+//                              wrapper, distinct `tool` literals; TRANSFORMING: header
+//                              gates → contact-lookup resolution [gmail_send, via
+//                              source.resolveRecipients] → recipient/secret/tainted
+//                              gates → supervised-send approval; RETURNS the RESOLVED
+//                              shape; OAuth-routed, fired by withToolContext)
+//   github_create_issue / _comment / update_issue / create_pull_request / set_issue_labels
+//                           → enforceGithubWriteEgressGates (B6.1 wave A; CHECK-ONLY —
+//                              default-deny write allowlist + F3a secret-shape; the gate
+//                              returns void, the handler wires its own vetted args)
+//   github_merge_pull_request → enforceGithubMergeEgressGates (B6.1 wave A; CHECK-ONLY;
+//                              SEPARATE default-deny merge allowlist; IRREVERSIBLE)
+//   github_create_pull_request_review → enforceGithubReviewEgressGates (B6.1 wave A;
+//                              CHECK-ONLY; EVENT-CONDITIONAL: APPROVE → approve allowlist,
+//                              COMMENT / REQUEST_CHANGES → write allowlist; `event` rides the shape)
 //   notion_create_page / _append_blocks / _update_page
-//                                    → enforceNotionWriteEgressGates (model B: F3a
-//                                       secret-shape, NO target allowlist)
-export const CENTRALIZED_EGRESS: ReadonlySet<string> = new Set([
-  "gmail_send",
-  "gmail_create_draft",
+//                           → enforceNotionWriteEgressGates (B6.1 wave A; CHECK-ONLY; model
+//                              B: F3a secret-shape, NO target allowlist; notion_create_page's
+//                              extract covers BOTH the page-parent and db-parent gate inputs)
+export const PIPELINE_EGRESS: ReadonlySet<string> = new Set([
   "line_push_message",
   "telegram_send_message",
   "discord_send_message",
   "slack_send_message",
   "mattermost_send_message",
+  "x_post_create",
+  "youtube_video_comment_post",
+  "youtube_comment_reply",
+  "youtube_video_update",
+  "gmail_send",
+  "gmail_create_draft",
   "github_create_issue",
   "github_create_issue_comment",
   "github_update_issue",
@@ -46,7 +95,6 @@ export const CENTRALIZED_EGRESS: ReadonlySet<string> = new Set([
   "notion_create_page",
   "notion_append_blocks",
   "notion_update_page",
-  "x_post_create",
 ]);
 
 // ── Bucket 2: HANDLER_GATED_EXTERNAL ──────────────────────────────────────────
@@ -58,19 +106,12 @@ export const CENTRALIZED_EGRESS: ReadonlySet<string> = new Set([
 //                                 share_type values) + policy/recipient-allowlist
 //                                 (isRecipientAllowed on share_type=user); both
 //                                 fail-closed.  [handlers/drive.ts]
-//   youtube_video_comment_post → public-surface 4-gate: outbound-sanitize REJECT
-//   youtube_comment_reply        (sanitize/outbound) + policy/youtube-comment-
-//                                 targets (default-deny allowlist) + policy/
-//                                 youtube-comment-burst.  [handlers/youtube.ts]
-//   youtube_video_update       → public-surface: outbound-sanitize REJECT per field
-//                                 (sanitize/outbound) + policy/youtube-video-targets
-//                                 (default-deny allowlist) + F3a secret-shape
-//                                 (egress.enforceOutboundSecret).  [handlers/youtube.ts]
+// (B6.1 wave A2b — the 3 YouTube public-surface writes MIGRATED to PIPELINE_EGRESS:
+//  their bespoke handler gate blocks became the composite wrappers
+//  enforceYoutubeCommentEgressGates / enforceYoutubeVideoUpdateEgressGates in
+//  tools/egress.ts, fired by withToolContext via each tool's egress descriptor.)
 export const HANDLER_GATED_EXTERNAL: ReadonlySet<string> = new Set([
   "drive_share_file",
-  "youtube_video_comment_post",
-  "youtube_comment_reply",
-  "youtube_video_update",
 ]);
 
 // ── Bucket 3: OWN_DATA_WRITE ──────────────────────────────────────────────────

@@ -1,9 +1,10 @@
 // v1.95 — Slack recipient (channel / group / DM / user id) allowlist.
 //
-// The per-connector ID regex + the two env-var names; the parse / state /
-// membership / summary logic is the shared policy/service-token-allowlist.ts
-// factory. The Slack conversation-id regex stays a named export here —
-// tools/handlers/slack.ts imports it for pre-egress syntactic validation.
+// Thin pack instantiation: the per-connector ID regex + the two env-var names live
+// on SLACK_PACK; the parse / state / membership / summary logic is the shared
+// makeServiceTokenRecipientAllowlist factory. The Slack conversation-id regex stays a
+// named export here — tools/handlers/slack.ts imports it for pre-egress syntactic
+// validation.
 //
 //   SAFESPACE_SLACK_RECIPIENT_ALLOW        (persistent)
 //   SAFESPACE_SLACK_RECIPIENT_ALLOW_EXTRA  (shell-only, additive, per-session)
@@ -13,16 +14,14 @@
 // the public youtube-comment deny-default); under SAFESPACE_AUTONOMOUS unset/empty
 // DENIES ALL (F2 deny-by-default). See service-token-allowlist.ts for detail.
 
+import { SLACK_PACK } from "../tools/service-token-pack";
 import {
-  ENV_SLACK_RECIPIENT_ALLOW as ENV_SK_ALLOW,
-  ENV_SLACK_RECIPIENT_ALLOW_EXTRA as ENV_SK_ALLOW_EXTRA,
-} from "../config";
-import {
-  makeServiceTokenAllowlist,
+  makeServiceTokenRecipientAllowlist,
   type ServiceTokenAllowlistState,
-} from "./service-token-allowlist";
+} from "./service-token-recipient-allowlist";
 
-export { ENV_SK_ALLOW, ENV_SK_ALLOW_EXTRA };
+export const ENV_SK_ALLOW = SLACK_PACK.env.recipientAllow;
+export const ENV_SK_ALLOW_EXTRA = SLACK_PACK.env.recipientAllowExtra;
 
 /** A Slack conversation target id: a channel `C…`, private group `G…`, DM `D…`, or a
  *  user `U…`/`W…` (a user id addresses a direct message). Slack ids are an uppercase
@@ -31,15 +30,11 @@ export { ENV_SK_ALLOW, ENV_SK_ALLOW_EXTRA };
  *  fixed-alphabet implicitly rejects CR/LF/NUL/`#name`/`@name`/whitespace, and since the
  *  id rides in the request BODY (not a URL path segment for chat.postMessage) there is no
  *  traversal surface — the bound is hygiene, not a path guard. */
-export const SLACK_CHANNEL_ID_RE = /^[CDGUW][A-Z0-9]{6,20}$/;
+export const SLACK_CHANNEL_ID_RE = SLACK_PACK.recipientIdSpec.regex;
 
 export type SlackAllowlistState = ServiceTokenAllowlistState;
 
-const allowlist = makeServiceTokenAllowlist({
-  idRe: SLACK_CHANNEL_ID_RE,
-  envAllow: ENV_SK_ALLOW,
-  envExtra: ENV_SK_ALLOW_EXTRA,
-});
+const allowlist = makeServiceTokenRecipientAllowlist(SLACK_PACK);
 
 /** Resolve the current Slack allowlist state from the two env layers. */
 export function getSlackAllowlistState(): SlackAllowlistState {

@@ -9,6 +9,11 @@
 // `requiredScopes: []` (Notion OAuth has no scope param — capabilities are configured at
 // the Notion integration, NOT a google V1_SCOPES entry). `min_tier: "read"`.
 
+import {
+  notionAppendBlocksEgressDescriptor,
+  notionCreatePageEgressDescriptor,
+  notionUpdatePageEgressDescriptor,
+} from "../egress-pipeline";
 import type { ToolDef } from "./types";
 import * as handlers from "../handlers";
 
@@ -195,6 +200,7 @@ export const notionTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "notion",
     direction: "outbound-write",
+    egress: notionCreatePageEgressDescriptor,
   },
   notion_append_blocks: {
     name: "notion_append_blocks",
@@ -219,6 +225,7 @@ export const notionTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "notion",
     direction: "outbound-write",
+    egress: notionAppendBlocksEgressDescriptor,
   },
   notion_update_page: {
     name: "notion_update_page",
@@ -247,5 +254,6 @@ export const notionTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "notion",
     direction: "outbound-write",
+    egress: notionUpdatePageEgressDescriptor,
   },
 };

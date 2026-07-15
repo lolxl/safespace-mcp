@@ -1,13 +1,19 @@
 // v1.114 / v1.115 — X handlers: happy paths via fetchStub, input validation, requireX
-// backstop, status → closed-set reason, and x_post_create deny-before-network proof.
-// The X REST API is mocked at the fetch seam (no network).
+// backstop, status → closed-set reason. The X REST API is mocked at the fetch seam
+// (no network).
+//
+// B6.1 wave A2a — the x_post_create GATE cases (allowlist denial / deny-before-
+// network / no-echo) MOVED to tools/egress-pipeline.test.ts (same assertions, driven
+// through the pipeline's registry-carried descriptor + withToolContext): the gate is
+// now PIPELINE-FIRED, so this handler never calls it. What stays here is the
+// handler's OWN contract: input validation (the exported validateXPostArgs re-run),
+// the requireX narrow, and "the wire body is ctx.egress.body — the PIPELINE's
+// sanitized result — never a recomputation of args.text".
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { Credential, ToolContext } from "../types";
 import { NOOP_AUDIT, oauthCred } from "../test-audit";
 import { xGetMe, xPostCreate, xSearchRecent, xWeightedLength, X_WEIGHTED_MAX } from "./x";
-import { __internal as xPostAllowlist } from "../../policy/x-post-allowlist";
-import { ENV_X_POST_ACCOUNTS, ENV_X_POST_ACCOUNTS_EXTRA } from "../../config";
 
 const USER_ID = "2244994945";
 
@@ -27,22 +33,6 @@ function ctx(token = "x-access-SECRET", tier: "read" | "write" = "read"): ToolCo
     audit: NOOP_AUDIT,
   };
 }
-
-const savedAllow: Record<string, string | undefined> = {};
-beforeEach(() => {
-  for (const k of [ENV_X_POST_ACCOUNTS, ENV_X_POST_ACCOUNTS_EXTRA]) {
-    savedAllow[k] = process.env[k];
-    delete process.env[k];
-  }
-  xPostAllowlist.resetSingletons();
-});
-afterEach(() => {
-  for (const k of [ENV_X_POST_ACCOUNTS, ENV_X_POST_ACCOUNTS_EXTRA]) {
-    if (savedAllow[k] === undefined) delete process.env[k];
-    else process.env[k] = savedAllow[k]!;
-  }
-  xPostAllowlist.resetSingletons();
-});
 
 /** A fetch stub returning `body` (JSON-serialized) with `status`; records url + init. */
 function fetchStub(body: unknown, status = 200) {
@@ -240,14 +230,18 @@ describe("xWeightedLength", () => {
   });
 });
 
-describe("x_post_create — happy path", () => {
-  test("POSTs allowlist-constructed {text} body with Bearer; returns {data:{id,text}}", async () => {
-    process.env[ENV_X_POST_ACCOUNTS] = USER_ID;
-    xPostAllowlist.resetSingletons();
+// B6.1 wave A2a — a ToolContext carrying the pipeline-fired gate's transformed
+// result on ctx.egress (what withToolContext stores before running this handler).
+function pipelineCtx(body: string, token = "tok-post"): ToolContext {
+  return { ...ctx(token, "write"), egress: { kind: "x-post", body } };
+}
+
+describe("x_post_create — happy path (pipeline contract)", () => {
+  test("POSTs the ctx.egress PIPELINE result as {text} with Bearer; returns {data:{id,text}}", async () => {
     const body = { data: { id: "191", text: "hello world" } };
     const f = fetchStub(body, 201);
     const out = (await xPostCreate(
-      ctx("tok-post", "write"),
+      pipelineCtx("hello world"),
       { text: "hello world" },
       { fetchImpl: f.impl },
     )) as typeof body;
@@ -259,50 +253,37 @@ describe("x_post_create — happy path", () => {
     expect(h.Authorization).toBe("Bearer tok-post");
     expect(out).toEqual(body);
   });
-});
 
-describe("x_post_create — DENY before network (acceptance #4)", () => {
-  test("EMPTY allowlist → x_post_denied_by_policy + ZERO fetch calls", async () => {
-    // Allowlist unset (default-deny / "off").
-    const f = fetchStub({ data: { id: "x", text: "nope" } }, 201);
-    await expect(
-      xPostCreate(ctx("tok", "write"), { text: "should never post" }, { fetchImpl: f.impl }),
-    ).rejects.toMatchObject({
-      errorName: "x_post_denied_by_policy",
-      errorData: { reason: "no_allowlist", tool: "x_post_create" },
-    });
-    expect(f.calls).toHaveLength(0);
+  test("the wire body is ctx.egress.body — NEVER a recomputation of args.text", async () => {
+    // Divergent fixture: if the handler recomputed from args, the wire would carry
+    // the raw args text. It must carry the pipeline's (gate-sanitized) result.
+    const f = fetchStub({ data: { id: "1", text: "x" } }, 201);
+    await xPostCreate(
+      pipelineCtx("PIPELINE-SANITIZED"),
+      { text: "raw args text" },
+      { fetchImpl: f.impl },
+    );
+    expect(f.calls[0]!.init.body).toBe(JSON.stringify({ text: "PIPELINE-SANITIZED" }));
   });
 
-  test("active allowlist + non-matching account → not_in_allowlist + ZERO fetch", async () => {
-    process.env[ENV_X_POST_ACCOUNTS] = "1111111111"; // not USER_ID
-    xPostAllowlist.resetSingletons();
+  test("ctx.egress ABSENT → internal_routing_error{invariant_violation} + ZERO fetch (pipeline-bypass backstop)", async () => {
     const f = fetchStub({}, 201);
     await expect(
       xPostCreate(ctx("tok", "write"), { text: "hi" }, { fetchImpl: f.impl }),
     ).rejects.toMatchObject({
-      errorName: "x_post_denied_by_policy",
-      errorData: { reason: "not_in_allowlist" },
+      errorName: "internal_routing_error",
+      errorData: { reason: "invariant_violation" },
     });
     expect(f.calls).toHaveLength(0);
-    // Denial NEVER echoes the account id or the post text.
-    let thrown: unknown;
-    await xPostCreate(ctx("tok", "write"), { text: "secret-text" }, { fetchImpl: f.impl }).catch(
-      (e) => {
-        thrown = e;
-      },
-    );
-    const s = JSON.stringify(thrown);
-    expect(s).not.toContain(USER_ID);
-    expect(s).not.toContain("secret-text");
-    expect(s).not.toContain("1111111111");
   });
 });
 
-describe("x_post_create — input validation before network", () => {
+// The GATE cases (allowlist denial / not_in_allowlist / no-echo / deny-before-
+// network) MOVED to tools/egress-pipeline.test.ts (B6.1 wave A2a — same
+// assertions, driven through the registry-carried descriptor + withToolContext).
+
+describe("x_post_create — input validation before network (validateXPostArgs re-run)", () => {
   test("empty / missing / non-string text rejected with ZERO fetch", async () => {
-    process.env[ENV_X_POST_ACCOUNTS] = USER_ID;
-    xPostAllowlist.resetSingletons();
     const f = fetchStub({}, 201);
     await expect(xPostCreate(ctx("t", "write"), {}, { fetchImpl: f.impl })).rejects.toThrow(
       /text/,
@@ -317,8 +298,6 @@ describe("x_post_create — input validation before network", () => {
   });
 
   test("weighted length > 280 rejected with ZERO fetch (no network on over-limit)", async () => {
-    process.env[ENV_X_POST_ACCOUNTS] = USER_ID;
-    xPostAllowlist.resetSingletons();
     const f = fetchStub({}, 201);
     const over = "a".repeat(X_WEIGHTED_MAX + 1);
     expect(xWeightedLength(over)).toBe(X_WEIGHTED_MAX + 1);
@@ -329,19 +308,15 @@ describe("x_post_create — input validation before network", () => {
   });
 
   test("exactly 280 weighted chars is accepted (hits the network)", async () => {
-    process.env[ENV_X_POST_ACCOUNTS] = USER_ID;
-    xPostAllowlist.resetSingletons();
-    const f = fetchStub({ data: { id: "1", text: "a".repeat(280) } }, 201);
     const exact = "a".repeat(X_WEIGHTED_MAX);
-    await xPostCreate(ctx("t", "write"), { text: exact }, { fetchImpl: f.impl });
+    const f = fetchStub({ data: { id: "1", text: exact } }, 201);
+    await xPostCreate(pipelineCtx(exact, "t"), { text: exact }, { fetchImpl: f.impl });
     expect(f.calls).toHaveLength(1);
   });
 });
 
 describe("x_post_create — requireX backstop", () => {
   test("a NON-x credential throws before any fetch", async () => {
-    process.env[ENV_X_POST_ACCOUNTS] = USER_ID;
-    xPostAllowlist.resetSingletons();
     const f = fetchStub({}, 201);
     const googleCtx: ToolContext = {
       allowedAccounts: null,

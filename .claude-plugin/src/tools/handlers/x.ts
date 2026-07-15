@@ -13,7 +13,11 @@
 //
 // THE ENVELOPE IS THE POINT: free-text name / description / tweet text are
 // attacker-influenced on READ (inbound wrap). On WRITE, agent-authored text is
-// gated by enforceXPostEgressGates before it leaves the process.
+// gated by the composite x egress gate (tools/egress.ts) — since B6.1 wave A2a
+// PIPELINE-FIRED by withToolContext via this tool's egress descriptor
+// (tools/egress-pipeline.ts) BEFORE this handler runs; the handler must NOT call
+// the gate itself (anti-double-fire; egress-callsite.test.ts enforces both
+// directions) and wires the gate's SANITIZED return read off ctx.egress.
 //
 // Paths are a closed set (never agent-constructed). Query text for x_search_recent is
 // a caller-authored search string on a READ call — validated for length only, never
@@ -21,7 +25,7 @@
 
 import { xApiGet, xApiPost } from "../../auth/x/client";
 import type { ToolContext } from "../types";
-import { enforceXPostEgressGates } from "../egress";
+import { requireEgressResult } from "../egress-pipeline";
 import { requireX } from "./shared";
 
 /** Test-injection seam — production leaves it undefined (→ the real global fetch).
@@ -134,24 +138,13 @@ export async function xSearchRecent(
   );
 }
 
-/**
- * POST /2/tweets — create a post (WRITE, PUBLIC surface).
- *
- * Order (locked):
- *   1. requireX (cross-provider backstop)
- *   2. validate text (string, non-empty) + weighted-280 precheck (NO network)
- *   3. enforceXPostEgressGates (allowlist → F3a → outboundSanitize)
- *   4. xApiPost with allowlist-constructed body `{text}` only
- *
- * Never echoes the post text, account id, or token in any error.
- */
-export async function xPostCreate(
-  ctx: ToolContext,
-  args: Record<string, unknown>,
-  deps: XReadDeps = {},
-): Promise<unknown> {
-  const cred = requireX(ctx);
-
+/** B6.1 wave A2a — the SINGLE-SOURCE x_post_create input validator: non-empty
+ *  string + weighted-280 precheck (NO network), messages verbatim from the
+ *  pre-A2a inline checks. Called by BOTH the pipeline descriptor's `extract`
+ *  (tools/egress-pipeline.ts — the production gate input) and the handler below
+ *  (defense-in-depth re-run of the same pure check), so the two can never drift.
+ *  Never echoes the text value. */
+export function validateXPostArgs(args: Record<string, unknown>): { text: string } {
   const text = args.text;
   if (typeof text !== "string" || text.length === 0) {
     // Rule only — never echo the value.
@@ -163,14 +156,46 @@ export async function xPostCreate(
       `x_post_create: 'text' exceeds the ${X_WEIGHTED_MAX} weighted-character limit`,
     );
   }
+  return { text };
+}
 
-  // Allowlist (resolved account id) → F3a → outboundSanitize. Returns sanitized text.
-  const sanitized = enforceXPostEgressGates(ctx, cred.accountId, text);
+/**
+ * POST /2/tweets — create a post (WRITE, PUBLIC surface).
+ *
+ * B6.1 wave A2a — the egress gate (allowlist → F3a → outboundSanitize) is
+ * PIPELINE-FIRED: withToolContext runs this tool's descriptor
+ * (extract = validateXPostArgs → gate = requireX + enforceXPostEgressGates)
+ * BEFORE this handler and stores the gate's SANITIZED return on ctx.egress.
+ *
+ * Order in the handler (locked):
+ *   1. requireX (cross-provider backstop — stays FIRST, as pre-A2a)
+ *   2. validateXPostArgs re-run (defense-in-depth: the same pure validator the
+ *      pipeline's extract already ran — identical result in production)
+ *   3. requireEgressResult(ctx, "x-post") — the PIPELINE's sanitized text; the handler
+ *      must NOT recompute or re-fire the gate (anti-double-fire)
+ *   4. xApiPost with allowlist-constructed body `{text}` only
+ *
+ * Never echoes the post text, account id, or token in any error.
+ */
+export async function xPostCreate(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: XReadDeps = {},
+): Promise<unknown> {
+  const cred = requireX(ctx);
+
+  // Defense-in-depth: same pure validator the pipeline's extract ran (pure,
+  // cheap, identical result — keeps this handler independently unit-testable).
+  validateXPostArgs(args);
+
+  // The pipeline-fired gate's transformed result — the vetted bytes for the wire.
+  // A2b sec-rev: pass the EXPECTED kind so a mis-wired pipeline shape fails loud.
+  const out = requireEgressResult(ctx, "x-post");
 
   // Allowlist-constructed body: `text` ONLY (no reply/quote params this PR).
   return xApiPost(
     "/2/tweets",
-    { text: sanitized },
+    { text: out.body },
     cred.getAccessToken(),
     deps.fetchImpl,
   );

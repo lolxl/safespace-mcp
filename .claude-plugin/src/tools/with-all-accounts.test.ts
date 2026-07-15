@@ -7,9 +7,9 @@ import { MCPError } from "../errors";
 import type { TokenSet } from "../auth/refresh";
 import {
   withAllAccounts,
-  type AccountSubContext,
   type WithAllAccountsDeps,
 } from "./with-all-accounts";
+import { requireOAuth } from "./handlers/shared";
 
 const ENV_BACKUP = {
   id: process.env.GOOGLE_CLIENT_ID,
@@ -102,8 +102,8 @@ describe("withAllAccounts — fan-out + aggregation", () => {
     const out = await withAllAccounts<{ messages: string[] }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub: AccountSubContext) => ({ messages: [`m-${sub.email}`] }),
-      { requiredScopes: SCOPES },
+      async (ctx) => ({ messages: [`m-${requireOAuth(ctx).accountId}`] }),
+      {},
       fx.deps,
     );
     expect(out.successes).toHaveLength(1);
@@ -118,8 +118,8 @@ describe("withAllAccounts — fan-out + aggregation", () => {
     const out = await withAllAccounts<{ snippet: string }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub) => ({ snippet: `body-from-${sub.email}` }),
-      { requiredScopes: SCOPES },
+      async (ctx) => ({ snippet: `body-from-${requireOAuth(ctx).accountId}` }),
+      {},
       fx.deps,
     );
     expect(out.successes).toHaveLength(3);
@@ -143,17 +143,18 @@ describe("withAllAccounts — fan-out + aggregation", () => {
     const out = await withAllAccounts<{ messages: string[] }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub) => {
-        if (sub.email === "b@x.com") {
+      async (ctx) => {
+        const cred = requireOAuth(ctx);
+        if (cred.accountId === "b@x.com") {
           const err = new Error("google_api_unauthorized_gmail_search_all") as Error & {
             httpStatus?: number;
           };
           err.httpStatus = 401;
           throw err;
         }
-        return { messages: [`m-${sub.email}`] };
+        return { messages: [`m-${cred.accountId}`] };
       },
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     expect(out.successes).toHaveLength(2);
@@ -171,7 +172,7 @@ describe("withAllAccounts — fan-out + aggregation", () => {
       async () => {
         throw new MCPError("rate_limited");
       },
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     expect(out.successes).toHaveLength(0);
@@ -185,7 +186,7 @@ describe("withAllAccounts — fan-out + aggregation", () => {
       "gmail_search_all",
       { query: "x" },
       async () => ({ messages: [] }),
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     expect(out.successes).toHaveLength(0);
@@ -208,11 +209,11 @@ describe("withAllAccounts — fan-out + aggregation", () => {
     const out = await withAllAccounts<{ ok: true }>(
       "gmail_search_all",
       { query: "x", accounts: ["b@x.com"] },
-      async (sub) => {
-        visited.push(sub.email);
+      async (ctx) => {
+        visited.push(requireOAuth(ctx).accountId);
         return { ok: true };
       },
-      { accounts: ["b@x.com"], requiredScopes: SCOPES },
+      { accounts: ["b@x.com"] },
       fx.deps,
     );
     expect(visited).toEqual(["b@x.com"]);
@@ -228,7 +229,7 @@ describe("withAllAccounts — fan-out + aggregation", () => {
       "gmail_search_all",
       { query: "x", accounts: ["ghost@x.com"] },
       async () => ({ ok: true }),
-      { accounts: ["ghost@x.com"], requiredScopes: SCOPES },
+      { accounts: ["ghost@x.com"] },
       fx.deps,
     );
     expect(out.successes).toHaveLength(0);
@@ -254,7 +255,7 @@ describe("withAllAccounts — fan-out + aggregation", () => {
           fanOutTouched = true;
           return { ok: true };
         },
-        { accounts: ["a@x.com\r\nDELETE"], requiredScopes: SCOPES },
+        { accounts: ["a@x.com\r\nDELETE"] },
         fx.deps,
       ),
     ).rejects.toThrow(/'accounts' entries must each match/);
@@ -267,7 +268,7 @@ describe("withAllAccounts — fan-out + aggregation", () => {
           fanOutTouched = true;
           return { ok: true };
         },
-        { accounts: ["../etc/passwd"], requiredScopes: SCOPES },
+        { accounts: ["../etc/passwd"] },
         fx.deps,
       ),
     ).rejects.toThrow(/'accounts' entries must each match/);
@@ -307,14 +308,14 @@ describe("withAllAccounts — fan-out + aggregation", () => {
         "gmail_search_all",
         { query: "1" },
         async () => ({ ok: true }),
-        { requiredScopes: SCOPES },
+        {},
         fx.deps,
       ),
       withAllAccounts<{ ok: true }>(
         "gmail_search_all",
         { query: "2" },
         async () => ({ ok: true }),
-        { requiredScopes: SCOPES },
+        {},
         fx.deps,
       ),
     ]);
@@ -337,12 +338,12 @@ describe("withAllAccounts — fan-out + aggregation", () => {
     const out = await withAllAccounts<{ ok: true }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub) => {
+      async (ctx) => {
         fnCalls += 1;
-        expect(sub.email).toBe("a@x.com"); // b should never reach here
+        expect(requireOAuth(ctx).accountId).toBe("a@x.com"); // b should never reach here
         return { ok: true };
       },
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     expect(fnCalls).toBe(1);
@@ -363,11 +364,11 @@ describe("withAllAccounts — audit shape (design §8, sec-rev hooks 4 + 11)", (
     await withAllAccounts<{ ok: true }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub) => {
-        if (sub.email === "c@x.com") throw new MCPError("rate_limited");
+      async (ctx) => {
+        if (requireOAuth(ctx).accountId === "c@x.com") throw new MCPError("rate_limited");
         return { ok: true };
       },
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     // Inner audit rows: 1 per sub-call INCLUDING the failure (sec-rev hook 11).
@@ -397,14 +398,14 @@ describe("withAllAccounts — audit shape (design §8, sec-rev hooks 4 + 11)", (
       "gmail_search_all",
       { query: "same-query" },
       async () => ({ ok: true }),
-      { requiredScopes: SCOPES },
+      {},
       fx1.deps,
     );
     await withAllAccounts<{ ok: true }>(
       "gmail_search_all",
       { query: "same-query", accounts: ["a@x.com"] },
       async () => ({ ok: true }),
-      { accounts: ["a@x.com"], requiredScopes: SCOPES },
+      { accounts: ["a@x.com"] },
       fx2.deps,
     );
     // Inner hashes for the same account + same query must match.
@@ -425,11 +426,11 @@ describe("withAllAccounts — audit shape (design §8, sec-rev hooks 4 + 11)", (
     await withAllAccounts<{ ok: true }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub) => {
-        if (sub.email === "c@x.com") throw new MCPError("rate_limited"); // -32005
+      async (ctx) => {
+        if (requireOAuth(ctx).accountId === "c@x.com") throw new MCPError("rate_limited"); // -32005
         return { ok: true };
       },
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     const okRow = fx.innerAuditCalls.find((r) => r.status === "ok")!;
@@ -454,7 +455,7 @@ describe("withAllAccounts — audit shape (design §8, sec-rev hooks 4 + 11)", (
       "gmail_search_all",
       { query: "x" },
       async () => ({ ok: true }),
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     const failRow = fx.innerAuditCalls.find((r) => r.status === "error")!;
@@ -476,7 +477,7 @@ describe("withAllAccounts — does NOT mutate lastUsedAccount (design §3)", () 
       "gmail_search_all",
       { query: "x" },
       async () => ({ ok: true }),
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     expect(getLastUsed()).toBe("pre-existing@x.com");
@@ -499,7 +500,7 @@ describe("withAllAccounts — failure-mapping gap tests (T1-T4)", () => {
       "gmail_search_all",
       { query: "x" },
       async () => ({ ok: true }),
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     expect(out.successes).toHaveLength(1);
@@ -524,7 +525,7 @@ describe("withAllAccounts — failure-mapping gap tests (T1-T4)", () => {
       "gmail_search_all",
       { query: "x", accounts: ["ghost@x.com"] },
       async () => ({ ok: true }),
-      { accounts: ["ghost@x.com"], requiredScopes: SCOPES },
+      { accounts: ["ghost@x.com"] },
       fx.deps,
     );
     expect(out.failures).toHaveLength(1);
@@ -541,7 +542,7 @@ describe("withAllAccounts — failure-mapping gap tests (T1-T4)", () => {
       async () => {
         throw new MCPError("keychain_locked");
       },
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     expect(out.successes).toHaveLength(0);
@@ -557,7 +558,7 @@ describe("withAllAccounts — failure-mapping gap tests (T1-T4)", () => {
       async () => {
         throw new MCPError("rate_limited");
       },
-      { requiredScopes: SCOPES },
+      {},
       fx.deps,
     );
     // Outer aggregate row MUST be emitted exactly once even with zero successes.
@@ -586,8 +587,8 @@ describe("withAllAccounts — v1.64 B6 R10 closure (gates + operator)", () => {
     await withAllAccounts<{ messages: string[] }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub: AccountSubContext) => ({ messages: [sub.email] }),
-      { requiredScopes: SCOPES },
+      async (ctx) => ({ messages: [requireOAuth(ctx).accountId] }),
+      {},
       fx.deps,
     );
     expect(fx.innerAuditCalls).toHaveLength(2);
@@ -600,8 +601,8 @@ describe("withAllAccounts — v1.64 B6 R10 closure (gates + operator)", () => {
     await withAllAccounts<{ messages: string[] }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub: AccountSubContext) => ({ messages: [sub.email] }),
-      { requiredScopes: SCOPES },
+      async (ctx) => ({ messages: [requireOAuth(ctx).accountId] }),
+      {},
       fx.deps,
     );
     expect(fx.innerAuditCalls[0]?.operator).toBeNull();
@@ -615,8 +616,8 @@ describe("withAllAccounts — v1.64 B6 R10 closure (gates + operator)", () => {
     const out = await withAllAccounts<{ messages: string[] }>(
       "gmail_search_all",
       { query: "x" },
-      async (sub: AccountSubContext) => ({ messages: [sub.email] }),
-      { requiredScopes: SCOPES },
+      async (ctx) => ({ messages: [requireOAuth(ctx).accountId] }),
+      {},
       fx.deps,
     );
     expect(out.successes).toHaveLength(1);
@@ -635,7 +636,7 @@ describe("withAllAccounts — v1.64 B6 R10 closure (gates + operator)", () => {
         "youtube_playlist_delete",
         {},
         async () => ({}),
-        { requiredScopes: SCOPES },
+        {},
         fx.deps,
       ),
     ).rejects.toThrow(MCPError);
@@ -651,7 +652,7 @@ describe("withAllAccounts — v1.74 PR-2c per-operator confinement (the isolatio
       "gmail_search_all",
       { query: "x" },
       async () => ({ ok: true }),
-      { requiredScopes: SCOPES },
+      {},
       { ...fx.deps, confineToAccounts: ["alice@example.com"] }, // operator A
     );
     // Only alice fanned out — bob (present in the global index) is NOT reachable
@@ -666,7 +667,7 @@ describe("withAllAccounts — v1.74 PR-2c per-operator confinement (the isolatio
       "gmail_search_all",
       { query: "x" },
       async () => ({ ok: true }),
-      { accounts: ["bob@example.com"], requiredScopes: SCOPES }, // A explicitly names B
+      { accounts: ["bob@example.com"] }, // A explicitly names B
       { ...fx.deps, confineToAccounts: ["alice@example.com"] },
     );
     expect(out.successes).toHaveLength(0);
@@ -681,7 +682,7 @@ describe("withAllAccounts — v1.74 PR-2c per-operator confinement (the isolatio
       "gmail_search_all",
       { query: "x" },
       async () => ({ ok: true }),
-      { requiredScopes: SCOPES },
+      {},
       { ...fx.deps, confineToAccounts: null },
     );
     expect(out.successes.map((s) => s.account_email).sort()).toEqual([
@@ -696,10 +697,33 @@ describe("withAllAccounts — v1.74 PR-2c per-operator confinement (the isolatio
       "gmail_search_all",
       { query: "x" },
       async () => ({ ok: true }),
-      { requiredScopes: SCOPES },
+      {},
       { ...fx.deps, operator: "alice" },
     );
     expect(fx.innerAuditCalls).toHaveLength(1);
     expect(fx.innerAuditCalls[0]?.operator).toBe("alice");
+  });
+});
+
+describe("withAllAccounts — unregistered-tool tripwire (v1.119 sec-rev)", () => {
+  test("an unregistered tool name → internal_routing_error BEFORE any fan-out (the per-account scope check can never be silently skipped)", async () => {
+    const fx = makeFixture({ emails: ["a@x.com"] });
+    let thrown: unknown;
+    try {
+      await withAllAccounts(
+        "definitely_not_a_registered_tool",
+        {},
+        async () => ({}),
+        {},
+        fx.deps,
+      );
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(MCPError);
+    expect((thrown as MCPError).errorName).toBe("internal_routing_error");
+    // Fail-closed BEFORE any I/O: no inner rows, no aggregate row.
+    expect(fx.innerAuditCalls).toHaveLength(0);
+    expect(fx.outerAuditCalls).toHaveLength(0);
   });
 });

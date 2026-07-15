@@ -73,8 +73,26 @@ import type {
 } from "../audit";
 import type { ToolContext } from "./types";
 import { MCPError } from "../errors";
+import { TOOL_REGISTRY } from "./registry";
+import { googleWorkspace } from "./source";
 
 const FAKE_TOKEN = "ya29.fake-token-for-tests";
+
+// B6.1 wave A3+D — gmail_send is now PIPELINE_EGRESS: the header/resolution/allowlist/
+// secret/approval gate is fired by the CHOKE POINT (withToolContext) via the tool's
+// egress descriptor, and the slimmed handler reads the gate's RESOLVED shape off
+// ctx.egress (requireEgressResult). These unit tests drive the handler DIRECTLY, so this
+// vehicle reproduces the choke point's pre-handler step: extract → gate (passing the
+// google-workspace source's contact resolver, exactly as with-context.ts does) → store on
+// ctx.egress → handler. Behavior is byte-identical to the pre-A3 gmailSend (which ran the
+// same gate + resolution internally): a validation/gate throw surfaces from the gate
+// before the handler runs, and a happy path wires the resolved recipients.
+async function gmailSendVia(ctx: ToolContext, args: Record<string, unknown>): Promise<unknown> {
+  const d = TOOL_REGISTRY.gmail_send!.egress!;
+  const out = await d.gate(ctx, d.extract(args), googleWorkspace.resolveRecipients);
+  if (out !== undefined) ctx.egress = out;
+  return gmailSend(ctx, args);
+}
 
 describe("driveGetFileContent — streaming cap (binding gate in `readCappedStream`)", () => {
   // The binding security gate (DRIVE_MAX_BYTES) lives in `readCappedStream`
@@ -531,13 +549,13 @@ describe("gmailSend (WRITE tool)", () => {
       return { data: {}, status: 200 };
     });
     // Wrong-type / missing field: distinct error from empty-string (5.9 code-rev MED-1).
-    await expect(gmailSend(FAKE_CTX, {})).rejects.toThrow(/'to' must be a string/);
-    await expect(gmailSend(FAKE_CTX, { to: "a@b.co" })).rejects.toThrow(/'subject' must be a string/);
-    await expect(gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s" })).rejects.toThrow(/'body' must be a string/);
-    await expect(gmailSend(FAKE_CTX, { to: 42, subject: "s", body: "b" })).rejects.toThrow(/'to' must be a string/);
+    await expect(gmailSendVia(FAKE_CTX, {})).rejects.toThrow(/'to' must be a string/);
+    await expect(gmailSendVia(FAKE_CTX, { to: "a@b.co" })).rejects.toThrow(/'subject' must be a string/);
+    await expect(gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s" })).rejects.toThrow(/'body' must be a string/);
+    await expect(gmailSendVia(FAKE_CTX, { to: 42, subject: "s", body: "b" })).rejects.toThrow(/'to' must be a string/);
     // Empty string after correct type → "requires non-empty".
-    await expect(gmailSend(FAKE_CTX, { to: "a@b.co", subject: "", body: "b" })).rejects.toThrow(/requires non-empty/);
-    await expect(gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: "" })).rejects.toThrow(/requires non-empty/);
+    await expect(gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "", body: "b" })).rejects.toThrow(/requires non-empty/);
+    await expect(gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: "" })).rejects.toThrow(/requires non-empty/);
     expect(handlerCalled).toBe(false);
   });
 
@@ -549,7 +567,7 @@ describe("gmailSend (WRITE tool)", () => {
       return { data: {}, status: 200 };
     });
     await expect(
-      gmailSend(FAKE_CTX, { to: "alice@x.com\rBcc: attacker@evil.com", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "alice@x.com\rBcc: attacker@evil.com", subject: "s", body: "b" }),
     ).rejects.toThrow(/CR\/LF\/NUL/);
     expect(handlerCalled).toBe(false);
   });
@@ -562,7 +580,7 @@ describe("gmailSend (WRITE tool)", () => {
       return { data: {}, status: 200 };
     });
     await expect(
-      gmailSend(FAKE_CTX, { to: "alice@x.com\nBcc: attacker@evil.com", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "alice@x.com\nBcc: attacker@evil.com", subject: "s", body: "b" }),
     ).rejects.toThrow(/CR\/LF\/NUL/);
     expect(handlerCalled).toBe(false);
   });
@@ -571,7 +589,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "hi\rReply-To: evil", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "hi\rReply-To: evil", body: "b" }),
     ).rejects.toThrow(/CR\/LF\/NUL/);
   });
 
@@ -579,7 +597,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "hi\nReply-To: evil", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "hi\nReply-To: evil", body: "b" }),
     ).rejects.toThrow(/CR\/LF\/NUL/);
   });
 
@@ -587,7 +605,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "alice@x.com\x00Bcc: evil", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "alice@x.com\x00Bcc: evil", subject: "s", body: "b" }),
     ).rejects.toThrow(/CR\/LF\/NUL/);
   });
 
@@ -595,7 +613,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "hi Bcc: evil", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "hi Bcc: evil", body: "b" }),
     ).rejects.toThrow(/CR\/LF\/NUL/);
   });
 
@@ -603,7 +621,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "hi Bcc: evil", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "hi Bcc: evil", body: "b" }),
     ).rejects.toThrow(/CR\/LF\/NUL/);
   });
 
@@ -611,7 +629,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "alice@x.comBcc: evil", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "alice@x.comBcc: evil", subject: "s", body: "b" }),
     ).rejects.toThrow(/CR\/LF\/NUL/);
   });
 
@@ -619,10 +637,10 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "你好世界", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "你好世界", body: "b" }),
     ).rejects.toThrow(/plain ASCII/);
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "hi 👋", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "hi 👋", body: "b" }),
     ).rejects.toThrow(/plain ASCII/);
   });
 
@@ -635,7 +653,7 @@ describe("gmailSend (WRITE tool)", () => {
     });
     const many = Array.from({ length: 15 }, (_, i) => `r${i}@x.com`).join(", ");
     await expect(
-      gmailSend(FAKE_CTX, { to: many, subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: many, subject: "s", body: "b" }),
     ).rejects.toThrow(/at most 10 recipients/);
     expect(handlerCalled).toBe(false);
   });
@@ -645,7 +663,7 @@ describe("gmailSend (WRITE tool)", () => {
     setGaxiosHandler(async () => ({ data: { id: "x" }, status: 200 }));
     // Should NOT throw — body is unrestricted for v1.
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "ascii subject", body: "你好 multi\nline body 👋" }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "ascii subject", body: "你好 multi\nline body 👋" }),
     ).resolves.toBeDefined();
   });
 
@@ -655,7 +673,7 @@ describe("gmailSend (WRITE tool)", () => {
       data: { id: "sent_msg_abc", threadId: "thr_xyz", labelIds: ["SENT"] },
       status: 200,
     }));
-    const result = (await gmailSend(FAKE_CTX, {
+    const result = (await gmailSendVia(FAKE_CTX, {
       to: "bob@example.com",
       subject: "Multi-line body test",
       body: "Hi Bob,\n\nThis body has\nmultiple lines.\n\nThanks,\nAlice",
@@ -673,7 +691,7 @@ describe("gmailSend (WRITE tool)", () => {
         status: 200,
       };
     });
-    const result = (await gmailSend(FAKE_CTX, {
+    const result = (await gmailSendVia(FAKE_CTX, {
       to: "bob@example.com",
       subject: "Test subject",
       body: "Test body",
@@ -711,7 +729,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "   ", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "   ", subject: "s", body: "b" }),
     ).rejects.toThrow(/requires non-empty/);
   });
 
@@ -719,7 +737,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: " , , ", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: " , , ", subject: "s", body: "b" }),
     ).rejects.toThrow(/at least one non-empty recipient/);
   });
 
@@ -734,7 +752,7 @@ describe("gmailSend (WRITE tool)", () => {
       data: { id: "trailing1", threadId: "t1", labelIds: ["SENT"] },
       status: 200,
     }));
-    const out = (await gmailSend(FAKE_CTX, { to: "a@b.co,", subject: "s", body: "b" })) as {
+    const out = (await gmailSendVia(FAKE_CTX, { to: "a@b.co,", subject: "s", body: "b" })) as {
       id: string;
     };
     expect(out.id).toBe("trailing1");
@@ -749,7 +767,7 @@ describe("gmailSend (WRITE tool)", () => {
     });
     const tooBig = "a".repeat(1 * 1024 * 1024 + 1);
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: tooBig }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: tooBig }),
     ).rejects.toThrow(/body exceeds/);
     expect(handlerCalled).toBe(false);
   });
@@ -765,7 +783,7 @@ describe("gmailSend (WRITE tool)", () => {
       credential: oauthCred("alice@x.com\r\nBcc: attacker@evil.com", () => FAKE_TOKEN),
     };
     await expect(
-      gmailSend(badCtx, { to: "a@b.co", subject: "s", body: "b" }),
+      gmailSendVia(badCtx, { to: "a@b.co", subject: "s", body: "b" }),
     ).rejects.toThrow(/active account email contains illegal/);
   });
 
@@ -776,19 +794,19 @@ describe("gmailSend (WRITE tool)", () => {
     // gate covers to + cc + bcc since cc/bcc were added).
     // No '@'
     await expect(
-      gmailSend(FAKE_CTX, { to: "not-an-email", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "not-an-email", subject: "s", body: "b" }),
     ).rejects.toThrow(/not a valid email address: not-an-email/);
     // Two '@'
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b@c.com", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "a@b@c.com", subject: "s", body: "b" }),
     ).rejects.toThrow(/not a valid email address: a@b@c\.com/);
     // Missing TLD
     await expect(
-      gmailSend(FAKE_CTX, { to: "alice@example", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "alice@example", subject: "s", body: "b" }),
     ).rejects.toThrow(/not a valid email address: alice@example/);
     // 1-char TLD
     await expect(
-      gmailSend(FAKE_CTX, { to: "alice@example.x", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "alice@example.x", subject: "s", body: "b" }),
     ).rejects.toThrow(/not a valid email address: alice@example\.x/);
   });
 
@@ -796,7 +814,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "alice@example.com, bogus, bob@example.com", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to: "alice@example.com, bogus, bob@example.com", subject: "s", body: "b" }),
     ).rejects.toThrow(/not a valid email address: bogus/);
   });
 
@@ -806,7 +824,7 @@ describe("gmailSend (WRITE tool)", () => {
       data: { id: "plus1", threadId: "t", labelIds: ["SENT"] },
       status: 200,
     }));
-    const out = (await gmailSend(FAKE_CTX, {
+    const out = (await gmailSendVia(FAKE_CTX, {
       to: "alice+filter@example.com",
       subject: "s",
       body: "b",
@@ -825,10 +843,10 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b", cc: 42 }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b", cc: 42 }),
     ).rejects.toThrow(/'cc' must be a string/);
     await expect(
-      gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b", bcc: { x: 1 } }),
+      gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b", bcc: { x: 1 } }),
     ).rejects.toThrow(/'bcc' must be a string/);
   });
 
@@ -840,7 +858,7 @@ describe("gmailSend (WRITE tool)", () => {
       return { data: {}, status: 200 };
     });
     await expect(
-      gmailSend(FAKE_CTX, {
+      gmailSendVia(FAKE_CTX, {
         to: "a@b.co",
         cc: "carl@x.com\nBcc: attacker@evil.com",
         subject: "s",
@@ -854,7 +872,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, {
+      gmailSendVia(FAKE_CTX, {
         to: "a@b.co",
         bcc: "diane@x.com\rReply-To: evil",
         subject: "s",
@@ -870,7 +888,7 @@ describe("gmailSend (WRITE tool)", () => {
     const cc = "c1@x.com, c2@x.com";
     const bcc = "b1@x.com";
     await expect(
-      gmailSend(FAKE_CTX, { to, cc, bcc, subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX, { to, cc, bcc, subject: "s", body: "b" }),
     ).rejects.toThrow(/at most 10 recipients per call across to\+cc\+bcc/);
   });
 
@@ -878,7 +896,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, {
+      gmailSendVia(FAKE_CTX, {
         to: "alice@example.com",
         cc: "bob@example.com, not-an-email",
         subject: "s",
@@ -891,7 +909,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, {
+      gmailSendVia(FAKE_CTX, {
         to: "alice@example.com",
         bcc: "bogus",
         subject: "s",
@@ -907,7 +925,7 @@ describe("gmailSend (WRITE tool)", () => {
       capturedRaw = (opts.data as { raw?: string })?.raw;
       return { data: { id: "y" }, status: 200 };
     });
-    await gmailSend(FAKE_CTX, {
+    await gmailSendVia(FAKE_CTX, {
       to: "alice@example.com",
       cc: "carl@example.com, claire@example.com",
       bcc: "darren@example.com",
@@ -938,7 +956,7 @@ describe("gmailSend (WRITE tool)", () => {
       capturedRaw = (opts.data as { raw?: string })?.raw;
       return { data: { id: "z" }, status: 200 };
     });
-    await gmailSend(FAKE_CTX, {
+    await gmailSendVia(FAKE_CTX, {
       to: "alice@example.com",
       cc: "   ",
       bcc: "",
@@ -954,7 +972,7 @@ describe("gmailSend (WRITE tool)", () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: {}, status: 200 }));
     await expect(
-      gmailSend(FAKE_CTX, {
+      gmailSendVia(FAKE_CTX, {
         to: "",
         cc: "alice@example.com",
         bcc: "bob@example.com",
@@ -973,7 +991,7 @@ describe("gmailSend (WRITE tool)", () => {
     });
     let caught: unknown;
     try {
-      await gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
+      await gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
     } catch (e) {
       caught = e;
     }
@@ -992,7 +1010,7 @@ describe("gmailSend (WRITE tool)", () => {
       });
     });
     try {
-      await gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
+      await gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
       throw new Error("expected throw");
     } catch (e) {
       expect(e).toBeInstanceOf(MCPError);
@@ -1009,7 +1027,7 @@ describe("gmailSend (WRITE tool)", () => {
       });
     });
     try {
-      await gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
+      await gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
       throw new Error("expected throw");
     } catch (e) {
       expect(e).toBeInstanceOf(MCPError);
@@ -1023,7 +1041,7 @@ describe("gmailSend (WRITE tool)", () => {
       throw makeGaxiosError({ status: 500, errorMessage: "Internal" });
     });
     try {
-      await gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
+      await gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
       throw new Error("expected throw");
     } catch (e) {
       const err = e as UpstreamError;
@@ -1049,7 +1067,7 @@ describe("gmailSend (WRITE tool)", () => {
     });
     let caught: unknown;
     try {
-      await gmailSend(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
+      await gmailSendVia(FAKE_CTX, { to: "a@b.co", subject: "s", body: "b" });
     } catch (e) {
       caught = e;
     }
@@ -8916,7 +8934,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
       return { data: { id: "msg1", threadId: "t1", labelIds: ["SENT"] }, status: 200 };
     });
     // env unset → default-disabled.
-    const result = (await gmailSend(FAKE_CTX_BASE, {
+    const result = (await gmailSendVia(FAKE_CTX_BASE, {
       to: "bob@example.com",
       subject: "s",
       body: "b",
@@ -8935,7 +8953,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
     });
     // env unset → resolver returns the name unchanged → email-format gate fires.
     await expect(
-      gmailSend(FAKE_CTX_BASE, { to: "alice", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX_BASE, { to: "alice", subject: "s", body: "b" }),
     ).rejects.toThrow(/not a valid email address: alice/);
     expect(handlerCalled).toBe(false);
   });
@@ -8977,7 +8995,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
       return { data: { id: "msg-resolved", threadId: "t1", labelIds: ["SENT"] }, status: 200 };
     });
 
-    const result = (await gmailSend(FAKE_CTX_BASE, {
+    const result = (await gmailSendVia(FAKE_CTX_BASE, {
       to: "alice",
       subject: "s",
       body: "b",
@@ -9023,7 +9041,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
     });
 
     await expect(
-      gmailSend(FAKE_CTX_BASE, { to: "eve", subject: "s", body: "b" }),
+      gmailSendVia(FAKE_CTX_BASE, { to: "eve", subject: "s", body: "b" }),
     ).rejects.toMatchObject({
       errorName: "recipient_denied_by_policy",
     });
@@ -9039,7 +9057,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
       // Realistic-PII shape (firstname.lastname) — catches a buggy impl that
       // would only echo "identifier-shaped" inputs while filtering single
       // tokens like "nobody". Per sec-rev INFO-8.
-      await gmailSend(FAKE_CTX_BASE, {
+      await gmailSendVia(FAKE_CTX_BASE, {
         to: "john.smith",
         subject: "s",
         body: "b",
@@ -9089,7 +9107,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
 
     let caught: unknown;
     try {
-      await gmailSend(FAKE_CTX_BASE, { to: "alice", subject: "s", body: "b" });
+      await gmailSendVia(FAKE_CTX_BASE, { to: "alice", subject: "s", body: "b" });
     } catch (e) {
       caught = e;
     }
@@ -9134,7 +9152,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
       return { data: { id: "mixed", threadId: "t", labelIds: ["SENT"] }, status: 200 };
     });
 
-    await gmailSend(FAKE_CTX_BASE, {
+    await gmailSendVia(FAKE_CTX_BASE, {
       to: "bob@example.com, carl",
       subject: "s",
       body: "b",
@@ -9177,7 +9195,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
         capturedHash = h;
       } }),
     };
-    await gmailSend(CTX_WITH_RECORDER, {
+    await gmailSendVia(CTX_WITH_RECORDER, {
       to: "bob@example.com, carl",
       subject: "s",
       body: "b",
@@ -9232,7 +9250,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
         capturedHash = h;
       } }),
     };
-    await gmailSend(CTX_WITH_RECORDER, { to: "alice", subject: "s", body: "b" });
+    await gmailSendVia(CTX_WITH_RECORDER, { to: "alice", subject: "s", body: "b" });
     expect(capturedHash).toBeDefined();
     // SHA-256 hex = 64 chars.
     expect(capturedHash).toMatch(/^[a-f0-9]{64}$/);
@@ -9257,7 +9275,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
         capturedHash = h;
       } }),
     };
-    await gmailSend(CTX_WITH_RECORDER, {
+    await gmailSendVia(CTX_WITH_RECORDER, {
       to: "bob@example.com",
       subject: "s",
       body: "b",
@@ -9307,7 +9325,7 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
       } }),
     };
     await expect(
-      gmailSend(CTX_WITH_RECORDER, {
+      gmailSendVia(CTX_WITH_RECORDER, {
         to: "alice",
         subject: "s",
         body: "b",
@@ -9777,7 +9795,7 @@ describe("Phase 4a — sec-rev carry-forward quick wins (v1.15.1)", () => {
     // to has "alice" twice; cc adds "alice" a third time + "bob" once. The
     // resolver's per-call Map MUST collapse all three "alice" inputs into
     // ONE People API call.
-    const result = (await gmailSend(FAKE_CTX_BASE, {
+    const result = (await gmailSendVia(FAKE_CTX_BASE, {
       to: "alice, alice",
       cc: "alice, bob",
       subject: "s",
@@ -9824,7 +9842,7 @@ describe("Phase 4a — sec-rev carry-forward quick wins (v1.15.1)", () => {
 
     let caught: unknown;
     try {
-      await gmailSend(FAKE_CTX_BASE, {
+      await gmailSendVia(FAKE_CTX_BASE, {
         to: "alice",
         subject: "s",
         body: "b",
@@ -10812,6 +10830,17 @@ describe("youtubeVideoCommentPost (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMA
       captured = m;
     } }),
   };
+  // B6.1 wave A2b — the allowlist/burst/sanitize gate is now PIPELINE-FIRED (the
+  // MOVED gate cases live in tools/egress-pipeline.test.ts). A DIRECT handler call
+  // reads the gate's sanitized text off ctx.egress (what withToolContext stores
+  // pre-handler); this helper supplies it for the requestBody-shape tests below.
+  const ctxWithEgress = (body: string): ToolContext => ({
+    credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
+    get tier() { return currentTier(); },
+    allowedAccounts: null,
+    audit: recorderSink({ commentPostMeta: (m) => { captured = m; } }),
+    egress: { kind: "youtube-comment", videoId: VALID_VIDEO_ID, body },
+  });
   let prevTier: string | undefined;
   let prevTargets: string | undefined;
   let prevTargetsExtra: string | undefined;
@@ -10870,12 +10899,15 @@ describe("youtubeVideoCommentPost (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMA
       captured_body = opts.data;
       return { data: { id: "thread-X", snippet: {} }, status: 200 };
     });
-    const r = await youtubeVideoCommentPost(FAKE_CTX, {
+    const r = await youtubeVideoCommentPost(ctxWithEgress("Hello YouTube"), {
       video_id: VALID_VIDEO_ID,
       text: "Hello YouTube",
     });
     expect(captured_url).toContain("/youtube/v3/commentThreads");
     expect(r).toBeDefined();
+    // B6.1 wave A2b — success-only burst increment STAYS in the handler.
+    const { getCommentBurstCount } = await import("../policy/youtube-comment-burst");
+    expect(getCommentBurstCount()).toBe(1);
     // Audit metadata
     expect(captured).toBeDefined();
     expect(captured?.policy_decision).toBe("allowed");
@@ -10943,7 +10975,7 @@ describe("youtubeVideoCommentPost (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMA
       body = opts.data;
       return { data: { id: "thread-X", snippet: {} }, status: 200 };
     });
-    await youtubeVideoCommentPost(FAKE_CTX, {
+    await youtubeVideoCommentPost(ctxWithEgress("x"), {
       video_id: VALID_VIDEO_ID,
       text: "x",
       channel_id: "UC1234567890123456789012",
@@ -10964,154 +10996,10 @@ describe("youtubeVideoCommentPost (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMA
     ).rejects.toThrow(/non-empty 'text'/);
   });
 
-  test("Gate #3 ALLOWLIST: video NOT in allowlist → comment_target_denied_by_policy + audit denied_not_in_allowlist", async () => {
-    process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = "video:abcDEF12345"; // valid 11-char video ID, but doesn't match VALID_VIDEO_ID
-    const { __internal } = await import("../policy/youtube-comment-targets");
-    __internal.resetSingletons();
-    let caught: unknown;
-    try {
-      await youtubeVideoCommentPost(FAKE_CTX, {
-        video_id: VALID_VIDEO_ID,
-        text: "x",
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(MCPError);
-    expect((caught as MCPError).errorName).toBe(
-      "comment_target_denied_by_policy",
-    );
-    expect(captured?.policy_decision).toBe("denied_not_in_allowlist");
-    // NO PII echo per design §8 (errorData carries no video_id).
-    expect(JSON.stringify((caught as MCPError).errorData)).not.toContain(
-      VALID_VIDEO_ID,
-    );
-  });
-
-  test("Gate #3 ALLOWLIST: env unset → denied_no_allowlist (distinct enum from denied_not_in_allowlist)", async () => {
-    delete process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS;
-    const { __internal } = await import("../policy/youtube-comment-targets");
-    __internal.resetSingletons();
-    let caught: unknown;
-    try {
-      await youtubeVideoCommentPost(FAKE_CTX, {
-        video_id: VALID_VIDEO_ID,
-        text: "x",
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(MCPError);
-    expect((caught as MCPError).errorName).toBe(
-      "comment_target_denied_by_policy",
-    );
-    expect(captured?.policy_decision).toBe("denied_no_allowlist");
-  });
-
-  test("Gate #4 BURST: 10 successes, 11th rejects with comment_burst_limit_exceeded + audit denied_burst_limit", async () => {
-    const { setGaxiosHandler } = await import("../google-api/test-utils");
-    setGaxiosHandler(async () => ({
-      data: { id: "thread-X", snippet: {} },
-      status: 200,
-    }));
-    // 10 successful posts (default limit 10).
-    for (let i = 0; i < 10; i++) {
-      await youtubeVideoCommentPost(FAKE_CTX, {
-        video_id: VALID_VIDEO_ID,
-        text: `post ${i}`,
-      });
-    }
-    expect(captured?.policy_decision).toBe("allowed"); // last allowed
-    // 11th MUST reject.
-    let caught: unknown;
-    try {
-      await youtubeVideoCommentPost(FAKE_CTX, {
-        video_id: VALID_VIDEO_ID,
-        text: "11th attempt",
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(MCPError);
-    expect((caught as MCPError).errorName).toBe("comment_burst_limit_exceeded");
-    expect(captured?.policy_decision).toBe("denied_burst_limit");
-  });
-
-  test("Gate #4 BURST: counter only increments on SUCCESS (allowlist-denied calls do NOT consume budget)", async () => {
-    process.env.SAFESPACE_YOUTUBE_COMMENT_BURST_LIMIT = "2";
-    delete process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS; // hard-deny via allowlist
-    const { __internal } = await import("../policy/youtube-comment-targets");
-    __internal.resetSingletons();
-    const { __resetCommentBurstForTest } = await import(
-      "../policy/youtube-comment-burst"
-    );
-    __resetCommentBurstForTest();
-    // 100 denied calls should NOT consume burst budget.
-    for (let i = 0; i < 100; i++) {
-      await expect(
-        youtubeVideoCommentPost(FAKE_CTX, {
-          video_id: VALID_VIDEO_ID,
-          text: "x",
-        }),
-      ).rejects.toThrow(MCPError);
-    }
-    // Re-enable allowlist; now we should still have full budget (= 2).
-    process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = `video:${VALID_VIDEO_ID}`;
-    __internal.resetSingletons();
-    const { setGaxiosHandler } = await import("../google-api/test-utils");
-    setGaxiosHandler(async () => ({
-      data: { id: "thread-X", snippet: {} },
-      status: 200,
-    }));
-    await youtubeVideoCommentPost(FAKE_CTX, {
-      video_id: VALID_VIDEO_ID,
-      text: "x",
-    });
-    await youtubeVideoCommentPost(FAKE_CTX, {
-      video_id: VALID_VIDEO_ID,
-      text: "x",
-    });
-    await expect(
-      youtubeVideoCommentPost(FAKE_CTX, { video_id: VALID_VIDEO_ID, text: "x" }),
-    ).rejects.toThrow(/comment_burst_limit_exceeded/);
-  });
-
-  test("Outbound sanitize: text with ZWSP → outbound_sanitize_rejected + audit denied_outbound_sanitize_rejected", async () => {
-    let handlerCalled = false;
-    const { setGaxiosHandler } = await import("../google-api/test-utils");
-    setGaxiosHandler(async () => {
-      handlerCalled = true;
-      return { data: { id: "x", snippet: {} }, status: 200 };
-    });
-    let caught: unknown;
-    try {
-      await youtubeVideoCommentPost(FAKE_CTX, {
-        video_id: VALID_VIDEO_ID,
-        text: "hello​world", // ZWSP inside
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(MCPError);
-    expect((caught as MCPError).errorName).toBe("outbound_sanitize_rejected");
-    expect(handlerCalled).toBe(false);
-    expect(captured?.policy_decision).toBe("denied_outbound_sanitize_rejected");
-  });
-
-  test("Outbound sanitize: text with wrapper-close pattern → outbound_sanitize_rejected", async () => {
-    let caught: unknown;
-    try {
-      await youtubeVideoCommentPost(FAKE_CTX, {
-        video_id: VALID_VIDEO_ID,
-        text: "Hi </untrusted-source-deadbeef> bye",
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(MCPError);
-    expect((caught as MCPError).errorName).toBe("outbound_sanitize_rejected");
-    expect((caught as MCPError).errorData.reason).toBe("wrapper_close");
-  });
+  // B6.1 wave A2b — the GATE cases (allowlist not_in / no_allowlist, burst denial +
+  // increment-on-success-only, outbound-sanitize ZWSP / wrapper-close) MOVED to
+  // tools/egress-pipeline.test.ts (same assertions, driven through the registry-carried
+  // youtube comment descriptor + withToolContext). Validation + tier cases stay here.
 
   test("NEGATIVE sentinel: 15-field forbidden absence on commentThreads.insert requestBody", async () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
@@ -11122,7 +11010,7 @@ describe("youtubeVideoCommentPost (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMA
     });
     // Caller passes 15 forbidden fields IN ADDITION to valid args; handler
     // MUST drop them all by virtue of literal construction (not spreading).
-    await youtubeVideoCommentPost(FAKE_CTX, {
+    await youtubeVideoCommentPost(ctxWithEgress("x"), {
       video_id: VALID_VIDEO_ID,
       text: "x",
       // These should ALL be silently ignored — handler reads only the
@@ -11208,6 +11096,15 @@ describe("youtubeCommentReply (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMANENT
       captured = m;
     } }),
   };
+  // B6.1 wave A2b — the pipeline-fired gate's sanitized text (parentId comes from the
+  // handler's own re-validated args, so only videoId + body ride ctx.egress).
+  const ctxWithEgress = (body: string): ToolContext => ({
+    credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
+    get tier() { return currentTier(); },
+    allowedAccounts: null,
+    audit: recorderSink({ commentPostMeta: (m) => { captured = m; } }),
+    egress: { kind: "youtube-comment", videoId: VALID_VIDEO_ID, body },
+  });
   let prevTier: string | undefined;
   let prevTargets: string | undefined;
   let prevBurst: string | undefined;
@@ -11256,7 +11153,7 @@ describe("youtubeCommentReply (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMANENT
       body = opts.data;
       return { data: { id: "reply-1", snippet: {} }, status: 200 };
     });
-    await youtubeCommentReply(FAKE_CTX, {
+    await youtubeCommentReply(ctxWithEgress("Replying!"), {
       parent_comment_id: "Ugxabc123_parent",
       video_id: VALID_VIDEO_ID,
       text: "Replying!",
@@ -11328,77 +11225,9 @@ describe("youtubeCommentReply (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMANENT
     expect(captured?.parent_comment_id_hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  test("Gate #3 ALLOWLIST: video NOT in allowlist → comment_target_denied_by_policy + parent_comment_id_hash on denial row", async () => {
-    process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = "video:abcDEF12345";
-    const { __internal } = await import("../policy/youtube-comment-targets");
-    __internal.resetSingletons();
-    let caught: unknown;
-    try {
-      await youtubeCommentReply(FAKE_CTX, {
-        parent_comment_id: "Ugxparent",
-        video_id: VALID_VIDEO_ID,
-        text: "x",
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(MCPError);
-    expect((caught as MCPError).errorName).toBe(
-      "comment_target_denied_by_policy",
-    );
-    expect(captured?.policy_decision).toBe("denied_not_in_allowlist");
-    expect(captured?.parent_comment_id_hash).toBeDefined();
-  });
-
-  test("Gate #4 BURST: shares the SAME per-process counter with youtube_video_comment_post", async () => {
-    // Counter is module-level — comment_post + comment_reply combine. The
-    // burst defense bounds total comment-write blast radius, not per-tool.
-    process.env.SAFESPACE_YOUTUBE_COMMENT_BURST_LIMIT = "3";
-    const { setGaxiosHandler } = await import("../google-api/test-utils");
-    setGaxiosHandler(async () => ({
-      data: { id: "x", snippet: {} },
-      status: 200,
-    }));
-    // 1 post + 2 replies = 3 successful writes; 4th MUST reject (whichever tool).
-    await youtubeVideoCommentPost(FAKE_CTX, {
-      video_id: VALID_VIDEO_ID,
-      text: "1",
-    });
-    await youtubeCommentReply(FAKE_CTX, {
-      parent_comment_id: "Ugxparent1",
-      video_id: VALID_VIDEO_ID,
-      text: "2",
-    });
-    await youtubeCommentReply(FAKE_CTX, {
-      parent_comment_id: "Ugxparent2",
-      video_id: VALID_VIDEO_ID,
-      text: "3",
-    });
-    await expect(
-      youtubeCommentReply(FAKE_CTX, {
-        parent_comment_id: "Ugxparent3",
-        video_id: VALID_VIDEO_ID,
-        text: "4",
-      }),
-    ).rejects.toThrow(/comment_burst_limit_exceeded/);
-  });
-
-  test("Outbound sanitize: text with TRUNCATE_MARKER literal → outbound_sanitize_rejected (audit captures parent_comment_id_hash)", async () => {
-    let caught: unknown;
-    try {
-      await youtubeCommentReply(FAKE_CTX, {
-        parent_comment_id: "Ugxparent",
-        video_id: VALID_VIDEO_ID,
-        text: "Reply <safespace-truncated/> attack",
-      });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(MCPError);
-    expect((caught as MCPError).errorName).toBe("outbound_sanitize_rejected");
-    expect(captured?.policy_decision).toBe("denied_outbound_sanitize_rejected");
-    expect(captured?.parent_comment_id_hash).toMatch(/^[0-9a-f]{64}$/);
-  });
+  // B6.1 wave A2b — the GATE cases (allowlist not_in with parent_comment_id_hash on the
+  // denial row; the SHARED post/reply burst counter; outbound-sanitize truncate-marker)
+  // MOVED to tools/egress-pipeline.test.ts. Validation + tier cases stay here.
 
   test("NEGATIVE sentinel: 11-field forbidden absence on comments.insert requestBody", async () => {
     const { setGaxiosHandler } = await import("../google-api/test-utils");
@@ -11408,7 +11237,7 @@ describe("youtubeCommentReply (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMANENT
       return { data: { id: "reply-1", snippet: {} }, status: 200 };
     });
     // Caller passes 11+ forbidden fields; handler MUST drop them all.
-    await youtubeCommentReply(FAKE_CTX, {
+    await youtubeCommentReply(ctxWithEgress("x"), {
       parent_comment_id: "Ugxparent",
       video_id: VALID_VIDEO_ID,
       text: "x",

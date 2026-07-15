@@ -1430,7 +1430,7 @@ describe("computeScopeUnion", () => {
 // latent send) carry "outbound-write"; every other tool leaves it unset. B3
 // keys the centralized egress gate off this; until then it is only a label.
 describe("v1.64 Phase B (B0) — ToolDef.direction outbound-write labels", () => {
-  test("EXACTLY gmail_send + gmail_create_draft + line_push_message are direction:'outbound-write'", () => {
+  test("EXACTLY the current 21 outbound-write tools (grown from the v1.64 3-tool baseline through B6.1 wave A2b) are direction:'outbound-write'", () => {
     const outbound = Object.entries(TOOL_REGISTRY)
       .filter(([, def]) => def.direction === "outbound-write")
       .map(([name]) => name)
@@ -1447,6 +1447,8 @@ describe("v1.64 Phase B (B0) — ToolDef.direction outbound-write labels", () =>
     // v1.96 — the 3 Notion WRITE tools join the egress surface.
     // v1.107 — mattermost_send_message joins the egress surface.
     // v1.115 — x_post_create joins the egress surface (PUBLIC-surface X write).
+    // B6.1 wave A2b — the 3 YouTube public-surface writes join the egress surface
+    // (migrated from bespoke handler gates to pipeline-fired composite wrappers).
     expect(outbound).toEqual([
       "discord_send_message",
       "github_create_issue",
@@ -1466,6 +1468,9 @@ describe("v1.64 Phase B (B0) — ToolDef.direction outbound-write labels", () =>
       "slack_send_message",
       "telegram_send_message",
       "x_post_create",
+      "youtube_comment_reply",
+      "youtube_video_comment_post",
+      "youtube_video_update",
     ]);
   });
 

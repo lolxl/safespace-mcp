@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { withAllAccounts, type WithAllAccountsDeps } from "./with-all-accounts";
+import { requireOAuth } from "./handlers/shared";
 
 const SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 
@@ -44,14 +45,15 @@ async function runWithConcurrencyProbe(n: number) {
   const res = await withAllAccounts(
     "gmail_search_all",
     {},
-    async (sub) => {
+    async (ctx) => {
+      const cred = requireOAuth(ctx);
       active++;
       maxActive = Math.max(maxActive, active);
       await new Promise((r) => setTimeout(r, 5));
       active--;
-      return { messages: [] as unknown[], probed_email: sub.email };
+      return { messages: [] as unknown[], probed_email: cred.accountId };
     },
-    { requiredScopes: [SCOPE] },
+    {},
     baseDeps(accounts),
   );
   return { res, maxActive, accounts };
@@ -85,7 +87,7 @@ describe("withAllAccounts — bounded fan-out concurrency (perf hot-path)", () =
       async () => {
         throw new Error("fn must not run when there are no accounts");
       },
-      { requiredScopes: [SCOPE] },
+      {},
       baseDeps([]),
     );
     expect(res.successes).toEqual([]);

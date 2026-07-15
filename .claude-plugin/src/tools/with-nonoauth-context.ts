@@ -20,17 +20,20 @@
 // resolution, the F4 autonomous-delete + F1 write-burst gates, the per-source
 // `sanitize(..., source.skipFields)` wrap, and a real audit sink threaded onto one
 // `auditEnd` row. (Errors are mapped by each HANDLER, then re-thrown verbatim — the
-// v1.65 posture; `source.mapError` is reserved for B6.1's shared pipeline.)
+// v1.65 posture; there is deliberately NO per-source error-mapping strategy on the
+// Source — a future B6.1 shared pipeline would introduce an error-mapping seam.)
 //
 // What it DELIBERATELY omits: account resolution, scope check, token refresh, the
 // 401 retry (no in-band token refresh for keyless or service-token). The credential
 // is the honest `{kind:"none"}` / `{kind:"service-token"}`; `requireOAuth(ctx)`
 // throws on both (a non-OAuth handler must never reach for a Google account).
 //
-// EGRESS: an outbound non-OAuth tool (LINE push) calls the centralized
-// `enforceLineEgressGates` (tools/egress.ts) INSIDE its handler — the B3 posture
-// (egress handler-called), consistent with gmail_send. Pipeline-firing egress off
-// `direction` for BOTH gmail + LINE lands together in B6.1.
+// EGRESS (B6.1 wave A1 — PIPELINE-FIRED): an outbound non-OAuth tool (the 5
+// service-token sends) carries an egress descriptor on its ToolDef
+// (tools/egress-pipeline.ts); THIS choke point fires extract (the tool's own arg
+// validation) → gate (the composite tools/egress.ts gate) BEFORE the handler runs,
+// so egress enforcement is pipeline-owned, not handler-remembered. The gmail path
+// (with-context.ts) keeps the B3 handler-called posture.
 //
 // withToolContext is UNTOUCHED by this file — the Google path stays byte-identical.
 
@@ -121,9 +124,35 @@ export async function withNonOAuthContext(
     enforceAutonomousDeleteDeny(toolName);
     // v1.92 — per-operator burst window (Model A null → shared sentinel bucket).
     enforceWriteBurst(classifyWriteTool(toolName, toolDef?.min_tier), op);
-    // The handler runs the connector. An outbound handler (LINE push) calls
-    // enforceLineEgressGates(ctx, …) itself (egress handler-called, B3 posture).
+    // B6.1 wave A1 — PIPELINE-FIRED egress for tools carrying an egress descriptor
+    // (the 5 service-token sends; tools/egress-pipeline.ts): extract (the tool's own
+    // arg validation — throws its plain-Error messages) then the composite gate
+    // (sets ctx.egressGateFired; throws -32035 / -32019 on denial), both BEFORE the
+    // handler. INSIDE the errorCode-stamping try so a denial lands on the audit row
+    // exactly like a handler throw. Production rejection order preserved:
+    // resolveCredential (no_token) above still precedes extract; F4 + F1 precede
+    // both; the handler re-runs the same pure validator as defense-in-depth.
+    const eg = toolDef?.egress;
+    if (eg !== undefined) {
+      const shape = eg.extract(args);
+      await eg.gate(ctx, shape);
+    }
+    // The handler runs the connector (for a descriptor-carrying tool the egress gate
+    // has already fired above; the handler must not fire it again).
     const raw = await handler(ctx, args);
+    // v1.116 — choke-point egress tripwire (the class-B/C twin of the with-context.ts one).
+    // A tool LABELED direction:"outbound-write" whose call completed WITHOUT its centralized
+    // egress gate (tools/egress.ts sets ctx.egressGateFired) → a loud, audited failure.
+    // Post-A1 every outbound-write tool routed here carries a descriptor, so the pipeline
+    // fires the gate itself and this check is a RESIDUAL backstop (it would catch a future
+    // outbound-write tool added with neither a descriptor nor a handler-called gate). No
+    // 401-retry here (no in-band refresh), so `ctx` is the single instance the handler ran
+    // with. PREVENTION stays with the static call-site sentinel (egress-callsite.test.ts).
+    // Inside the errorCode-stamping try so the throw lands on the audit row like a handler
+    // throw.
+    if (toolDef?.direction === "outbound-write" && ctx.egressGateFired !== true) {
+      throw new MCPError("internal_routing_error", { reason: "egress_gate_not_fired" });
+    }
     // Per-source sanitize. sanitize() is itself fail-closed (any internal throw →
     // MCPError("sanitize_failed")), so a sanitize failure flows through the
     // errorCode stamping below exactly like a handler throw.
@@ -139,8 +168,9 @@ export async function withNonOAuthContext(
     // non-OAuth HANDLER maps its OWN expected errors to MCPError before they reach
     // here (the web-fetch handler calls mapWebFetchError; the LINE handler throws
     // line_api_failed directly), so a deliberate plain-Error from a handler (e.g.
-    // web_fetch input validation) propagates unchanged. `source.mapError` stays the
-    // per-source strategy reserved for B6.1's future shared pipeline catch.
+    // web_fetch input validation) propagates unchanged. There is deliberately no
+    // per-source error-mapping strategy in this catch — a future B6.1 shared
+    // pipeline would introduce an error-mapping seam.
     throw err;
   } finally {
     // Fire-and-forget standard per-call row. `source.id` = "web-fetch" / "line";

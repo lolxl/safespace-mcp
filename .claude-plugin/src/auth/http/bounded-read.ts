@@ -1,5 +1,8 @@
 // Shared streaming byte-cap for the hardened READ clients (auth/{notion,github,slack}/client.ts).
 //
+// B6.1-B — part of the client-layer error-mapping contract (a cap breach surfaces as
+// the CALLING client's `*_api_failed{api_error}`): src/auth/http/connector-error-contract.ts.
+//
 // Each of those clients performs an authenticated request that RETURNS the parsed JSON (unlike
 // the outbound write core tools/handlers/service-token-fetch.ts, which DISCARDS the body). They
 // all need the SAME response guard: cap the bytes actually streamed so a chunked / header-less

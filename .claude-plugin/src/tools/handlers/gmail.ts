@@ -6,11 +6,10 @@ import { MCPError } from "../../errors";
 import { buildBatchModifyBody, newBoundary, parseBatchResponse } from "../../google-api/batch";
 import { gmailClientFromToken, oauth2ClientFromToken } from "../../google-api/client";
 import { mapGoogleError, toGoogleError } from "../../google-api/errors";
-import { enforceEgressGates } from "../egress";
+import { requireEgressResult } from "../egress-pipeline";
 import type { ToolContext } from "../types";
 
-import { requireGoogle, EMAIL_RECIPIENT_RE, HEADER_INJECTION_RE } from "./shared";
-import { hashResolvedRecipientEmails, resolveRecipientsViaContactLookup } from "./contacts";
+import { requireGoogle, HEADER_INJECTION_RE } from "./shared";
 
 export async function gmailSearch(
   ctx: ToolContext,
@@ -289,17 +288,16 @@ export async function gmailGetMessage(
  * would be worse than the current "delete + re-consent" recovery.
  */
 
-const MAX_RECIPIENTS = 10; // v1 anti-spam cap (sec-rev 5.9 LOW)
-const MAX_EMAIL_BODY_BYTES = 1 * 1024 * 1024; // 1 MB body cap (5.9 code-rev MED-2)
-
 // HEADER_INJECTION_RE is declared at the top of this module — shared with
 // gmailCreateLabel since v1.4 (sec-rev LOW-2). Threat set (CR/LF/NUL/NEL/
 // U+2028/U+2029) is unchanged from Step 5.9.
-
-// RFC 2822 §3.2.3: unstructured header fields must be printable US-ASCII.
-// v1 rejects non-ASCII subjects (sec-rev 5.9 LOW). Future v2 may add MIME
-// Q-encoding so CJK / emoji subjects round-trip cleanly.
-const NON_ASCII_RE = /[^\x20-\x7E]/;
+//
+// v1.64 Phase B (B3 — D2): the gmail pre-egress gate constants + helpers that
+// used to live here — MAX_RECIPIENTS, MAX_EMAIL_BODY_BYTES, NON_ASCII_RE, and
+// the parseAddrs helper — MOVED to src/tools/egress.ts alongside the new
+// enforceGmailHeaderGates, so gmail_send + gmail_create_draft share ONE
+// byte-identical copy of the header / non-ASCII / recipient-count / format /
+// body-cap logic (see enforceGmailHeaderGates + enforceEgressGates there).
 
 /* ───────── shared compose helper (gmail_send + gmail_create_draft) ─────────
  *
@@ -344,24 +342,19 @@ function buildRfc2822Raw(
   return Buffer.from(headers.join("\r\n"), "utf-8").toString("base64url");
 }
 
-export async function gmailSend(
-  ctx: ToolContext,
-  args: Record<string, unknown>,
-): Promise<unknown> {
-  // v2.0: kill switch removed. Tier-based tools/list filter in proxy.ts gates
-  // exposure; if Claude can see this tool, the current tier is `write` or
-  // higher and the operator has explicitly opted into sending. Claude Code's
-  // per-call approve UI is the operational confirmation layer.
-
-  // v1.10 (#14): cc / bcc are optional. Bcc routing matches RFC 5322 §3.6.3:
-  // Gmail's users.messages.send delivers a copy to each Bcc address but
-  // strips the Bcc header from the delivered MIME, so including `Bcc:` in
-  // the raw RFC 2822 is correct and required for the recipients to be
-  // addressed (no separate bcc field — everything rides in `raw`).
-
-  // account_id is resolved upstream by withToolContext into ctx.credential (the
-  // oauth email + token getter); do NOT re-read args.account_id here (would
-  // double-resolve).
+/** B6.1 wave A3+D — the SINGLE-SOURCE gmail_send arg validator: the type-then-
+ *  presence checks (to/subject/body/cc/bcc typed → non-empty to/subject/body),
+ *  messages VERBATIM from the pre-A3 inline block. Called by BOTH the pipeline
+ *  descriptor's `extract` (tools/egress-pipeline.ts — the production gate input) and
+ *  the handler below (defense-in-depth re-run of the same pure check), so the two can
+ *  never drift. cc/bcc default to "" so the returned shape is always the full set. */
+export function validateGmailSendArgs(args: Record<string, unknown>): {
+  to: string;
+  subject: string;
+  body: string;
+  cc: string;
+  bcc: string;
+} {
   // Type-then-presence split (5.9 code-rev MED-1): "wrong type" vs
   // "missing/empty" surface as distinct errors so operators debugging a
   // misconfigured MCP client get an actionable message.
@@ -388,151 +381,94 @@ export async function gmailSend(
   if (!to.trim() || !subject || !body) {
     throw new Error("gmail_send requires non-empty 'to', 'subject', and 'body'");
   }
+  return { to, subject, body, cc, bcc };
+}
 
-  // Defense-in-depth: validate active-account email too (sec-rev 5.9 LOW-1).
-  // requireGoogle(ctx).accountId comes from the Keychain index — a controlled
-  // source — but running it through the same guard means a corrupted index
-  // can't smuggle a forged header line via the From: field.
-  if (HEADER_INJECTION_RE.test(requireGoogle(ctx).accountId)) {
-    throw new Error("gmail_send: active account email contains illegal characters (Keychain integrity issue)");
-  }
-
-  if (
-    HEADER_INJECTION_RE.test(to) ||
-    HEADER_INJECTION_RE.test(subject) ||
-    HEADER_INJECTION_RE.test(cc) ||
-    HEADER_INJECTION_RE.test(bcc)
-  ) {
-    throw new Error("gmail_send: 'to', 'cc', 'bcc', and 'subject' must not contain CR/LF/NUL/NEL/U+2028/U+2029 (header injection prevention)");
-  }
-
-  if (NON_ASCII_RE.test(subject)) {
-    throw new Error("gmail_send: 'subject' must be plain ASCII in v1 (no non-ASCII characters)");
-  }
-
-  // Cap recipient count (sec-rev 5.9 LOW) over the COMBINED to+cc+bcc set —
-  // a prompt-injected Claude call could otherwise blast 500 addresses by
-  // splitting them across the three fields. Naive comma-split over-counts
-  // when display names contain commas ("Doe, John" <j@x.com>); that's OK —
-  // over-counting just rejects faster, which is the conservative side for
-  // an anti-spam cap. Zero-count on `to` also rejects whitespace-only `to`
-  // (5.9 code-rev MED-2). cc/bcc may be empty independently.
-  const parseAddrs = (s: string): string[] =>
-    s.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
-  const toAddrs = parseAddrs(to);
-  const ccAddrs = parseAddrs(cc);
-  const bccAddrs = parseAddrs(bcc);
-  if (toAddrs.length === 0) {
-    throw new Error("gmail_send: 'to' must contain at least one non-empty recipient");
-  }
-  const totalRecipients = toAddrs.length + ccAddrs.length + bccAddrs.length;
-  if (totalRecipients > MAX_RECIPIENTS) {
-    throw new Error(`gmail_send: at most ${MAX_RECIPIENTS} recipients per call across to+cc+bcc (got ${totalRecipients})`);
-  }
-
-  // v1.15 Phase 3 — contact-lookup resolution.
-  //
-  // Runs BEFORE the email-format gate so non-email inputs (names like
-  // "alice") get resolved to emails first. The resolver short-circuits for
-  // already-email inputs (no contactsLookupEmail call observed), so the
-  // pre-Phase-3 happy path has zero behavioural change.
-  //
-  // Opt-in: when SAFESPACE_RECIPIENT_ALLOW_CONTACTS != "true", the resolver
-  // returns inputs unchanged and the email-format gate below fires the usual
-  // "not a valid email address" rejection for any non-email input — matching
-  // v1.14 behaviour exactly.
-  //
-  // Order matters per design §9 step 4 + sec-rev hook #5:
-  //   1. Resolve names → emails (this block).
-  //   2. EMAIL_RECIPIENT_RE format gate (existing, runs on RESOLVED values
-  //      so a buggy People API response that returned malformed email is
-  //      still caught locally before reaching Google).
-  //   3. isRecipientAllowed gate (existing, runs on RESOLVED values so the
-  //      v2.2 allowlist applies to the email Claude WILL ACTUALLY send to,
-  //      not the name Claude typed).
-  const preResolvedAll = [...toAddrs, ...ccAddrs, ...bccAddrs];
-  const { resolvedEmails: allResolved, lookedUpEmails } =
-    await resolveRecipientsViaContactLookup(ctx, preResolvedAll, "gmail_send");
-  // Splice resolved emails back into to/cc/bcc positions. Sizes are
-  // preserved 1:1 by the resolver contract.
-  const resolvedToAddrs = allResolved.slice(0, toAddrs.length);
-  const resolvedCcAddrs = allResolved.slice(
-    toAddrs.length,
-    toAddrs.length + ccAddrs.length,
-  );
-  const resolvedBccAddrs = allResolved.slice(toAddrs.length + ccAddrs.length);
-
-  // Per-recipient email-format gate (#22) across to + cc + bcc. Without
-  // this, a prompt-injected Claude call could pass `cc: "not-an-email"` and
-  // reach Google's API, which would return 400 — surfacing to the caller as
-  // an opaque upstream error. Local rejection gives a clearer message and
-  // avoids a wasted upstream round-trip.
-  //
-  // v1.15 Phase 3: runs on the RESOLVED values. If the contact-lookup
-  // resolved a name to a malformed email (shouldn't happen — People API
-  // emails are server-validated — but defense-in-depth), the format gate
-  // catches it here.
-  const allRecipients = [...resolvedToAddrs, ...resolvedCcAddrs, ...resolvedBccAddrs];
-  for (const addr of allRecipients) {
-    if (!EMAIL_RECIPIENT_RE.test(addr)) {
-      throw new Error(`gmail_send: recipient is not a valid email address: ${addr}`);
+/** B6.1 wave A3+D — the SINGLE-SOURCE gmail_create_draft arg validator: the
+ *  all-optional per-field type loop + the at-least-one-non-empty check, messages
+ *  VERBATIM from the pre-A3 inline block. Called by BOTH the pipeline descriptor's
+ *  `extract` and the handler below (defense-in-depth), so the two can never drift. */
+export function validateGmailCreateDraftArgs(args: Record<string, unknown>): {
+  to: string;
+  subject: string;
+  body: string;
+  cc: string;
+  bcc: string;
+} {
+  // Type gates — all fields optional, so validate only when present.
+  for (const k of ["to", "cc", "bcc", "subject", "body"] as const) {
+    if (args[k] !== undefined && typeof args[k] !== "string") {
+      throw new Error(`gmail_create_draft: '${k}' must be a string when provided`);
     }
   }
+  const to = (args.to as string | undefined) ?? "";
+  const cc = (args.cc as string | undefined) ?? "";
+  const bcc = (args.bcc as string | undefined) ?? "";
+  const subject = (args.subject as string | undefined) ?? "";
+  const body = (args.body as string | undefined) ?? "";
 
-  // Pre-flight body byte cap (5.9 code-rev MED-2). Gmail's hard limit is
-  // 25 MB raw; we cap at 1 MB to bound request body size and prevent
-  // accidental megablob sends.
-  // Count utf-8 bytes, not chars.
-  const bodyBytes = Buffer.byteLength(body, "utf-8");
-  if (bodyBytes > MAX_EMAIL_BODY_BYTES) {
-    throw new Error(`gmail_send: body exceeds ${MAX_EMAIL_BODY_BYTES} bytes (got ${bodyBytes})`);
+  // Reject a totally-empty draft. A draft with only a body or only a subject
+  // (no recipient yet) is legitimate — that's the whole point of a draft.
+  if (!to.trim() && !subject && !body) {
+    throw new Error("gmail_create_draft requires at least one of non-empty 'to', 'subject', or 'body'");
   }
+  return { to, subject, body, cc, bcc };
+}
 
-  // v1.64 Phase B (B3 — D2): the centralized egress gate. Runs the F3a
-  // secret-shape gate then the v2.2 recipient allowlist + F3b tainted-source
-  // gate — in ONE place (tools/egress.ts), at the SAME point as the pre-B3
-  // inline calls: after format validation + body-size cap + contact-lookup
-  // resolution, before building the RFC 2822 message and dispatching. Runs on
-  // the RESOLVED recipients, so the allowlist gates what we actually send to,
-  // not the name Claude typed. All-or-nothing: any rejected recipient fails the
-  // WHOLE call (no partial sends, per DESIGN.md v2.2 Addendum). Behavior is
-  // byte-identical to the two former inline calls.
-  await enforceEgressGates(ctx, {
-    tool: "gmail_send",
-    recipients: allRecipients,
-    body,
-  });
+export async function gmailSend(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  // v2.0: kill switch removed. Tier-based tools/list filter in proxy.ts gates
+  // exposure; if Claude can see this tool, the current tier is `write` or
+  // higher and the operator has explicitly opted into sending. Claude Code's
+  // per-call approve UI is the operational confirmation layer.
 
-  // v1.15 Phase 3 — record the audit hash NOW (after all gates passed but
-  // BEFORE the SDK call). If the SDK call fails, the audit row still records
-  // resolved_recipient_hash on the error row — forensic clarity that the
-  // resolution did happen even though the send didn't complete.
+  // v1.10 (#14): cc / bcc are optional. Bcc routing matches RFC 5322 §3.6.3:
+  // Gmail's users.messages.send delivers a copy to each Bcc address but
+  // strips the Bcc header from the delivered MIME, so including `Bcc:` in
+  // the raw RFC 2822 is correct and required for the recipients to be
+  // addressed (no separate bcc field — everything rides in `raw`).
+
+  // account_id is resolved upstream by withToolContext into ctx.credential (the
+  // oauth email + token getter); do NOT re-read args.account_id here (would
+  // double-resolve).
+
+  // B6.1 wave A3+D — the egress gate (header/count gates → contact-lookup
+  // resolution → recipient-format/body-cap → F3a secret-shape → v2.2 recipient
+  // allowlist + F3b tainted-source → supervised-send approval) is PIPELINE-FIRED:
+  // withToolContext runs this tool's descriptor (extract = validateGmailSendArgs →
+  // gate = enforceGmailComposeEgressGates, resolving recipients via
+  // source.resolveRecipients) BEFORE this handler and stores the gate's transformed
+  // shape (RESOLVED recipients + the vetted subject/body) on ctx.egress. The handler
+  // must NOT call the gate itself (anti-double-fire — egress-callsite.test.ts) and
+  // wires the PIPELINE's resolved recipients (never a local recomputation).
   //
-  // Hash semantics: SHA-256 over sorted-emails.join(",") — see audit.ts
-  // `AuditEndContext.resolvedRecipientHash` comment for full rationale. ONE
-  // hash per CALL, not per recipient — trades per-recipient resolvability
-  // for schema simplicity.
-  if (lookedUpEmails.length > 0) {
-    ctx.audit.record("resolvedRecipientHash", hashResolvedRecipientEmails(allRecipients));
+  // Defense-in-depth: re-run the SAME pure validator the pipeline's extract ran
+  // (identical result in production; keeps the handler independently unit-testable).
+  validateGmailSendArgs(args);
+
+  // The pipeline-fired gate's transformed shape — the RESOLVED recipients + vetted
+  // fields. `resolved`-absent (the extracted shape reached the handler without the
+  // gate transform) → fail loud, never send with unresolved names.
+  const shape = requireEgressResult(ctx, "gmail-compose");
+  if (shape.resolved === undefined) {
+    throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
   }
 
   // Build minimal RFC 2822 message → base64url `raw` (CRLF endings; From
   // mandatory per §3.6.2; Cc/Bcc only when non-empty so to-only sends stay
-  // MIME-clean). v1.15 Phase 3: uses the RESOLVED emails so the headers carry
-  // what we actually send to, not the name Claude typed. v1.43: shared helper
-  // — gmail_create_draft builds byte-identical wire messages.
+  // MIME-clean). Uses the PIPELINE's RESOLVED emails + vetted subject/body so the
+  // headers carry what we actually send to, not the name Claude typed. v1.43:
+  // shared helper — gmail_create_draft builds byte-identical wire messages.
   const raw = buildRfc2822Raw(requireGoogle(ctx).accountId, {
-    to: resolvedToAddrs,
-    cc: resolvedCcAddrs,
-    bcc: resolvedBccAddrs,
-    subject,
-    body,
+    to: shape.resolved.to,
+    cc: shape.resolved.cc,
+    bcc: shape.resolved.bcc,
+    subject: shape.subject,
+    body: shape.body,
   });
 
-  // MCPError pass-through (recipient_denied_by_policy raised above) must
-  // escape this catch before mapGoogleError reshapes it — without the
-  // instanceof check the typed v2.2 policy error gets reshaped into an
-  // UpstreamError with a misleading "network" code.
   try {
     const gmail = gmailClientFromToken(requireGoogle(ctx).getAccessToken());
     const res = await gmail.users.messages.send({
@@ -979,84 +915,29 @@ export async function gmailCreateDraft(
   ctx: ToolContext,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  // Type gates — all fields optional, so validate only when present.
-  for (const k of ["to", "cc", "bcc", "subject", "body"] as const) {
-    if (args[k] !== undefined && typeof args[k] !== "string") {
-      throw new Error(`gmail_create_draft: '${k}' must be a string when provided`);
-    }
-  }
-  const to = (args.to as string | undefined) ?? "";
-  const cc = (args.cc as string | undefined) ?? "";
-  const bcc = (args.bcc as string | undefined) ?? "";
-  const subject = (args.subject as string | undefined) ?? "";
-  const body = (args.body as string | undefined) ?? "";
+  // B6.1 wave A3+D — the egress gate (header/count gates → recipient-format/body-cap
+  // → F3a secret-shape → v2.2 recipient allowlist + F3b tainted-source) is
+  // PIPELINE-FIRED, exactly like gmail_send (a draft is a latent send → the SAME
+  // gate). NO contact-lookup for drafts (D3 — literal emails only): the gate skips
+  // resolution for gmail_create_draft, so `resolved` carries the parsed literal
+  // arrays. supervised-send approval does NOT apply to a draft (not in
+  // APPROVAL_GATED_SENDS). The handler must NOT call the gate (anti-double-fire —
+  // egress-callsite.test.ts) and wires the PIPELINE's parsed recipients off ctx.egress.
+  //
+  // Defense-in-depth: re-run the SAME pure validator the pipeline's extract ran.
+  validateGmailCreateDraftArgs(args);
 
-  // Reject a totally-empty draft. A draft with only a body or only a subject
-  // (no recipient yet) is legitimate — that's the whole point of a draft.
-  if (!to.trim() && !subject && !body) {
-    throw new Error("gmail_create_draft requires at least one of non-empty 'to', 'subject', or 'body'");
+  const shape = requireEgressResult(ctx, "gmail-compose");
+  if (shape.resolved === undefined) {
+    throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
   }
-
-  // Header-injection reject — same threat set + same fields as gmail_send,
-  // including the active-account From (Keychain-integrity defense-in-depth).
-  if (HEADER_INJECTION_RE.test(requireGoogle(ctx).accountId)) {
-    throw new Error("gmail_create_draft: active account email contains illegal characters (Keychain integrity issue)");
-  }
-  if (
-    HEADER_INJECTION_RE.test(to) ||
-    HEADER_INJECTION_RE.test(cc) ||
-    HEADER_INJECTION_RE.test(bcc) ||
-    HEADER_INJECTION_RE.test(subject)
-  ) {
-    throw new Error("gmail_create_draft: 'to', 'cc', 'bcc', and 'subject' must not contain CR/LF/NUL/NEL/U+2028/U+2029 (header injection prevention)");
-  }
-  if (NON_ASCII_RE.test(subject)) {
-    throw new Error("gmail_create_draft: 'subject' must be plain ASCII in v1 (no non-ASCII characters)");
-  }
-
-  // Parse recipients (each field optional). Combined to+cc+bcc capped at 10,
-  // same anti-blast cap as gmail_send.
-  const parseAddrs = (s: string): string[] =>
-    s.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
-  const toAddrs = parseAddrs(to);
-  const ccAddrs = parseAddrs(cc);
-  const bccAddrs = parseAddrs(bcc);
-  const allRecipients = [...toAddrs, ...ccAddrs, ...bccAddrs];
-  if (allRecipients.length > MAX_RECIPIENTS) {
-    throw new Error(`gmail_create_draft: at most ${MAX_RECIPIENTS} recipients per call across to+cc+bcc (got ${allRecipients.length})`);
-  }
-
-  // Per-recipient email-format gate (literal emails only — D3, no lookup).
-  for (const addr of allRecipients) {
-    if (!EMAIL_RECIPIENT_RE.test(addr)) {
-      throw new Error(`gmail_create_draft: recipient is not a valid email address: ${addr}`);
-    }
-  }
-
-  // Body byte cap (1 MiB) — same as gmail_send.
-  const bodyBytes = Buffer.byteLength(body, "utf-8");
-  if (bodyBytes > MAX_EMAIL_BODY_BYTES) {
-    throw new Error(`gmail_create_draft: body exceeds ${MAX_EMAIL_BODY_BYTES} bytes (got ${bodyBytes})`);
-  }
-
-  // v1.64 Phase B (B3 — D2): the centralized egress gate (a draft is a latent
-  // send → identical gate to gmail_send). F3a secret-shape then the v2.2
-  // recipient allowlist + F3b tainted-source, in ONE place (tools/egress.ts).
-  // NO contact-lookup for drafts (D3 — literal emails only), so `allRecipients`
-  // is already the final set; an empty recipient set trivially passes. Behavior
-  // is byte-identical to the two former inline calls.
-  await enforceEgressGates(ctx, {
-    tool: "gmail_create_draft",
-    recipients: allRecipients,
-    body,
-  });
 
   const raw = buildRfc2822Raw(requireGoogle(ctx).accountId, {
-    to: toAddrs,
-    cc: ccAddrs,
-    bcc: bccAddrs,
-    subject,
-    body,
+    to: shape.resolved.to,
+    cc: shape.resolved.cc,
+    bcc: shape.resolved.bcc,
+    subject: shape.subject,
+    body: shape.body,
   });
 
   try {

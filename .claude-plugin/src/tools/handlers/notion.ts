@@ -27,7 +27,9 @@
 
 import { notionApiGet, notionApiPatch, notionApiPost } from "../../auth/notion/client";
 import { outboundSanitize } from "../../sanitize/outbound";
-import { enforceNotionWriteEgressGates } from "../egress";
+// B6.1 wave A — the notion egress gate (enforceNotionWriteEgressGates) is now PIPELINE-FIRED
+// by with-context.ts via each write tool's egress descriptor (tools/egress-pipeline.ts); the
+// handlers no longer import/call it (anti-double-fire).
 import type { ToolContext } from "../types";
 import { requireNotion } from "./shared";
 
@@ -368,11 +370,11 @@ export async function notionGetDatabase(
 
 /* ── WRITE (v1.96) — TEXT-only, allowlist-constructed bodies ───────────────────────────
  * Each write: requireNotion (R8 — a Google/GitHub bearer can never reach api.notion.com)
- * → validate id(s) + title/text → enforceNotionWriteEgressGates (F3a secret-shape; model B
- * — NO target allowlist, Notion's integration-sharing IS the natural bound) → per-field
- * outboundSanitize REJECT (-32027) + byte cap → ALLOWLIST-CONSTRUCTED Notion body (only
- * parent / properties.title / paragraph children — never raw block JSON from the agent) →
- * notionApiPost / notionApiPatch → curated shape. TEXT-only: title is a string and content
+ * → validate id(s) + title/text → [PIPELINE-FIRED egress: F3a secret-shape; model B — NO
+ * target allowlist, Notion's integration-sharing IS the natural bound; B6.1 wave A] →
+ * per-field outboundSanitize REJECT (-32027) + byte cap → ALLOWLIST-CONSTRUCTED Notion body
+ * (only parent / properties.title / paragraph children — never raw block JSON from the agent)
+ * → notionApiPost / notionApiPatch → curated shape. TEXT-only: title is a string and content
  * is plain text rendered as paragraph blocks, so the agent cannot construct arbitrary
  * Notion structures. */
 
@@ -556,51 +558,55 @@ function requireWriteText(args: Record<string, unknown>, key: string): string {
   return v;
 }
 
-/** POST /v1/pages — create a page under a PAGE parent (title + optional text) OR a DATABASE
- *  parent (v1.105: a type-tagged `properties` map that MUST carry the db's title column).
- *  Exactly one parent. The `\n` join in every egress `body` is a SafeSpace-authored scan
- *  separator (NOT agent input) — it only shapes what the secret-shape scanner sees, never the
- *  request body. Arbitrary `properties` are db-only — a page-parented page has only a title. */
-export async function notionCreatePage(
-  ctx: ToolContext,
-  args: Record<string, unknown>,
-  deps: NotionReadDeps = {},
-): Promise<unknown> {
-  const token = requireNotion(ctx).getAccessToken();
+/* ── B6.1 wave A — exported prepare/validate helpers (SINGLE SOURCE for the egress
+ * descriptor's `extract` + the handler). Each reproduces the tool's former pre-gate
+ * validation + scan assembly VERBATIM (same order, same plain-Error messages) and returns
+ * the egress `body` (what the F3a secret-shape scan sees) PLUS the request-body pieces. The
+ * descriptor's extract calls the helper and takes `.egressBody`; the handler calls it and
+ * consumes the pieces (re-runs it — cheap, pure, identical result). The egress gate is now
+ * PIPELINE-FIRED (with-context.ts), so no notion handler calls enforceNotionWriteEgressGates
+ * (anti-double-fire — egress-callsite.test.ts enforces both directions). Order note: for a
+ * PAGE-parent create the raw title is NOT sanitized here (the handler sanitizes it AFTER the
+ * gate, byte-identical to the pre-A ordering: gate → titleS → children); for a DB-parent
+ * create / an update the sanitize happens INSIDE buildNotionProperties, which ran before the
+ * gate pre-A too — so the -32027 vs -32035 order is preserved. ── */
+
+export interface NotionCreatePagePrep {
+  /** The combined agent text the F3a secret-shape scan sees (SafeSpace-authored `\n` join). */
+  readonly egressBody: string;
+  readonly parent: { page_id: string } | { database_id: string };
+  /** page-parent only — the RAW title (the handler sanitizes it after the gate). */
+  readonly title: string | undefined;
+  /** db-parent only — the already-built (sanitized) allowlist-constructed properties. */
+  readonly properties: Obj | undefined;
+  /** RAW page content (the handler sanitizes it into paragraph blocks). */
+  readonly text: string | undefined;
+}
+
+export function prepareNotionCreatePage(args: Record<string, unknown>): NotionCreatePagePrep {
   const hasPageParent = args.parent_page_id !== undefined;
   const hasDbParent = args.parent_database_id !== undefined;
   if (hasPageParent === hasDbParent) {
     throw new Error("notion_create_page: provide exactly one of 'parent_page_id' or 'parent_database_id'");
   }
   const text = args.text === undefined ? undefined : requireWriteText(args, "text");
-  const sanitizedChildren = (): Obj[] =>
-    text === undefined
-      ? []
-      : textToParagraphBlocks(outboundSanitize(text, { tool: "notion_create_page", maxBytes: NOTION_TEXT_MAX_BYTES }));
 
   if (hasPageParent) {
-    // page-parent: title required, `properties` forbidden (a non-db page has only a title).
     if (args.properties !== undefined) {
       throw new Error("notion_create_page: 'properties' is only valid under 'parent_database_id' (a page-parented page has only a title)");
     }
     const parentId = requireNotionId(args, "parent_page_id");
     const title = requireWriteText(args, "title");
-    enforceNotionWriteEgressGates(ctx, {
-      tool: "notion_create_page",
-      body: text === undefined ? title : `${title}\n${text}`,
-    });
-    const titleS = outboundSanitize(title, { tool: "notion_create_page", maxBytes: NOTION_TITLE_MAX_BYTES });
-    const data = await notionApiPost({
-      token,
-      path: "/v1/pages",
-      body: { parent: { page_id: parentId }, properties: titleProperties(titleS), children: sanitizedChildren() },
-      fetchImpl: deps.fetchImpl,
-    });
-    return shapePage(data);
+    return {
+      egressBody: text === undefined ? title : `${title}\n${text}`,
+      parent: { page_id: parentId },
+      title,
+      properties: undefined,
+      text,
+    };
   }
 
-  // db-parent: the title lives in `properties` (the db's title column, type "title"); the
-  // `title` convenience param does NOT apply here (B5).
+  // db-parent
   if (args.title !== undefined) {
     throw new Error("notion_create_page: under 'parent_database_id' the title goes in 'properties' (the db's title column), not the 'title' param");
   }
@@ -610,54 +616,34 @@ export async function notionCreatePage(
   const databaseId = requireNotionId(args, "parent_database_id");
   const { properties, scan } = buildNotionProperties(args.properties, "notion_create_page");
   if (text !== undefined) scan.push(text); // raw page content into the secret-shape scan
-  enforceNotionWriteEgressGates(ctx, { tool: "notion_create_page", body: scan.join("\n") });
-  const data = await notionApiPost({
-    token,
-    path: "/v1/pages",
-    body: { parent: { database_id: databaseId }, properties, children: sanitizedChildren() },
-    fetchImpl: deps.fetchImpl,
-  });
-  return shapePage(data);
+  return {
+    egressBody: scan.join("\n"),
+    parent: { database_id: databaseId },
+    title: undefined,
+    properties,
+    text,
+  };
 }
 
-/** PATCH /v1/blocks/{id}/children — append paragraph blocks (text) to an existing page. */
-export async function notionAppendBlocks(
-  ctx: ToolContext,
-  args: Record<string, unknown>,
-  deps: NotionReadDeps = {},
-): Promise<unknown> {
-  const token = requireNotion(ctx).getAccessToken();
+export function validateNotionAppendBlocksArgs(args: Record<string, unknown>): {
+  pageId: string;
+  text: string;
+} {
   const pageId = requireNotionId(args, "page_id");
   const text = requireWriteText(args, "text");
-
-  enforceNotionWriteEgressGates(ctx, { tool: "notion_append_blocks", body: text });
-
-  const children = textToParagraphBlocks(
-    outboundSanitize(text, { tool: "notion_append_blocks", maxBytes: NOTION_TEXT_MAX_BYTES }),
-  );
-  const data =
-    asObj(
-      await notionApiPatch({
-        token,
-        path: `/v1/blocks/${pageId}/children`,
-        body: { children },
-        fetchImpl: deps.fetchImpl,
-      }),
-    ) ?? {};
-  return { id: pageId, appended_blocks: children.length, has_more: data.has_more ?? false };
+  return { pageId, text };
 }
 
-/** PATCH /v1/pages/{id} — rename (set `title`), update arbitrary `properties` (v1.105:
- *  type-tagged, db rows only), and/or `archived` (archive true / restore false — a REVERSIBLE
- *  Trash move, NOT an F4 permanent delete). At least one of title/properties/archived. The
- *  `title` convenience param sets the literal "title" property (page-parented pages); a db
- *  row's title column has its own name → set it via `properties` (and NOT both at once). */
-export async function notionUpdatePage(
-  ctx: ToolContext,
-  args: Record<string, unknown>,
-  deps: NotionReadDeps = {},
-): Promise<unknown> {
-  const token = requireNotion(ctx).getAccessToken();
+export interface NotionUpdatePagePrep {
+  /** The combined RAW agent strings the F3a secret-shape scan sees. */
+  readonly egressBody: string;
+  readonly pageId: string;
+  /** The already-built (sanitized) allowlist-constructed properties (may be empty). */
+  readonly properties: Obj;
+  readonly archived: boolean | undefined;
+}
+
+export function prepareNotionUpdatePage(args: Record<string, unknown>): NotionUpdatePagePrep {
   const pageId = requireNotionId(args, "page_id");
   const hasTitle = args.title !== undefined;
   const hasProps = args.properties !== undefined;
@@ -688,9 +674,90 @@ export async function notionUpdatePage(
       outboundSanitize(title, { tool: "notion_update_page", maxBytes: NOTION_TITLE_MAX_BYTES }),
     ).title;
   }
+  return { egressBody: scan.join("\n"), pageId, properties, archived };
+}
 
-  // Secret-shape on the combined RAW agent strings (empty for an archive-only call → no-op).
-  enforceNotionWriteEgressGates(ctx, { tool: "notion_update_page", body: scan.join("\n") });
+/** POST /v1/pages — create a page under a PAGE parent (title + optional text) OR a DATABASE
+ *  parent (v1.105: a type-tagged `properties` map that MUST carry the db's title column).
+ *  Exactly one parent. The `\n` join in every egress `body` is a SafeSpace-authored scan
+ *  separator (NOT agent input) — it only shapes what the secret-shape scanner sees, never the
+ *  request body. Arbitrary `properties` are db-only — a page-parented page has only a title. */
+export async function notionCreatePage(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: NotionReadDeps = {},
+): Promise<unknown> {
+  const token = requireNotion(ctx).getAccessToken();
+  // Egress (model B — F3a secret-shape on the combined text) is PIPELINE-FIRED before this
+  // handler (with-context.ts via notionCreatePageEgressDescriptor); prep reproduces the same
+  // validation + scan assembly the pre-A handler ran (single source with the descriptor's
+  // extract). The handler must NOT call the gate (anti-double-fire).
+  const prep = prepareNotionCreatePage(args);
+  // Sanitize order preserved 1:1 with pre-A: the title (page-parent) before the children,
+  // and the db-parent properties were sanitized inside prepareNotionCreatePage's
+  // buildNotionProperties (matching the pre-A "buildNotionProperties before the gate" order).
+  const properties =
+    prep.properties !== undefined
+      ? prep.properties
+      : titleProperties(
+          outboundSanitize(prep.title!, { tool: "notion_create_page", maxBytes: NOTION_TITLE_MAX_BYTES }),
+        );
+  const children =
+    prep.text === undefined
+      ? []
+      : textToParagraphBlocks(
+          outboundSanitize(prep.text, { tool: "notion_create_page", maxBytes: NOTION_TEXT_MAX_BYTES }),
+        );
+  const data = await notionApiPost({
+    token,
+    path: "/v1/pages",
+    body: { parent: prep.parent, properties, children },
+    fetchImpl: deps.fetchImpl,
+  });
+  return shapePage(data);
+}
+
+/** PATCH /v1/blocks/{id}/children — append paragraph blocks (text) to an existing page. */
+export async function notionAppendBlocks(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: NotionReadDeps = {},
+): Promise<unknown> {
+  const token = requireNotion(ctx).getAccessToken();
+  // Egress PIPELINE-FIRED before this handler (notionAppendBlocksEgressDescriptor; the gate
+  // scans the RAW text). The handler must NOT call the gate (anti-double-fire).
+  const { pageId, text } = validateNotionAppendBlocksArgs(args);
+
+  const children = textToParagraphBlocks(
+    outboundSanitize(text, { tool: "notion_append_blocks", maxBytes: NOTION_TEXT_MAX_BYTES }),
+  );
+  const data =
+    asObj(
+      await notionApiPatch({
+        token,
+        path: `/v1/blocks/${pageId}/children`,
+        body: { children },
+        fetchImpl: deps.fetchImpl,
+      }),
+    ) ?? {};
+  return { id: pageId, appended_blocks: children.length, has_more: data.has_more ?? false };
+}
+
+/** PATCH /v1/pages/{id} — rename (set `title`), update arbitrary `properties` (v1.105:
+ *  type-tagged, db rows only), and/or `archived` (archive true / restore false — a REVERSIBLE
+ *  Trash move, NOT an F4 permanent delete). At least one of title/properties/archived. The
+ *  `title` convenience param sets the literal "title" property (page-parented pages); a db
+ *  row's title column has its own name → set it via `properties` (and NOT both at once). */
+export async function notionUpdatePage(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: NotionReadDeps = {},
+): Promise<unknown> {
+  const token = requireNotion(ctx).getAccessToken();
+  // Egress (model B — F3a secret-shape on the combined RAW agent strings, empty for an
+  // archive-only call → no-op) is PIPELINE-FIRED before this handler
+  // (notionUpdatePageEgressDescriptor). The handler must NOT call the gate.
+  const { pageId, properties, archived } = prepareNotionUpdatePage(args);
 
   const body: Obj = {};
   if (Object.keys(properties).length > 0) body.properties = properties;

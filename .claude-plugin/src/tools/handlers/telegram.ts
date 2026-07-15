@@ -10,10 +10,12 @@
 // stored). It NEVER calls requireOAuth (no Google account). The cross-cutting envelope
 // (tier / write-burst / sanitize / audit) is applied by withNonOAuthContext around it.
 //
-// EGRESS: the handler calls the centralized enforceTelegramEgressGates (tools/egress.ts)
-// BEFORE the SDK call (the B3 handler-called posture, consistent with gmail_send /
-// line_push_message): secret-shape (F3a) on the body + the Telegram recipient allowlist
-// on `chat_id`.
+// EGRESS (B6.1 wave A1 — PIPELINE-FIRED): the egress gate — secret-shape (F3a) on the
+// body + the Telegram recipient allowlist on `chat_id` — is fired by
+// withNonOAuthContext via this tool's egress descriptor (tools/egress-pipeline.ts)
+// BEFORE this handler runs. The handler must NOT invoke the gate itself (a double fire
+// would double requireSendApproval + the denial audit rows); the call-site sentinel
+// (egress-callsite.test.ts) enforces both directions.
 //
 // TOKEN-IN-URL (the Telegram-specific invariant — docs §1): unlike LINE's Bearer
 // header, Telegram puts the bot token in the request URL PATH
@@ -27,7 +29,6 @@
 // server-side (no SSRF-by-proxy) and there is no formatting-entity injection.
 
 import { TELEGRAM_CHAT_ID_RE } from "../../policy/telegram-recipient-allowlist";
-import { enforceTelegramEgressGates } from "../egress";
 import type { ToolContext } from "../types";
 import { postServiceTokenJson } from "./service-token-fetch";
 import { assertEgressHost } from "../../policy/egress-destinations";
@@ -57,15 +58,18 @@ function mapStatusToReason(
   return "api_error";
 }
 
-export async function telegramSendMessage(
-  ctx: ToolContext,
+/** B6.1 wave A1 — the telegram_send_message arg validator, extracted so ONE pure
+ *  function serves both call sites (single source, no drift): the pipeline's egress
+ *  descriptor (`extract` in tools/egress-pipeline.ts, which runs BEFORE this handler)
+ *  and the handler below. Throws the tool's plain-Error validation messages; echoes
+ *  the RULE, never the value.
+ *
+ *  1. Chat id well-formedness — a well-formed id Telegram later rejects (400) →
+ *     telegram_api_failed{invalid_recipient} (distinct from this fail-fast check).
+ *  2. Text body: non-empty + the Telegram character limit. */
+export function validateTelegramSendArgs(
   args: Record<string, unknown>,
-  deps: TelegramDeps = {},
-): Promise<unknown> {
-  // 1. Validate the chat id (well-formedness). Plain Error (bad input) — mirrors the
-  //    line_push_message / web_fetch arg-validation convention; echoes the RULE, never
-  //    the value. A well-formed id Telegram later rejects (400) → telegram_api_failed
-  //    {invalid_recipient} below (distinct from this fail-fast input check).
+): { chat_id: string; text: string } {
   const chat_id = args.chat_id;
   if (typeof chat_id !== "string" || !TELEGRAM_CHAT_ID_RE.test(chat_id)) {
     throw new Error(
@@ -73,8 +77,6 @@ export async function telegramSendMessage(
         "-1001234567890) or a public @username",
     );
   }
-
-  // 2. Validate the text body.
   const text = args.text;
   if (typeof text !== "string" || text.length === 0) {
     throw new Error("telegram_send_message: 'text' must be a non-empty string");
@@ -84,16 +86,20 @@ export async function telegramSendMessage(
       `telegram_send_message: 'text' exceeds the ${TELEGRAM_TEXT_MAX}-character Telegram limit`,
     );
   }
+  return { chat_id, text };
+}
 
-  // 3. Egress gates (handler-called, B3 posture): secret-shape (F3a) on the body then
-  //    the Telegram recipient allowlist on `chat_id`. Throws -32035 / -32019 on denial.
-  await enforceTelegramEgressGates(ctx, {
-    tool: "telegram_send_message",
-    chat_id,
-    body: text,
-  });
+export async function telegramSendMessage(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: TelegramDeps = {},
+): Promise<unknown> {
+  // 1. Validate args. The pipeline already validated them via this SAME function (the
+  //    egress descriptor's extract, BEFORE this handler); this call is defense-in-depth
+  //    + the unit-test surface (pure, identical result — cheap re-validation).
+  const { chat_id, text } = validateTelegramSendArgs(args);
 
-  // 4. Send. The token is read inline from the service-token credential and placed in
+  // 2. Send. The token is read inline from the service-token credential and placed in
   //    the URL PATH (Telegram's auth model). The URL string therefore CONTAINS the
   //    secret — it is built here and NEVER logged / stored / echoed in any error.
   const token = requireServiceToken(ctx).token();

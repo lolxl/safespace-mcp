@@ -1,5 +1,8 @@
 // v1.77 — the hardened Notion REST helper (mirrors auth/github/client.ts).
 //
+// B6.1-B — this client IS the connector's error mapper (`notion_api_failed`, closed-set
+// reasons): the contract is stated in src/auth/http/connector-error-contract.ts.
+//
 // docs/v1.77-notion-connector.md §3. A single place that performs an authenticated
 // request to `https://api.notion.com{path}` and RETURNS the parsed JSON (the read tools
 // need the body). GET (notionApiGet) for get_page / get_block_children / get_database;

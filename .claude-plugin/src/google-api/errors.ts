@@ -108,6 +108,12 @@ function makeUpstream(message: string, httpStatus?: number): UpstreamError {
  * surface, and RETURN it (never throws — so both the throwing `mapGoogleError`
  * and the returning `toGoogleError` boundary can share this one mapping table).
  *
+ * B6.1-B — a DELIBERATE handler-level exception to the client-layer error-mapping
+ * contract (src/auth/http/connector-error-contract.ts): the googleapis SDK owns the
+ * socket (no SafeSpace client layer exists to map in), and the 401 pass-through
+ * (`UpstreamError{httpStatus:401}` escaping the handler) is load-bearing for the
+ * choke point's force-refresh retry.
+ *
  * Mapping table (verbatim from the pre-B4 mapGoogleError; `throw X` → `return X`):
  *   401          → `UpstreamError` with `httpStatus=401` → middleware
  *                   (`withToolContext`) catches and force-refreshes + retries once.
@@ -223,9 +229,10 @@ export function mapGoogleError(err: unknown, ctx: GoogleErrorContext): never {
  * SDK-call boundary, NOT lifted to the choke point — see
  * docs/v1.64-phase-b-pipeline-seam.md §3 B4). Keeping the handler's own `try`
  * also preserves each handler's `args` narrowing inside the call (a closure
- * boundary would have dropped it). This returning form IS the google-workspace
- * Source's `mapError` strategy; when B6 lands the per-source pipeline, the
- * pipeline catch throws what this returns.
+ * boundary would have dropped it). This returning form is called DIRECTLY by each
+ * google handler's catch (`throw toGoogleError(...)` — e.g. gmail.ts / drive.ts);
+ * it is not wired as a per-source error-mapping strategy. When B6.1 lands the
+ * per-source pipeline, a shared catch would throw what this returns.
  */
 export function toGoogleError(err: unknown, ctx: GoogleErrorContext): Error {
   if (err instanceof MCPError) return err;

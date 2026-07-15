@@ -7,8 +7,10 @@
 // `withNonOAuthContext`. `requiredScopes: []` (no OAuth — the bot token is read from the
 // service-token store). `min_tier: "share"` (an egress send to a recipient — the
 // gmail_send / line / telegram / discord tier). `direction: "outbound-write"` marks it for
-// the egress gates (fired handler-called via enforceSlackEgressGates).
+// the egress gates — PIPELINE-FIRED via the def's descriptor field (B6.1 wave A1): the
+// non-OAuth choke point runs extract → gate (tools/egress-pipeline.ts) BEFORE the handler.
 
+import { slackEgressDescriptor } from "../egress-pipeline";
 import * as handlers from "../handlers";
 import type { ToolDef } from "./types";
 
@@ -49,6 +51,7 @@ export const slackTools: Record<string, ToolDef> = {
     min_tier: "share",
     source: "slack",
     direction: "outbound-write",
+    egress: slackEgressDescriptor,
   },
 
   // ── READ (v1.97) — inbound; sanitize-wrapped at the choke point. docs-archive/v1.97. ──

@@ -4,6 +4,14 @@
 
 import type { ToolDef } from "./types";
 import * as handlers from "../handlers";
+// B6.1 wave A2b — the pipeline-fired egress descriptors for the 3 youtube write
+// tools (withToolContext runs extract → gate pre-handler; the gate's sanitized
+// text/fields ride ctx.egress — the handler wires THAT).
+import {
+  youtubeCommentPostEgressDescriptor,
+  youtubeCommentReplyEgressDescriptor,
+  youtubeVideoUpdateEgressDescriptor,
+} from "../egress-pipeline";
 import {
   YOUTUBE_READONLY,
   YOUTUBE_FORCE_SSL,
@@ -189,6 +197,9 @@ export const youtubeTools: Record<string, ToolDef> = {
       additionalProperties: false,
     },
     requiredScopes: [YOUTUBE_FORCE_SSL],
+    // B6.1 wave A2b — pipeline-fired egress (extract → enforceYoutubeCommentEgressGates).
+    direction: "outbound-write",
+    egress: youtubeCommentPostEgressDescriptor,
     handler: handlers.youtubeVideoCommentPost,
     min_tier: "write",
   },
@@ -241,6 +252,9 @@ export const youtubeTools: Record<string, ToolDef> = {
       additionalProperties: false,
     },
     requiredScopes: [YOUTUBE_FORCE_SSL],
+    // B6.1 wave A2b — pipeline-fired egress (extract → enforceYoutubeVideoUpdateEgressGates).
+    direction: "outbound-write",
+    egress: youtubeVideoUpdateEgressDescriptor,
     handler: handlers.youtubeVideoUpdate,
     min_tier: "write",
   },
@@ -280,6 +294,9 @@ export const youtubeTools: Record<string, ToolDef> = {
       additionalProperties: false,
     },
     requiredScopes: [YOUTUBE_FORCE_SSL],
+    // B6.1 wave A2b — pipeline-fired egress (extract → enforceYoutubeCommentEgressGates).
+    direction: "outbound-write",
+    egress: youtubeCommentReplyEgressDescriptor,
     handler: handlers.youtubeCommentReply,
     min_tier: "write",
   },

@@ -40,7 +40,7 @@ import { sourceFor } from "./source";
 import { createAuditAccumulator } from "./audit-accumulator";
 import type { UpstreamError } from "./handlers/shared";
 import { TOOL_REGISTRY } from "./registry";
-import type { ToolContext, ToolHandler } from "./types";
+import type { EgressShape, ToolContext, ToolHandler } from "./types";
 
 // v1.70 (G1) — keyed by Source.id so a google tool's last-used can never be a
 // github account (and vice-versa) = the cross-provider-confusion backstop's
@@ -283,6 +283,72 @@ export async function withToolContext(
       // shared sentinel bucket = byte-identical; Model B: this operator's bucket +
       // registry cap override).
       enforceWriteBurst(classifyWriteTool(toolName, TOOL_REGISTRY[toolName]?.min_tier), op);
+      // B6.1 wave A2a — PIPELINE-FIRED egress for OAuth-routed tools carrying an
+      // egress descriptor (x_post_create today; tools/egress-pipeline.ts — the
+      // with-context twin of the A1 firing site in with-nonoauth-context.ts):
+      // extract (the tool's own arg validation — throws its plain-Error messages)
+      // then the composite gate (sets ctx.egressGateFired; throws on denial), both
+      // BEFORE the first handler call. A TRANSFORMING gate returns the transformed
+      // shape → stored on ctx.egress so the handler wires the PIPELINE's vetted
+      // bytes (requireEgressResult), never its own recomputation. INSIDE the
+      // errorCode-stamping try so a denial lands on the audit row exactly like a
+      // handler throw. Fires ONCE per call — the 401-retry ctx rebuild below
+      // CARRIES egressGateFired/egress forward instead of re-firing. Tools without
+      // a descriptor (every other OAuth tool — the gmail/github/notion egress stays
+      // handler-called, the B3 posture) skip this block: byte-identical.
+      const eg = TOOL_REGISTRY[toolName]?.egress;
+      if (eg !== undefined) {
+        const shape = eg.extract(args);
+        // B6.1 wave A3+D — pass the source's contact-resolution strategy so the gmail
+        // gate resolves recipient names→emails (People API) BEFORE the allowlist runs;
+        // it is undefined for github/notion/x (their gates ignore the arg).
+        let out: EgressShape | void;
+        try {
+          out = await eg.gate(ctx, shape, source.resolveRecipients);
+        } catch (err) {
+          // GATE-STAGE 401 force-refresh retry (B6.1 wave A3+D). gmail's contact-lookup
+          // resolve is a People-API call that can 401 — and it runs OUTSIDE the
+          // handler-stage retry loop below, so a transparent-refresh regression here would
+          // surface as a bare error. The gate's INVARIANT (tools/egress-pipeline.ts) is that
+          // the resolve is its ONLY network sub-step and every audit/approval effect runs
+          // AFTER it → re-firing the WHOLE gate once on a 401 has no double side effect
+          // (the pre-resolve header gates are local + idempotent; egressGateFired/egress are
+          // not set yet, so there is nothing to carry forward — a fresh ctx is correct). A
+          // non-refreshable OAuth source (github/notion/x) never resolves recipients and its
+          // gate has no network sub-step → this guard is false / unreachable = inert.
+          if (!source.refreshable) throw err;
+          const upstream = err as UpstreamError;
+          if (upstream?.httpStatus !== 401) throw err;
+          cred = await source.resolveCredential(toolDef, {
+            accountId,
+            refresh: deps,
+            force: true,
+          });
+          ctx = {
+            credential: cred,
+            tier,
+            audit: auditAcc.sink,
+            allowedAccounts: op.allowedAccounts,
+          };
+          try {
+            out = await eg.gate(ctx, shape, source.resolveRecipients);
+          } catch (err2) {
+            const upstream2 = err2 as UpstreamError;
+            if (upstream2?.httpStatus === 401) {
+              // Force-refresh produced a token Google still rejects → the same
+              // Keychain cleanup as the handler-stage double-401 below.
+              const dt = deps.deleteToken ?? deleteToken;
+              const ra = deps.removeAccount ?? removeAccount;
+              invalidateTokenCache(accountId);
+              await dt(accountId).catch(() => undefined);
+              await ra(accountId).catch(() => undefined);
+              throw new MCPError("refresh_token_invalid", { email: accountId });
+            }
+            throw err2;
+          }
+        }
+        if (out !== undefined) ctx.egress = out;
+      }
       let raw: unknown;
       try {
         raw = await handler(ctx, args);
@@ -312,6 +378,15 @@ export async function withToolContext(
             tier,
             audit: auditAcc.sink,
             allowedAccounts: op.allowedAccounts,
+            // B6.1 wave A2a — carry the pipeline-fired egress results across the
+            // retry rebuild: the pipeline ran ONCE before the retry loop; gate
+            // decisions are args-based and approval/audit already happened —
+            // re-firing here would double requireSendApproval + the denial audit
+            // rows. For handler-called-gate tools this is inert (both fields are
+            // undefined at rebuild time; the retried handler re-fires its own gate
+            // regardless, as today).
+            egressGateFired: ctx.egressGateFired,
+            egress: ctx.egress,
           };
           try {
             raw = await handler(ctx, args);
@@ -333,6 +408,27 @@ export async function withToolContext(
         } else {
           throw mapHttpError(upstream, accountId);
         }
+      }
+
+      // v1.116 — choke-point egress tripwire. A tool LABELED direction:"outbound-write"
+      // whose call completed WITHOUT its centralized egress gate (tools/egress.ts sets
+      // ctx.egressGateFired — handler-called for gmail/github/notion, PIPELINE-fired above
+      // for a descriptor-carrying tool like x_post_create since B6.1 wave A2a) → a loud,
+      // audited failure. `ctx` is the `let` the 401 force-refresh retry REASSIGNS, so at
+      // this point it is the SUCCESSFUL attempt's ctx instance (never a stale
+      // first-attempt ctx after a retried send) — a handler-called gate on the retried
+      // handler set the flag on THIS same instance, and the rebuilt literal CARRIES the
+      // pipeline-fired flag forward (the pipeline fires once, pre-retry-loop).
+      //
+      // HONEST BOUNDARY: this fires AFTER the handler, so a drifted call's network egress
+      // ALREADY happened — the tripwire converts silent gate-omission drift into an audited
+      // internal_routing_error and blocks the response, but does NOT prevent the first send.
+      // PREVENTION stays with the static call-site sentinel at merge time
+      // (egress-callsite.test.ts); this is the production backstop, same posture as the #66
+      // invariant tripwires. Sits INSIDE the outer try so the throw is errorCode-stamped onto
+      // the audit row exactly like the F4/F1 throws above.
+      if (TOOL_REGISTRY[toolName]?.direction === "outbound-write" && ctx.egressGateFired !== true) {
+        throw new MCPError("internal_routing_error", { reason: "egress_gate_not_fired" });
       }
 
       // skipSanitize: --raw escape hatch for non-LLM consumers. The raw handler

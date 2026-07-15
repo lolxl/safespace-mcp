@@ -1,9 +1,10 @@
 // v1.107 — Mattermost recipient (channel_id) allowlist.
 //
-// The per-connector ID regex + the two env-var names; the parse / state /
-// membership / summary logic is the shared policy/service-token-allowlist.ts
-// factory. The Mattermost id regex stays a named export here —
-// tools/handlers/mattermost.ts imports it for pre-egress syntactic validation.
+// Thin pack instantiation: the per-connector ID regex + the two env-var names live
+// on MATTERMOST_PACK; the parse / state / membership / summary logic is the shared
+// makeServiceTokenRecipientAllowlist factory. The Mattermost id regex stays a named
+// export here — tools/handlers/mattermost.ts imports it for pre-egress syntactic
+// validation.
 //
 //   SAFESPACE_MATTERMOST_RECIPIENT_ALLOW        (persistent)
 //   SAFESPACE_MATTERMOST_RECIPIENT_ALLOW_EXTRA  (shell-only, additive, per-session)
@@ -13,30 +14,24 @@
 // the public youtube-comment deny-default); under SAFESPACE_AUTONOMOUS unset/empty
 // DENIES ALL (F2 deny-by-default). See service-token-allowlist.ts for detail.
 
+import { MATTERMOST_PACK } from "../tools/service-token-pack";
 import {
-  ENV_MATTERMOST_RECIPIENT_ALLOW as ENV_MM_ALLOW,
-  ENV_MATTERMOST_RECIPIENT_ALLOW_EXTRA as ENV_MM_ALLOW_EXTRA,
-} from "../config";
-import {
-  makeServiceTokenAllowlist,
+  makeServiceTokenRecipientAllowlist,
   type ServiceTokenAllowlistState,
-} from "./service-token-allowlist";
+} from "./service-token-recipient-allowlist";
 
-export { ENV_MM_ALLOW, ENV_MM_ALLOW_EXTRA };
+export const ENV_MM_ALLOW = MATTERMOST_PACK.env.recipientAllow;
+export const ENV_MM_ALLOW_EXTRA = MATTERMOST_PACK.env.recipientAllowExtra;
 
 /** A Mattermost id (channel / team / user / post) — exactly 26 lowercase base-32-ish
  *  chars [a-z0-9]. Anchored + fixed-alphabet implicitly rejects CR/LF/NUL/`/`/`.`/`:`/
  *  whitespace, so even where the id rides a URL PATH segment (e.g. GET
  *  /channels/{id}/posts) there is no traversal / host-escape surface. */
-export const MATTERMOST_ID_RE = /^[a-z0-9]{26}$/;
+export const MATTERMOST_ID_RE = MATTERMOST_PACK.recipientIdSpec.regex;
 
 export type MattermostAllowlistState = ServiceTokenAllowlistState;
 
-const allowlist = makeServiceTokenAllowlist({
-  idRe: MATTERMOST_ID_RE,
-  envAllow: ENV_MM_ALLOW,
-  envExtra: ENV_MM_ALLOW_EXTRA,
-});
+const allowlist = makeServiceTokenRecipientAllowlist(MATTERMOST_PACK);
 
 /** Resolve the current Mattermost allowlist state from the two env layers. */
 export function getMattermostAllowlistState(): MattermostAllowlistState {

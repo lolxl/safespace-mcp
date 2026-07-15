@@ -7,7 +7,7 @@
 // points consume polymorphically, so a new connector is a thin add of a new
 // `Source` rather than a fork of the pipeline.
 //
-// v1.66 (Phase C PR 2) — THE SOURCE-STRATEGY LIFT (owner Q1: "go with the source architecture, build it now"). The descriptor now carries the FOUR strategies the choke points dispatch
+// v1.66 (Phase C PR 2) — THE SOURCE-STRATEGY LIFT (owner Q1: "go with the source architecture, build it now"). The descriptor now carries the THREE strategies the choke points dispatch
 // through — promoting `authorize` + `resolveCredential` from inline choke-point
 // code into per-source methods, exactly as the thesis §4.1 prescribed:
 //
@@ -25,8 +25,12 @@
 //     token"}; web-fetch = {kind:"none"}.
 //   - `skipFields` (B5/D5) — the connector's opaque-key allowlist for
 //     `sanitize(raw, ctx, source.skipFields)`.
-//   - `mapError` (D4) — the per-connector error mapper (MCPError passthrough; else
-//     a source-specific operational error).
+//
+// Per-connector error mapping is NOT a Source strategy: each handler calls its own
+// mapper directly (google → `toGoogleError`; web-fetch → `mapWebFetchError`; fs-read
+// → `mapFsReadError`; the REST connectors throw their own `*_api_failed` MCPError in
+// the handler catch). A future B6.1 shared pipeline would introduce a new error-
+// mapping seam; there is deliberately none on the Source today.
 //
 // WHY the choke point still owns account-RESOLUTION + the 401-retry CONTROL FLOW
 // (not lifted into resolveCredential): account resolution reads choke-point module
@@ -56,12 +60,31 @@ import {
   readXActiveAccount,
 } from "../auth/x/oauth";
 import { MCPError, type ErrorName } from "../errors";
-import { toGoogleError, type GoogleErrorContext } from "../google-api/errors";
-import { mapWebFetchError } from "../policy/url-gate";
-import { mapFsReadError } from "../policy/fs-gate";
+import {
+  DISCORD_PACK,
+  LINE_PACK,
+  MATTERMOST_PACK,
+  SLACK_PACK,
+  TELEGRAM_PACK,
+} from "./service-token-pack";
 import { SKIP_FIELDS } from "../sanitize/patterns";
+import { resolveRecipientsViaContactLookup } from "./handlers/contacts";
 import type { ToolDef } from "./registry/types";
-import type { Credential } from "./types";
+import type { Credential, ToolContext } from "./types";
+
+/** B6.1 wave A3+D — the contact-resolution strategy an {@link OAuthSource} may
+ *  carry, so the egress pipeline can resolve a gmail recipient's name→email BEFORE
+ *  the composite gate runs (the recipient allowlist must see the RESOLVED email).
+ *  Signature mirrors `resolveRecipientsViaContactLookup` (handlers/contacts.ts) 1:1
+ *  — the `tool` union is the shared one (gmail_send + the two calendar attendee
+ *  callers, which keep calling the resolver directly; only gmail rides this Source
+ *  strategy). Returns the FULL resolved list (1:1 input order) + the subset that came
+ *  from a lookup (drives the audit-hash emission). */
+export type RecipientResolver = (
+  ctx: ToolContext,
+  inputs: string[],
+  tool: "gmail_send" | "calendar_create_event" | "calendar_update_event",
+) => Promise<{ resolvedEmails: string[]; lookedUpEmails: string[] }>;
 
 /** The resolved active account a google-workspace `authorize` checks scopes against.
  *  undefined for non-OAuth sources (they have no account / no scopes). */
@@ -134,9 +157,6 @@ export interface BaseSource {
   readonly authModel: "oauth" | "service-token" | "none";
   /** Opaque-key allowlist for `sanitize(raw, ctx, source.skipFields)` (B5/D5). */
   readonly skipFields: ReadonlySet<string>;
-  /** Per-source error mapper (D4) — RETURNS the SafeSpace error to throw (an
-   *  MCPError is passed through unchanged; an upstream/network error is mapped). */
-  mapError(err: unknown, ctx: GoogleErrorContext): Error;
   /** v1.66 — pre-handler authorization (BEFORE any credential resolve/refresh
    *  cost). Throws on denial; returns void on allow. */
   authorize(toolDef: ToolDef | undefined, ctx: AuthorizeContext): void;
@@ -171,6 +191,12 @@ export interface OAuthSource extends BaseSource {
     toolDef: ToolDef | undefined,
     deps: OAuthResolveDeps,
   ): Promise<Credential>;
+  /** B6.1 wave A3+D — OPTIONAL contact-resolution strategy consumed by the gmail
+   *  egress pipeline (with-context.ts passes it into the descriptor gate). Present
+   *  only on google-workspace (its People API contact-lookup); absent on
+   *  github/notion/x — those sources have no recipient resolution, so the gate falls
+   *  back to identity passthrough. See {@link RecipientResolver}. */
+  readonly resolveRecipients?: RecipientResolver;
 }
 
 /** v1.72 (B6.1 partial) — a non-OAuth connector: service-token (LINE / Telegram /
@@ -186,20 +212,6 @@ export interface NonOAuthSource extends BaseSource {
 /** A safety-gateway connector's per-source strategies, discriminated on `authModel`
  *  so each choke point narrows to exactly the strategies it consumes. */
 export type Source = OAuthSource | NonOAuthSource;
-
-/** The SHARED per-connector error mapper (D4): pass an `MCPError` through unchanged
- *  (a handler's own validation reject keeps its precise code), else wrap ANY other
- *  thrown value as `errorName` carrying ONLY a closed-set `reason` (default
- *  `"api_error"`). The generic branch NEVER echoes a token, request URL, recipient
- *  id, or message content — the entire `err` is discarded. v1.112.4 collapses the 8
- *  byte-identical `map*Error` clones (line/telegram/discord/slack/mattermost/notion/
- *  github + the webhook inbox's `"store_unavailable"`) onto this one factory. */
-function passthroughOrGeneric(errorName: ErrorName, reason = "api_error") {
-  return (err: unknown, _ctx: GoogleErrorContext): Error => {
-    if (err instanceof MCPError) return err;
-    return new MCPError(errorName, { reason });
-  };
-}
 
 /** v1.112.4 — the class-B SERVICE-TOKEN source factory. The 5 service-token
  *  connectors (LINE / Telegram / Discord / Slack / Mattermost) are byte-identical
@@ -221,7 +233,6 @@ function makeServiceTokenSource(opts: {
     id: opts.id,
     authModel: "service-token",
     skipFields: opts.skipFields,
-    mapError: passthroughOrGeneric(opts.errorName),
     authorize() {
       // service-token — no OAuth scope to check; tier is enforced by the proxy +
       // min_tier. Token PRESENCE is enforced in resolveCredential (throws
@@ -247,7 +258,13 @@ export const googleWorkspace: OAuthSource = {
   authModel: "oauth",
   refreshable: true,
   skipFields: SKIP_FIELDS,
-  mapError: toGoogleError,
+  // B6.1 wave A3+D — the gmail egress pipeline's name→email contact resolution.
+  // The resolver BODY stays in handlers/contacts.ts (calendar_create_event /
+  // calendar_update_event keep calling it directly for their attendee lists —
+  // those tools are not direction:"outbound-write" and are outside the egress
+  // pipeline); binding it here lets the gmail descriptor gate resolve recipients
+  // through the Source strategy rather than an in-handler call.
+  resolveRecipients: resolveRecipientsViaContactLookup,
   async resolveAccount(_toolDef, deps): Promise<ResolvedAccount> {
     // VERBATIM lift of the pre-v1.70 with-context.ts account-resolution block
     // (Step 5.6 / D8 order): 1. explicit args.account_id → 2. the active-account
@@ -345,7 +362,6 @@ export const webFetch: NonOAuthSource = {
   id: "web-fetch",
   authModel: "none",
   skipFields: new Set(),
-  mapError: mapWebFetchError,
   authorize() {
     // keyless — no scope, no token; tier is enforced by the proxy + min_tier.
   },
@@ -362,7 +378,6 @@ export const fsRead: NonOAuthSource = {
   id: "fs-read",
   authModel: "none",
   skipFields: new Set(),
-  mapError: mapFsReadError,
   authorize() {
     // keyless — no scope, no token; tier is enforced by the proxy + min_tier.
   },
@@ -398,10 +413,6 @@ export const webhook: NonOAuthSource = {
   id: "webhook",
   authModel: "none",
   skipFields: WEBHOOK_SKIP_FIELDS,
-  // MCPError passthrough (the handler already maps a corrupt-store throw to
-  // inbox_read_failed); else a generic inbox_read_failed{store_unavailable}. NEVER
-  // echoes message content.
-  mapError: passthroughOrGeneric("inbox_read_failed", "store_unavailable"),
   authorize() {
     // keyless — no scope, no token; tier is enforced by the proxy + min_tier.
   },
@@ -410,134 +421,53 @@ export const webhook: NonOAuthSource = {
   },
 };
 
-/** Opaque LINE ids that must NOT be confusable-normalized by sanitize (R8(b): each
- *  connector owns its opaque-key set). Barely exercised by line_push_message (its
- *  response is constructed/trusted) but ships correct for a future LINE read. */
-const LINE_SKIP_FIELDS: ReadonlySet<string> = new Set([
-  "userId",
-  "groupId",
-  "roomId",
-  "to",
-  "messageId",
-  "quoteToken",
-]);
-
 /** v1.66 Phase C PR 2 — the first class-B SERVICE-TOKEN connector: LINE Official
  *  Account (Messaging API). One long-lived channel access token in the service-token
  *  store (env → SecretBackend), no OAuth. `authModel:"service-token"` routes its tools
  *  through `withNonOAuthContext`; `direction:"outbound-write"` on line_push_message
- *  fires the egress gates. */
+ *  fires the egress gates. Values come from LINE_PACK (the step-1 pack migration). */
 export const line: NonOAuthSource = makeServiceTokenSource({
-  id: "line",
-  storeKey: "line",
-  errorName: "line_api_failed",
-  skipFields: LINE_SKIP_FIELDS,
+  id: LINE_PACK.id,
+  storeKey: LINE_PACK.storeKey,
+  errorName: LINE_PACK.errorName,
+  skipFields: LINE_PACK.skipFields,
 });
-
-/** Opaque/structural Telegram keys the sanitize tree-walk passes through unwrapped (R8(b):
- *  each connector owns its set; per-source skipFields REPLACES the global SKIP_FIELDS, so
- *  this MUST list every non-content key it wants skipped — the global `id` entry does NOT
- *  apply here). v1.98 — reviewed for the inbound telegram_get_updates read shape:
- *    - The opaque Telegram ids/timestamps (`update_id`, `message_id`, `chat.id`/`from.id`
- *      → leaf `id`, `date`) are NUMERIC in the Bot API → sanitize passes numbers through
- *      untouched (sanitize/index.ts only wraps/normalizes STRINGS), so they need NO entry
- *      here (adding them would be the v1.68 NIT-1 no-op-speculative anti-pattern; the prior
- *      comment's "covered by the global `id`" claim was WRONG for a per-source set).
- *    - `chat.type` is a controlled enum string (private/group/supergroup/channel) → skip it
- *      to avoid wrap-noise on a non-content field.
- *    - INBOUND user content — message `text`, sender `first_name`/`last_name`/`username`,
- *      chat `title` — is deliberately OUT so the choke point WRAPS it as an untrusted source.
- *  `chat_id` stays for the outbound telegram_send_message constructed response (the agent's
- *  own id string). NO `message_id`/`update_id`/`id`/`date` entries — those are numeric (numbers
- *  bypass sanitize), so a skip entry would be inert (the v1.68 NIT-1 lesson). */
-const TELEGRAM_SKIP_FIELDS: ReadonlySet<string> = new Set([
-  "chat_id",
-  "type",
-]);
 
 /** v1.68 — the SECOND class-B SERVICE-TOKEN connector: Telegram Bot (Bot API). One
  *  long-lived bot token in the service-token store (env → SecretBackend), no OAuth.
  *  `authModel:"service-token"` routes its tools through `withNonOAuthContext`;
- *  `direction:"outbound-write"` on telegram_send_message fires the egress gates. */
+ *  `direction:"outbound-write"` on telegram_send_message fires the egress gates. Its
+ *  per-source skipFields (the opaque `chat_id`/`type` keys) live on TELEGRAM_PACK. */
 export const telegram: NonOAuthSource = makeServiceTokenSource({
-  id: "telegram",
-  storeKey: "telegram",
-  errorName: "telegram_api_failed",
-  skipFields: TELEGRAM_SKIP_FIELDS,
+  id: TELEGRAM_PACK.id,
+  storeKey: TELEGRAM_PACK.storeKey,
+  errorName: TELEGRAM_PACK.errorName,
+  skipFields: TELEGRAM_PACK.skipFields,
 });
-
-/** Opaque Discord snowflakes that must NOT be confusable-normalized by sanitize
- *  (R8(b): each connector owns its opaque-key set). `channel_id` is the only id in
- *  today's constructed success response; `id` (a future message/author snowflake) is
- *  already in the global SKIP_FIELDS, so this set stays minimal + honest (the v1.68
- *  NIT-1 lesson — don't pre-populate skipFields with speculative future fields that
- *  aren't in the constructed response). Revisit when an inbound/read Discord tool ships. */
-const DISCORD_SKIP_FIELDS: ReadonlySet<string> = new Set(["channel_id"]);
 
 /** v1.69 — the THIRD class-B SERVICE-TOKEN connector: Discord Bot (REST API). One
  *  long-lived bot token in the service-token store (env → SecretBackend), no OAuth.
  *  `authModel:"service-token"` routes its tools through `withNonOAuthContext`;
- *  `direction:"outbound-write"` on discord_send_message fires the egress gates. */
+ *  `direction:"outbound-write"` on discord_send_message fires the egress gates. Its
+ *  per-source skipFields (the opaque `channel_id`) lives on DISCORD_PACK. */
 export const discord: NonOAuthSource = makeServiceTokenSource({
-  id: "discord",
-  storeKey: "discord",
-  errorName: "discord_api_failed",
-  skipFields: DISCORD_SKIP_FIELDS,
+  id: DISCORD_PACK.id,
+  storeKey: DISCORD_PACK.storeKey,
+  errorName: DISCORD_PACK.errorName,
+  skipFields: DISCORD_PACK.skipFields,
 });
-
-/** Opaque Slack ids/timestamps/cursors that must NOT be wrapped/normalized by sanitize
- *  (R8(b): each connector owns its opaque-key set). Per-source skipFields REPLACES the
- *  global SKIP_FIELDS, so this MUST list every opaque/structural key the shapers emit — and
- *  ONLY those: everything attacker-influenceable (v1.97 reads: channel `name`, message
- *  `text`, `topic`/`purpose`) stays OUT → it WRAPS as an untrusted source. The opaque keys:
- *  `channel` (write echo) · `id` (channel id) · `ts`/`thread_ts` (message id / thread ref —
- *  ⚠️ `ts` LOOKS numeric but is an opaque cursor/ref; wrapping it would break a follow-up
- *  call) · `user`/`team` (opaque ids, NOT display names) · `type`/`subtype` (controlled
- *  enums) · `next_cursor` (pagination). v1.104 users.*: `tz` (a controlled IANA zone name,
- *  emitted raw) joins; the user-authored `name`/`real_name`/`display_name` + the PII `email`
- *  stay OUT → they WRAP (the bools are non-strings → sanitize ignores them regardless). */
-const SLACK_SKIP_FIELDS: ReadonlySet<string> = new Set([
-  "channel",
-  "id",
-  "ts",
-  "thread_ts",
-  "user",
-  "team",
-  "type",
-  "subtype",
-  "next_cursor",
-  "tz",
-]);
 
 /** v1.95 — the FOURTH class-B SERVICE-TOKEN connector: Slack Bot (Web API). One
  *  long-lived bot token in the service-token store (env → SecretBackend), no OAuth.
  *  `authModel:"service-token"` routes its tools through `withNonOAuthContext`;
- *  `direction:"outbound-write"` on slack_send_message fires the egress gates. */
+ *  `direction:"outbound-write"` on slack_send_message fires the egress gates. Its
+ *  per-source skipFields (opaque ids/timestamps/cursors) lives on SLACK_PACK. */
 export const slack: NonOAuthSource = makeServiceTokenSource({
-  id: "slack",
-  storeKey: "slack",
-  errorName: "slack_api_failed",
-  skipFields: SLACK_SKIP_FIELDS,
+  id: SLACK_PACK.id,
+  storeKey: SLACK_PACK.storeKey,
+  errorName: SLACK_PACK.errorName,
+  skipFields: SLACK_PACK.skipFields,
 });
-
-/** v1.107 — the per-source opaque-key set for Mattermost. REPLACES the global SKIP_FIELDS,
- *  so it MUST list every opaque/structural key the mattermost shapers emit — and ONLY those:
- *  everything attacker-influenced (team/channel `name`/`display_name`/`header`/`purpose`,
- *  post `message`) stays OUT → it WRAPS as an untrusted source. The opaque keys: `id`
- *  (team/channel/post id) · `channel_id`/`user_id`/`root_id`/`team_id` (opaque refs) · `type`
- *  (controlled enum: channel "O"/"P"/"D"/"G", post "" / "system_*") · `next_post_id`/
- *  `prev_post_id` (pagination cursors — MUST skip so the agent can page). Numeric epochs
- *  (`create_at`) are NUMBERS → sanitize passes them through, so they need no skip entry. */
-const MATTERMOST_SKIP_FIELDS: ReadonlySet<string> = new Set([
-  "id",
-  "channel_id",
-  "user_id",
-  "root_id",
-  "team_id",
-  "type",
-  "next_post_id",
-  "prev_post_id",
-]);
 
 /** v1.107 — the FIFTH class-B SERVICE-TOKEN connector, and the FIRST self-hosted one: a
  *  Mattermost bot/personal-access token in the service-token store (env → SecretBackend),
@@ -545,12 +475,13 @@ const MATTERMOST_SKIP_FIELDS: ReadonlySet<string> = new Set([
  *  `direction:"outbound-write"` on mattermost_send_message fires the egress gates. The
  *  per-deployment server URL is config (SAFESPACE_MATTERMOST_SERVER_URL), resolved by the
  *  client/handlers; resolveCredential enforces only the TOKEN's presence (the server-URL
- *  presence is enforced later, by the client → no_server_url). */
+ *  presence is enforced later, by the client → no_server_url). Its per-source skipFields
+ *  (opaque team/channel/post ids + pagination cursors) lives on MATTERMOST_PACK. */
 export const mattermost: NonOAuthSource = makeServiceTokenSource({
-  id: "mattermost",
-  storeKey: "mattermost",
-  errorName: "mattermost_api_failed",
-  skipFields: MATTERMOST_SKIP_FIELDS,
+  id: MATTERMOST_PACK.id,
+  storeKey: MATTERMOST_PACK.storeKey,
+  errorName: MATTERMOST_PACK.errorName,
+  skipFields: MATTERMOST_PACK.skipFields,
 });
 
 /** v1.77 — the per-source opaque-key set for Notion. Per-source skipFields REPLACES the
@@ -583,10 +514,6 @@ export const notion: OAuthSource = {
   authModel: "oauth",
   refreshable: false,
   skipFields: NOTION_SKIP_FIELDS,
-  // MCPError passthrough (a notion handler's client maps HTTP-status to
-  // notion_api_failed{closed-set reason}); else generic notion_api_failed. NEVER
-  // echoes the token or any id.
-  mapError: passthroughOrGeneric("notion_api_failed"),
   authorize() {
     // No-op: Notion OAuth has no scope param (an integration's capabilities are configured
     // Notion-side). A token lacking access to a page yields a Notion 403/404 → the client
@@ -679,8 +606,6 @@ export const x: OAuthSource = {
   authModel: "oauth",
   refreshable: false,
   skipFields: X_SKIP_FIELDS,
-  // MCPError passthrough; else generic x_api_failed. NEVER echoes a token / user id.
-  mapError: passthroughOrGeneric("x_api_failed"),
   authorize() {
     // No-op: X scopes are a fixed MVP set requested at consent time; tier is
     // proxy-enforced. A token lacking a needed capability yields an X 403 →
@@ -780,9 +705,6 @@ export const github: OAuthSource = {
   authModel: "oauth",
   refreshable: false,
   skipFields: GITHUB_SKIP_FIELDS,
-  // MCPError passthrough (a github handler maps HTTP-status to github_api_failed{closed-
-  // set reason}); else generic github_api_failed. NEVER echoes the token.
-  mapError: passthroughOrGeneric("github_api_failed"),
   authorize() {
     // No-op: GitHub OAuth scopes are requested wholesale at consent (G3 requests the
     // v1 read set). A token lacking a scope yields a GitHub 403 → the handler maps it

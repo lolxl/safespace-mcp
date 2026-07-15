@@ -260,7 +260,7 @@ Every error uses the JSON-RPC standard shape `{ code, message, data: { reason, r
 
 ### Test Strategy (Issue 8B — full coverage)
 
-See [`docs/TEST_PLAN.md`](TEST_PLAN.md) for the full test plan.
+See the standalone test plan (a pre-repo private review document; superseded by `docs/TEST_PLAN.md`).
 
 Summary: 24 unit + 12 integration + 2 OAuth security edge cases = **36 automated tests**, 90% test-coverage lakebed. 100% branch coverage on the sanitize layer is a hard requirement.
 
@@ -1470,9 +1470,9 @@ All four bugs were caught by *spikes*, not by tests — fake-`gwsExec` mocks mea
 
 The ~90x turn-latency improvement is the user-facing difference between "wait" and "instant" for an LLM workflow that fires 5 parallel tool calls per turn.
 
-**3. The dual-architecture pattern is already empirically validated.**
+**3. The dual-architecture pattern is already empirically validated by kaidashi.**
 
-The direct-Google-API approach — calling `googleapis` directly, with a long-lived proxy holding the stored OAuth credentials that a separate read-only consumer process can piggyback (Keychain `service=safespace-mcp` + `.env` under the configDir) — has been validated in practice against a comparable Gmail + Drive surface. It closes the largest unknowns:
+`kaidashi` is a separate private Python project (a personal CLI, not in this repo) that **already calls Google APIs directly** for Gmail + Drive (1164 LoC across `google_auth.py` / `gmail_api.py` / `drive_api.py`), and **already piggybacks SafeSpace's stored OAuth credentials** read-only (Keychain `service=safespace-mcp` + `.env` under SafeSpace's configDir). kaidashi closes the largest unknowns:
 
 - Direct googleapis works at production scale for a similar surface
 - Auth-sharing between a long-lived MCP proxy and a separate consumer process is empirically a working pattern
@@ -1502,7 +1502,7 @@ The defense gws actually provides is **already supplied by `googleapis` npm unde
 | Phase | Content | LoC | PRs | Weeks |
 |---|---|---|---|---|
 | **1a — Bun + googleapis spike** | Single throwaway PR. Test 4 representative API shapes under Bun: Gmail `labels.list` (simplest), Gmail `messages.send` with a 1 MB body, Drive `files.get` metadata, Drive `files.get` media-download stream for a 50 MB file. **Decision gate**: if `googleapis` works under Bun for all 4 shapes, continue to 1b. If any shape fails (segfault / hang / missing Node API / silent truncation), pivot to Plan B (`google-auth-library` + raw fetch) and revise scope. | ~50 (throwaway) | 1 | 0.5-1 |
-| **1b — Foundation + forcing functions** | New `src/google-api/` module: auth refresh (extend `refresh.ts`), error mapping, request infra. Add `googleapis` (or fallback per 1a) npm dep. Transport-level mock infrastructure (msw / undici interceptors) — NOT just SDK-level mocks. `gwsExec` deprecation log on every call: `console.error("[safespace] DEPRECATED gws path: <tool>")`. `setup.sh` pins gws version (refuses upgrades). Optional CI date-bomb on `gwsExec` touches after merge+5 weeks. **Refresh-token amendment**: refresh.ts always Keychain-re-reads `refresh_token` before POSTing (see the refresh-token amendment below). | +300-400, +60-80 tests | 1 | 1-1.5 |
+| **1b — Foundation + forcing functions** | New `src/google-api/` module: auth refresh (extend `refresh.ts`), error mapping, request infra. Add `googleapis` (or fallback per 1a) npm dep. Transport-level mock infrastructure (msw / undici interceptors) — NOT just SDK-level mocks. `gwsExec` deprecation log on every call: `console.error("[safespace] DEPRECATED gws path: <tool>")`. `setup.sh` pins gws version (refuses upgrades). Optional CI date-bomb on `gwsExec` touches after merge+5 weeks. **kaidashi piggyback amendment**: refresh.ts always Keychain-re-reads `refresh_token` before POSTing (see "kaidashi piggyback amendment" below). | +300-400, +60-80 tests | 1 | 1-1.5 |
 | **2 — Read tier (smallest-first ordering)** | `gmail_list_labels` FIRST (smallest JSON, exercises auth + error mapping end-to-end). Then `gmail_search` (validates sanitize JSON path). Then `drive_search` and `gmail_get_message`. **`drive_get_file_content` LAST** with a separate streaming-cap design pre-PR (sanitize-after-full-assembly + chunk-accumulator with early-abort cap). | +400 | 1-2 | 1-1.5 |
 | **3 — Write tier** | `gmail_modify_messages_batch` FIRST (real HTTP `/batch/gmail/v1` — demonstrates the batch capability gws couldn't expose). Then `gmail_send` / `gmail_create_label` / `gmail_modify_message` / `drive_share_file` / `drive_unshare_file`. Recipient allowlist + drive-whitelist gates remain above the API path, unchanged. | +400 | 1-2 | 1-1.5 |
 | **4 — Cleanup** | Delete `gwsExec` + `concurrency.ts` semaphore + `SAFESPACE_MAX_CONCURRENT_GWS` parsing + `SAFESPACE_DEBUG_CONCURRENCY` env var + fake-gws shell-script test infrastructure + `setup.sh` gws check + `doctor` gws row. DESIGN.md A0 marked superseded. Drive batch decision (above) gets supersession follow-up issue (Drive batch becomes ~9x faster post-migration, worth revisiting). | **-500 to -700** | 1 | 0.5 |
@@ -1537,17 +1537,17 @@ Forcing functions (pick **at least two**, applied at Phase 1b merge):
 
 Decision: apply the **first two** at Phase 1b merge. The CI date-bomb is optional and depends on Phase 2 velocity.
 
-### Refresh-token rotation race (external credential consumer)
+### kaidashi piggyback amendment (refresh_token rotation race)
 
-Today: SafeSpace's `refresh.ts` has a per-account `Map<email, Promise>` mutex; gws subprocess reads Keychain fresh on every spawn (~600 ms latency window before a second credential consumer sees a stale token). Such a consumer explicitly does NOT write back to Keychain — it relies on SafeSpace to be authoritative.
+Today: SafeSpace's `refresh.ts` has a per-account `Map<email, Promise>` mutex; gws subprocess reads Keychain fresh on every spawn (~600 ms latency window before kaidashi sees a stale token). kaidashi explicitly does NOT write back to Keychain — relies on SafeSpace to be authoritative.
 
-Post-migration, SafeSpace becomes long-lived in-process with `refresh.ts` as authoritative cache. The window where a second consumer sees a token SafeSpace already invalidated (because SafeSpace wrote a NEW refresh_token via Google's rotation) widens from "next gws spawn" to "proxy uptime."
+Post-migration, SafeSpace becomes long-lived in-process with `refresh.ts` as authoritative cache. The window where kaidashi sees a token SafeSpace already invalidated (because SafeSpace wrote a NEW refresh_token via Google's rotation) widens from "next gws spawn" to "proxy uptime."
 
-`refresh.ts` already flags this risk (line 11-14: "Two Claude Code instances refreshing the same email in parallel will race; v1 accepts last-writer-wins"). Post-v1.11, an external read-only credential consumer becomes that second "instance" in practice.
+`refresh.ts` already flags this risk (line 11-14: "Two Claude Code instances refreshing the same email in parallel will race; v1 accepts last-writer-wins"). Post-v1.11, kaidashi becomes that second "instance" in practice.
 
-**Mitigation (must land in Phase 1b)**: SafeSpace's refresh path always **re-reads Keychain for `refresh_token` before POSTing the refresh request**. Don't trust the in-process TokenSet cache for the refresh_token field — always Keychain-read it. Access token in-process cache is fine (short-lived, easy to detect 401). refresh_token rotation is rare in Google's actual behavior (most refreshes return the same refresh_token), but the cost of being wrong is "the consumer sees `invalid_grant` and the operator has to re-consent" — high-friction, easy to avoid.
+**Mitigation (must land in Phase 1b)**: SafeSpace's refresh path always **re-reads Keychain for `refresh_token` before POSTing the refresh request**. Don't trust the in-process TokenSet cache for the refresh_token field — always Keychain-read it. Access token in-process cache is fine (short-lived, easy to detect 401). refresh_token rotation is rare in Google's actual behavior (most refreshes return the same refresh_token), but the cost of being wrong is "kaidashi sees `invalid_grant` and the operator has to re-consent" — high-friction, easy to avoid.
 
-Pre-check: audit for any other Keychain `service=safespace-mcp` consumer before Phase 1 ships. If there is one, this ADR's piggyback contract must extend to cover it.
+Pre-check: grep SafeSpace + kaidashi + private notes for any other Keychain `service=safespace-mcp` consumer before Phase 1 ships. If there is one, this ADR's piggyback contract must extend to cover it.
 
 ### Test infrastructure shift
 

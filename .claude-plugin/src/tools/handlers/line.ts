@@ -11,9 +11,12 @@
 // account). The cross-cutting envelope (tier / write-burst / sanitize / audit) is
 // applied by withNonOAuthContext around this handler.
 //
-// EGRESS: the handler calls the centralized enforceLineEgressGates (tools/egress.ts)
-// BEFORE the SDK call (the B3 handler-called posture, consistent with gmail_send):
-// secret-shape (F3a) on the body + the LINE recipient allowlist on `to`.
+// EGRESS (B6.1 wave A1 — PIPELINE-FIRED): the egress gate — secret-shape (F3a) on the
+// body + the LINE recipient allowlist on `to` — is fired by withNonOAuthContext via
+// this tool's egress descriptor (tools/egress-pipeline.ts) BEFORE this handler runs.
+// The handler must NOT invoke the gate itself (a double fire would double
+// requireSendApproval + the denial audit rows); the call-site sentinel
+// (egress-callsite.test.ts) enforces both directions.
 //
 // SSRF: the API host (api.line.me) is HARDCODED — the user-controlled `to`/`text` go
 // in the request BODY, never the URL, so there is no SSRF surface (contrast web_fetch
@@ -22,7 +25,6 @@
 // (SSRF-by-proxy) and are structurally impossible to send here (allowlist-construction).
 
 import { LINE_ID_RE } from "../../policy/line-recipient-allowlist";
-import { enforceLineEgressGates } from "../egress";
 import type { ToolContext } from "../types";
 import { postServiceTokenJson } from "./service-token-fetch";
 import { assertEgressHost } from "../../policy/egress-destinations";
@@ -50,23 +52,24 @@ function mapStatusToReason(
   return "api_error";
 }
 
-export async function linePushMessage(
-  ctx: ToolContext,
+/** B6.1 wave A1 — the line_push_message arg validator, extracted so ONE pure function
+ *  serves both call sites (single source, no drift): the pipeline's egress descriptor
+ *  (`extract` in tools/egress-pipeline.ts, which runs BEFORE this handler) and the
+ *  handler below. Throws the tool's plain-Error validation messages; echoes the RULE,
+ *  never the value.
+ *
+ *  1. Recipient id well-formedness — a well-formed id LINE later rejects (400) →
+ *     line_api_failed{invalid_recipient} (distinct from this fail-fast input check).
+ *  2. Text body: non-empty + the LINE character limit. */
+export function validateLineSendArgs(
   args: Record<string, unknown>,
-  deps: LinePushDeps = {},
-): Promise<unknown> {
-  // 1. Validate the recipient id (well-formedness). Plain Error (bad input) —
-  //    mirrors the web_fetch handler's arg-validation convention; echoes the RULE,
-  //    never the value. A well-formed id LINE later rejects (400) → line_api_failed
-  //    {invalid_recipient} below (distinct from this fail-fast input check).
+): { to: string; text: string } {
   const to = args.to;
   if (typeof to !== "string" || !LINE_ID_RE.test(to)) {
     throw new Error(
       "line_push_message: 'to' must be a valid LINE id (U/C/R followed by 32 hex chars)",
     );
   }
-
-  // 2. Validate the text body.
   const text = args.text;
   if (typeof text !== "string" || text.length === 0) {
     throw new Error("line_push_message: 'text' must be a non-empty string");
@@ -76,12 +79,20 @@ export async function linePushMessage(
       `line_push_message: 'text' exceeds the ${LINE_TEXT_MAX}-character LINE limit`,
     );
   }
+  return { to, text };
+}
 
-  // 3. Egress gates (handler-called, B3 posture): secret-shape (F3a) on the body
-  //    then the LINE recipient allowlist on `to`. Throws -32035 / -32019 on denial.
-  await enforceLineEgressGates(ctx, { tool: "line_push_message", to, body: text });
+export async function linePushMessage(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: LinePushDeps = {},
+): Promise<unknown> {
+  // 1. Validate args. The pipeline already validated them via this SAME function (the
+  //    egress descriptor's extract, BEFORE this handler); this call is defense-in-depth
+  //    + the unit-test surface (pure, identical result — cheap re-validation).
+  const { to, text } = validateLineSendArgs(args);
 
-  // 4. Send. Token read inline from the service-token credential; never stored.
+  // 2. Send. Token read inline from the service-token credential; never stored.
   const token = requireServiceToken(ctx).token();
   // Send via the shared service-token fetch (hard timeout + response-body cleanup +
   // closed-set error mapping; v1.69.1). Allowlist-constructed body: ONLY a single

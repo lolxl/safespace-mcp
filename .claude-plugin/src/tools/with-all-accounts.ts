@@ -4,12 +4,42 @@
 //
 // Active-account semantics: `_all` tools do NOT mutate lastUsedAccount (design §3
 // + #121 code-rev L3). No setLastUsed() call anywhere in this file.
+//
+// v1.119 (F6 step 1) — the per-account scope pre-check + credential resolution now
+// route through the tool's Source strategies (`source.authorize` +
+// `source.resolveCredential`), the SAME strategies the single-account choke point
+// (with-context.ts) dispatches through — replacing the inline scope-hierarchy check
+// + the direct token-refresh call. Byte-identical for every caller (all `_all` tools
+// are google-workspace; the registry `requiredScopes` the check now reads === the
+// values the handlers used to pass in opts). The account ENUMERATION stays hand-
+// rolled here (see Phase 2) — that is cross-account orchestration, not single-
+// account resolution.
+//
+// v1.121 (B6.1 wave C) — the per-account sub-context IS now the real `ToolContext`
+// (the former per-account sub-context shim is deleted); `fn` receives a `{credential, tier,
+// audit, allowedAccounts}` literal built per EXECUTED sub-call, so handlers narrow
+// via `requireOAuth(ctx)` exactly like the single-account choke point. Two parity
+// gaps the v1.120 header left open are now CLOSED: (1) a per-sub-call egress
+// tripwire mirrors with-context.ts's direction:"outbound-write" post-handler
+// assertion, and (2) EXECUTED inner audit rows stamp `sanitize:"applied"` (Q2).
 
 import * as crypto from "node:crypto";
-import { auditCrossAccountAggregate, auditEnd, pickAuditErrorForensics } from "../audit";
+import {
+  AUDIT_META_CHANNELS,
+  auditCrossAccountAggregate,
+  auditEnd,
+  pickAuditErrorForensics,
+} from "../audit";
 import { loadIndex } from "../auth/keychain";
-import { refreshAccessToken, type RefreshDeps, type TokenSet } from "../auth/refresh";
+import type { RefreshDeps } from "../auth/refresh";
 import { MCPError } from "../errors";
+// v1.120 (F6 step 2) — the per-sub-call audit envelope. Each EXECUTED cross-account
+// sub-call now gets its OWN createAuditAccumulator() (the same one the single-account
+// choke point uses), so a future `*_all` write tool has the identical forensic-
+// recording surface; its recorded fields ride onto that account's inner audit row.
+import { createAuditAccumulator, type ForensicFields } from "./audit-accumulator";
+import { currentTier, type Tier } from "../tier";
+import type { ToolContext } from "./types";
 // v1.64 Phase B (B6 — R10 closure). The cross-account fan-out used to run NEITHER
 // the F1 write-burst nor the F4 autonomous-delete gate (and stamped a stripped
 // audit row without the operator). These imports wire the SAME gates the
@@ -19,7 +49,7 @@ import { resolveOperatorId } from "../identity/operator-id";
 import { enforceAutonomousDeleteDeny } from "../policy/autonomous-mode";
 import { classifyWriteTool, enforceWriteBurst } from "../policy/write-burst";
 import { sanitize } from "../sanitize";
-import { sourceFor } from "./source";
+import { sourceFor, type OAuthSource } from "./source";
 import { EMAIL_RECIPIENT_RE } from "./handlers";
 // ⚠️ Circular import (with-all-accounts → registry → handlers/cross-account →
 // with-all-accounts), but RUNTIME-SAFE: TOOL_REGISTRY is read ONLY inside the
@@ -28,14 +58,7 @@ import { EMAIL_RECIPIENT_RE } from "./handlers";
 // add a top-level read of TOOL_REGISTRY here: at module-load time it would be
 // `undefined`. (with-context.ts imports it the same way, for the same reason.)
 import { TOOL_REGISTRY } from "./registry";
-import { scopeSatisfies } from "./with-context";
-
-/** Per-account sub-context handed to the cross-account handler's fn().
- *  Shape mirrors ToolContext — same `getAccessToken()` getter pattern. */
-export interface AccountSubContext {
-  readonly email: string;
-  readonly getAccessToken: () => string;
-}
+import type { ToolDef } from "./registry/types";
 
 /** Per-account failure shape inside MultiAccountResult.failures[]. */
 export interface AccountFailure {
@@ -55,9 +78,10 @@ export interface WithAllAccountsOptions {
    *  hook 5). Entries not in accounts.json surface as `account_not_found`
    *  failures (sec-rev hook 7 — anti-enumeration). */
   accounts?: string[];
-  /** Required OAuth scopes. Checked per-account against accounts.json scope set
-   *  via SCOPE_HIERARCHY (same as withToolContext). */
-  requiredScopes: readonly string[];
+  // v1.119 (F6 step 1) — `requiredScopes` REMOVED. The per-account scope check is
+  // now the tool's `source.authorize` strategy, which reads the tool's registry
+  // `requiredScopes` (=== the values the handlers used to pass here) — a single
+  // source of truth, no longer duplicated in the opts.
 }
 
 /** Injection seams for tests + (v1.74 PR-2c) the per-operator inputs threaded from
@@ -73,6 +97,13 @@ export interface WithAllAccountsDeps extends RefreshDeps {
    *  Threaded from the connection (Model B) via the sentinel; falls back to
    *  `resolveOperatorId()` when absent (direct callers / Model A) → byte-identical. */
   operator?: string | null;
+  /** v1.120 (F6 step 2) — the privilege tier for this fan-out, threaded from the
+   *  cross-account sentinel via the registry shim (the per-operator tier under Model
+   *  B — CrossAccountSentinel extends ToolContext, which carries `tier`). Absent for
+   *  direct callers (tests) / Model A → falls back to `currentTier()`, the SAME
+   *  Model-A source the single-account path resolves its tier from. Rides onto each
+   *  per-account `ToolContext.tier`. */
+  tier?: Tier;
   /** v1.74 PR-2c — the operator's account-confinement set. When non-null, the
    *  consented-account map is INTERSECTED with it BEFORE fan-out, so an account in
    *  the global index but outside this operator's set is dropped exactly as a
@@ -139,17 +170,36 @@ type Plan =
   | { kind: "scope_mismatch"; email: string }
   | { kind: "ready"; email: string };
 
-/** Build a per-account Plan: validate presence in accounts.json + scope set. */
+/** Build a per-account Plan: validate presence in accounts.json, then run the
+ *  Source's scope pre-check.
+ *
+ *  v1.119 (F6 step 1) — the scope decision is the tool's `source.authorize`
+ *  strategy (the SAME one the single-account choke point runs), reading the tool's
+ *  registry `requiredScopes` against the account's PERSISTED granted scopes. A
+ *  thrown `scope_mismatch` MCPError → the `scope_mismatch` plan; the error's data
+ *  payload is DISCARDED, because `failureFromPlan` rebuilds the byte-identical
+ *  failures[] entry ({code,message} = "scope_mismatch") + the inner audit `errorCode`
+ *  from the plan kind. Any OTHER throw propagates. This runs in the PLAN-BUILDING
+ *  phase, BEFORE any refresh I/O — same position as the pre-v1.119 inline check.
+ *  googleWorkspace.authorize's skip semantics (toolDef falsy, or account.scopes
+ *  missing/empty → no check) match the old inline check for every caller (all use
+ *  registered tool names → toolDef present). */
 function buildPlan(
   email: string,
   account: { email: string; scopes?: string[] } | undefined,
-  requiredScopes: readonly string[],
+  source: OAuthSource,
+  toolDef: ToolDef | undefined,
 ): Plan {
   if (!account) return { kind: "account_not_found", email };
-  if (Array.isArray(account.scopes) && account.scopes.length > 0) {
-    const granted = new Set(account.scopes);
-    const missing = requiredScopes.filter((s) => !scopeSatisfies(granted, s));
-    if (missing.length > 0) return { kind: "scope_mismatch", email };
+  try {
+    source.authorize(toolDef, {
+      account: { accountId: email, scopes: account.scopes },
+    });
+  } catch (err) {
+    if (err instanceof MCPError && err.errorName === "scope_mismatch") {
+      return { kind: "scope_mismatch", email };
+    }
+    throw err;
   }
   return { kind: "ready", email };
 }
@@ -172,6 +222,13 @@ interface SubResult {
         errorForensics?: Record<string, unknown>;
       };
   durationMs: number;
+  /** v1.120 (F6 step 2) — the forensic envelope captured from THIS sub-call's own
+   *  accumulator after `fn` settled (both ok + failed EXECUTED outcomes). Spread onto
+   *  the account's inner audit row in Phase 4. ALL fields are undefined today (no
+   *  `_all` handler records any channel) → the row stays byte-identical because
+   *  `auditEnd` serializes only defined fields. ABSENT for plan-failure sub-results
+   *  (account_not_found / scope_mismatch never execute a handler → no accumulator). */
+  forensics?: ForensicFields;
 }
 
 function failureFromPlan(plan: Plan, subStart: number): SubResult {
@@ -228,7 +285,7 @@ async function mapWithConcurrency<I, O>(
 export async function withAllAccounts<T>(
   tool: string,
   outerArgs: Record<string, unknown>,
-  fn: (account: AccountSubContext) => Promise<T>,
+  fn: (ctx: ToolContext) => Promise<T>,
   opts: WithAllAccountsOptions,
   deps: WithAllAccountsDeps = {},
 ): Promise<MultiAccountResult<T>> {
@@ -244,7 +301,30 @@ export async function withAllAccounts<T>(
   // `source.skipFields` IS the global SKIP_FIELDS (===) and the per-account
   // sanitize stays byte-identical (B5).
   const toolDef = TOOL_REGISTRY[tool];
+  // v1.119 (F6 step 1, sec-rev) — fail-closed tripwire: an unregistered `tool` here
+  // is an internal wiring bug (server.ts rejects unknown names before dispatch, and
+  // every production call site passes a registry literal). Without this, a
+  // toolDef-less call would silently SKIP the per-account scope pre-check
+  // (`source.authorize` no-ops on a falsy toolDef, where the pre-v1.119 inline check
+  // ran unconditionally). Same fail-closed posture as sourceFor's unknown-source
+  // throw (v1.112.8).
+  if (!toolDef) {
+    throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
+  }
   const source = sourceFor(toolDef);
+  // v1.119 (F6 step 1) — narrow the Source to OAuthSource, mirroring the single-
+  // account choke point (with-context.ts:164). Every `_all` tool is google-workspace
+  // today, and unreachability rests on the REGISTRY invariant that none of the
+  // crossAccountTools defs sets `ToolDef.source` — NOT on proxy routing (the
+  // cross-account branch dispatches on `def.cross_account` alone and never consults
+  // authModel). This narrow is the runtime assertion of that registry invariant.
+  // It also narrows `source` so the OAuth-only `authorize` / `resolveCredential(…,
+  // deps)` strategies used by the scope check + per-account credential resolve
+  // below are statically available.
+  if (source.authModel !== "oauth") {
+    // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
+    throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
+  }
   // The F1 write-burst + F4 autonomous-delete gates run ONCE here, at the call
   // boundary, mirroring the single-account choke point. For today's read-only
   // `_all` set both are NO-OPs (classifyWriteTool → "exempt" for min_tier:read;
@@ -261,6 +341,11 @@ export async function withAllAccounts<T>(
   // rows, exactly as before). v1.74 PR-2c — the operator from the connection
   // (Model B, via the sentinel) falls back to env for direct callers / Model A.
   const operator = deps.operator ?? resolveOperatorId();
+  // v1.120 (F6 step 2) — resolve the privilege tier ONCE here, beside the operator, so
+  // each per-account sub-context carries it (ToolContext-parity). Model B threads the
+  // per-operator tier via the sentinel/shim; a direct caller / Model A leaves it unset
+  // → `currentTier()`, the SAME source the single-account choke point reads.
+  const tier = deps.tier ?? currentTier();
   enforceAutonomousDeleteDeny(tool);
   // v1.92 — per-operator burst window. Only the operatorId is available on the
   // cross-account path (no full OperatorContext here), so per-operator registry
@@ -289,6 +374,13 @@ export async function withAllAccounts<T>(
   }
 
   // ── Phase 2: resolve target accounts against accounts.json ──
+  // v1.119 (F6 step 1) — this fan-out ENUMERATION (loadIndex → EMAIL_RECIPIENT_RE
+  // validate → per-operator confinement intersect) stays hand-rolled here: it is
+  // cross-account ORCHESTRATION (WHICH accounts to touch), deliberately NOT
+  // `source.resolveAccount` (which resolves the ONE active account for a single-
+  // account call). Only the per-account scope check + credential resolve route
+  // through the Source strategies; collapsing this whole literal pipeline into the
+  // Source is B6.1.
   const idx = await idxLoader();
   // sec-H1: validate each persisted account.email against EMAIL_RECIPIENT_RE.
   // A restored/edited accounts.json could inject adversarial text; mismatched
@@ -321,13 +413,13 @@ export async function withAllAccounts<T>(
     // as account_not_found (design §6 + sec-rev hook 7). The failure echoes
     // the caller's input email — does NOT leak which other accounts DO exist.
     plans = requestedSubset.map((email) =>
-      buildPlan(email, consented.get(email), opts.requiredScopes),
+      buildPlan(email, consented.get(email), source, toolDef),
     );
   } else {
     // All-consented path. Empty accounts.json (or all entries malformed) →
     // empty plans → empty aggregate (NOT an error — test #5).
     plans = Array.from(consented.values()).map((acc) =>
-      buildPlan(acc.email, acc, opts.requiredScopes),
+      buildPlan(acc.email, acc, source, toolDef),
     );
   }
 
@@ -335,16 +427,62 @@ export async function withAllAccounts<T>(
   const subResults = await mapWithConcurrency(plans, MAX_ACCOUNT_FANOUT, async (plan) => {
     const subStart = Date.now();
     if (plan.kind !== "ready") return failureFromPlan(plan, subStart);
+    // v1.120 (F6 step 2) — one accumulator per EXECUTED sub-call, mirroring the
+    // single-account choke point's per-call `createAuditAccumulator()`. Created only
+    // for `ready` plans (an account_not_found / scope_mismatch plan returned above
+    // never reaches a handler → no accumulator → its row is byte-unchanged). Whatever
+    // this account's handler records via `ctx.audit` is captured onto its OWN inner
+    // row below — no cross-account bleed (each sub-call has its own accumulator).
+    const acc = createAuditAccumulator();
     try {
-      // refresh.ts refreshInFlight Map coalesces concurrent invocations on the
-      // same email (sec-rev hook 6). N different accounts run in parallel — no
-      // shared closure state (sec-rev hook 10).
-      const tokenSet: TokenSet = await refreshAccessToken(plan.email, deps);
-      const subCtx: AccountSubContext = {
-        email: plan.email,
-        getAccessToken: () => tokenSet.access_token,
+      // v1.119 (F6 step 1) — resolve the per-account credential through the Source
+      // strategy, replacing the direct token-refresh call. For google-workspace with
+      // `force` unset the strategy refreshes `accountId` with `deps.refresh ?? {}`,
+      // and `deps` here IS the RefreshDeps (WithAllAccountsDeps extends it) → byte-
+      // identical to the pre-v1.119 direct call. The refresh layer's in-flight map
+      // still coalesces concurrent invocations on the same email (sec-rev hook 6);
+      // N different accounts run in parallel — no shared closure state (hook 10).
+      const cred = await source.resolveCredential(toolDef, {
+        accountId: plan.email,
+        refresh: deps,
+      });
+      if (cred.kind !== "oauth") {
+        // v1.119 — type-unreachable backstop: google-workspace.resolveCredential
+        // always returns {kind:"oauth"}. Same defense-in-depth style as
+        // with-context.ts's post-resolve narrow.
+        throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
+      }
+      // v1.121 (B6.1 wave C) — build a REAL ToolContext for this EXECUTED sub-call
+      // (replacing the former per-account sub-context shim). `confine` (= deps.confineToAccounts ?? null,
+      // resolved once in Phase 2) is the SAME account-confinement set the single-
+      // account ctx carries as op.allowedAccounts (with-context.ts:252-257). `const`
+      // is fine even though the egress tripwire below READS ctx.egressGateFired and a
+      // future `*_all` write's egress gate would SET it — that optional field is
+      // non-readonly on ToolContext, so mutating the property (not the binding) is
+      // allowed. No current `_all` handler reads tier / audit / allowedAccounts
+      // (reads that record nothing) → byte-identical today.
+      const ctx: ToolContext = {
+        credential: cred,
+        tier,
+        audit: acc.sink,
+        allowedAccounts: confine,
       };
-      const raw = await fn(subCtx);
+      const raw = await fn(ctx);
+      // v1.121 (B6.1 wave C) — per-sub-call egress tripwire, mirroring with-context.ts's
+      // choke-point assertion (:352-354). A tool LABELED direction:"outbound-write" whose
+      // handler returned successfully WITHOUT invoking its centralized egress gate (which
+      // sets ctx.egressGateFired) → a loud failure. Thrown INSIDE this per-account try, so
+      // it becomes a per-account failure (caught below → mapRejectedReason + an inner
+      // error row with errorCode -32055) — the best-effort "never throws per-account"
+      // contract is preserved. UNREACHABLE today: cross_account ∩ outbound-write = ∅ (the
+      // v1.116 registry pin); this UPGRADES that pin from sole guard to defense-in-depth,
+      // so a future `*_all` WRITE is tripwired by construction.
+      if (
+        TOOL_REGISTRY[tool]?.direction === "outbound-write" &&
+        ctx.egressGateFired !== true
+      ) {
+        throw new MCPError("internal_routing_error", { reason: "egress_gate_not_fired" });
+      }
       // FRESH NONCE per sub-success — sanitize() generates new crypto-random
       // nonce per call (design §7, sec-rev hook 1).
       // v1.64 Phase B (B5/D5) — per-source skipFields (google-workspace's IS the
@@ -354,6 +492,9 @@ export async function withAllAccounts<T>(
         plan,
         outcome: { kind: "ok" as const, sanitized },
         durationMs: Date.now() - subStart,
+        // v1.120 — capture forensics AFTER fn settled. All-undefined today (nothing
+        // recorded) → the Phase-4 spread is a byte-identical no-op on the row.
+        forensics: acc.forensicFields(),
       };
     } catch (err) {
       const mapped = mapRejectedReason(err, tool);
@@ -374,17 +515,54 @@ export async function withAllAccounts<T>(
           errorForensics,
         },
         durationMs: Date.now() - subStart,
+        // v1.120 — a handler may record forensic metadata BEFORE it throws (e.g. a
+        // BEFORE-SDK mutation recorder), so capture on the failed EXECUTED path too.
+        forensics: acc.forensicFields(),
       };
+    } finally {
+      // v1.120 (F6 step 2) — per-sub-call meta mutual-exclusion warn, mirroring
+      // with-context.ts's finally. At most one meta channel should be set per call; a
+      // handler that sets >1 is a coding error (the row still reflects all set
+      // channels — itself a forensic signal). No-op today: no `_all` handler records
+      // any meta, so `acc.metas.size` is 0.
+      const setChannelLabels: string[] = [];
+      for (const [key, entry] of Object.entries(AUDIT_META_CHANNELS)) {
+        if (acc.metas.has(key as keyof typeof AUDIT_META_CHANNELS)) {
+          setChannelLabels.push(entry.label);
+        }
+      }
+      if (acc.metas.size > 1) {
+        console.error(
+          `[safespace] internal: tool ${tool} set multiple audit metas: ${setChannelLabels.join(", ")}. Audit row will reflect all set channels but this is a coding error — only one meta should be set per call.`,
+        );
+      }
     }
   });
 
   // ── Phase 4: collect successes + failures, emit inner audit rows ──
+  //
+  // v1.121 (B6.1 wave C) — the two v1.120 PARITY-BOUNDARY gaps are now CLOSED (the
+  // fan-out runs the real ToolContext): (1) EXECUTED inner rows stamp
+  // `sanitize:"applied"` below (owner-locked Q2 — a MODE marker exactly like
+  // with-context.ts's, which stamps it on error rows too; there is no skipSanitize on
+  // this path), and (2) the per-sub-call egress tripwire fired in Phase 3
+  // (direction:"outbound-write" post-handler). PLAN-FAILURE rows (account_not_found /
+  // scope_mismatch) never executed a handler → NO sanitize field (no execution → no
+  // sanitize semantics). Each executed sub-call's forensic envelope (`r.forensics`) is
+  // still spread onto its inner row, at audit-recording parity with the single-account
+  // choke point. NOTE: auditEnd already DEFAULTS an absent `sanitize` to "applied", so
+  // the SERIALIZED jsonl row is byte-identical — this makes the mode EXPLICIT in the
+  // row context object (envelope parity), it does not change the on-disk bytes.
   const successes: Array<{ account_email: string } & T> = [];
   const failures: AccountFailure[] = [];
 
   for (const r of subResults) {
     const innerArgs = syntheticSubCallArgs(outerArgs, r.plan.email);
     const innerHash = sha256Hex(innerArgs);
+    // v1.121 (B6.1 wave C) — a `ready` plan EXECUTED a handler; account_not_found /
+    // scope_mismatch short-circuit via failureFromPlan BEFORE Phase 3 (no handler, no
+    // sanitize semantics). Gates the sanitize stamp on the EXECUTED error branch below.
+    const executed = r.plan.kind === "ready";
     // Inner audit rows ARE per-account-identifying by design — only the outer aggregate row is anti-enumeration. See design §8.
     if (r.outcome.kind === "ok") {
       const subSuccess: { account_email: string } & T = {
@@ -407,6 +585,18 @@ export async function withAllAccounts<T>(
         argsHash: innerHash,
         status: "ok",
         durationMs: r.durationMs,
+        // v1.121 (B6.1 wave C) — stamp sanitize:"applied" on the EXECUTED ok row
+        // (owner-locked Q2). A MODE marker exactly like with-context.ts's; there is no
+        // skipSanitize on this path, and the ok branch is ALWAYS an executed sub-call
+        // (a plan-failure never yields "ok"). auditEnd already DEFAULTS an absent field
+        // to "applied", so the serialized row is byte-identical — this makes the mode
+        // EXPLICIT in the row context (envelope parity).
+        sanitize: "applied",
+        // v1.120 (F6 step 2) — this account's own forensic envelope. All fields are
+        // undefined today (no `_all` handler records any channel) and `auditEnd`
+        // serializes only defined fields → byte-identical row. A future meta-recording
+        // `*_all` handler lands its forensics on THIS account's row.
+        ...(r.forensics ?? {}),
       });
     } else {
       failures.push({
@@ -433,6 +623,16 @@ export async function withAllAccounts<T>(
         // key off error_code). undefined for a non-MCPError → auditEnd omits them.
         errorCode: r.outcome.errorCode,
         errorForensics: r.outcome.errorForensics,
+        // v1.121 (B6.1 wave C) — stamp sanitize:"applied" on EXECUTED error rows ONLY
+        // (owner-locked Q2). A PLAN-FAILURE row (account_not_found / scope_mismatch)
+        // never executed a handler → NO sanitize field, byte-unchanged. `executed`
+        // (r.plan.kind === "ready") distinguishes the two.
+        ...(executed ? { sanitize: "applied" as const } : {}),
+        // v1.120 (F6 step 2) — this account's forensic envelope (a handler may record
+        // a BEFORE-SDK mutation meta then throw). All-undefined today → byte-identical
+        // row. Distinct keys from errorCode/errorForensics → no collision with the
+        // above (ForensicFields carries the 3 scalar + 8 meta channels only).
+        ...(r.forensics ?? {}),
       });
     }
   }

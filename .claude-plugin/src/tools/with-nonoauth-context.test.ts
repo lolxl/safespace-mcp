@@ -180,7 +180,10 @@ describe("withNonOAuthContext (LINE service-token route — v1.66 Phase C PR 2)"
   test("resolves a service-token credential and runs the handler; audit row source 'line'", async () => {
     process.env.SAFESPACE_LINE_CHANNEL_TOKEN = "chan-tok-xyz";
     let captured: ToolContext | undefined;
-    await withNonOAuthContext("line_push_message", { to: "U", text: "hi" }, async (c) => {
+    // B6.1 wave A1 — a VALID LINE id: the pipeline now validates args (the egress
+    // descriptor's extract) BEFORE the handler, so the fixture must be well-formed.
+    await withNonOAuthContext("line_push_message", { to: "U" + "0".repeat(32), text: "hi" }, async (c) => {
+      c.egressGateFired = true; // v1.116 — stub stands in for a gate-calling outbound handler
       captured = c;
       return { sent: true };
     });

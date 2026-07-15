@@ -203,31 +203,8 @@ describe("slackSendMessage — the bot token never leaks into errors", () => {
   });
 });
 
-describe("slackSendMessage — egress gates", () => {
-  test("recipient NOT in an active allowlist → recipient_denied_by_policy (never hits Slack)", async () => {
-    process.env[ENV_SK_ALLOW] = OTHER; // active allowlist excluding CHAN
-    const f = fetchStub();
-    await expect(
-      slackSendMessage(ctx(), { channel: CHAN, text: "x" }, { fetchImpl: f.impl }),
-    ).rejects.toMatchObject({ errorName: "recipient_denied_by_policy" });
-    expect(f.calls).toHaveLength(0);
-  });
-
-  test("recipient IN the allowlist → allowed", async () => {
-    process.env[ENV_SK_ALLOW] = CHAN;
-    const f = fetchStub();
-    const out = await slackSendMessage(ctx(), { channel: CHAN, text: "x" }, { fetchImpl: f.impl });
-    expect(out).toMatchObject({ sent: true });
-  });
-
-  test("autonomous + secret-shape body → outbound_secret_rejected (never hits Slack)", async () => {
-    process.env.SAFESPACE_AUTONOMOUS = "true";
-    process.env[ENV_SK_ALLOW] = CHAN; // allow the recipient so secret-shape is the gate
-    const f = fetchStub();
-    const body = "-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----";
-    await expect(
-      slackSendMessage(ctx(), { channel: CHAN, text: body }, { fetchImpl: f.impl }),
-    ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
-  });
-});
+// B6.1 wave A1 — the "slackSendMessage — egress gates" describe MOVED to
+// tools/egress-pipeline.test.ts (same assertions, driven through the pipeline's
+// egress descriptor; the gate input stays the RAW text — escaping is wire-only):
+// the gate is now PIPELINE-FIRED (withNonOAuthContext runs extract → gate BEFORE
+// the handler), so the handler no longer calls it.

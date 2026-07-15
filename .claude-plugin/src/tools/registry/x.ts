@@ -4,11 +4,14 @@
 // `source: "x"` (authModel:"oauth") routes these through `withToolContext` (the OAuth
 // choke point) like google-workspace + github + notion — the choke point's per-source
 // sanitize tree-walk wraps free-text name / description / tweet text as an untrusted
-// source on READ, and the write path runs enforceXPostEgressGates before POST.
+// source on READ. On WRITE (B6.1 wave A2a) the choke point fires x_post_create's
+// egress descriptor (extract → gate, tools/egress-pipeline.ts) BEFORE the handler and
+// stores the gate's sanitized return on ctx.egress — the handler wires THAT.
 //
 // `requiredScopes: []` (X OAuth scopes are fixed at consent in auth/x — they must NOT
 // leak into `computeScopeUnion()`, which is the google V1_SCOPES union).
 
+import { xPostEgressDescriptor } from "../egress-pipeline";
 import type { ToolDef } from "./types";
 import * as handlers from "../handlers";
 
@@ -87,5 +90,8 @@ export const xTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "x",
     direction: "outbound-write",
+    // B6.1 wave A2a — pipeline-fired TRANSFORMING egress: withToolContext runs
+    // extract → gate pre-handler; the gate's sanitized return rides ctx.egress.
+    egress: xPostEgressDescriptor,
   },
 };

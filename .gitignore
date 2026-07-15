@@ -34,12 +34,12 @@ spike/**/output/
 # `.claude-plugin/` is the tracked plugin manifest — different directory.
 .claude/
 
-# Local-only Claude Code context for AI coding assistants. Auto-loaded beside
-# CLAUDE.md; kept out of the public repo.
+# Owner-internal Claude Code context (references a private agent toolchain).
+# Auto-loaded locally beside CLAUDE.md, kept out of the public repo.
 CLAUDE.local.md
 
-# Local mirror of the per-cycle design docs (not part of the public repo).
-# Convenience copy for local dev only.
+# Local mirror of the per-cycle design docs removed from the public repo
+# (they live in the private archive). Convenience copy for local dev only.
 docs-archive/
 
 # Model B deployment (v1.74) — the Compose secret files (FileBackend passphrase,

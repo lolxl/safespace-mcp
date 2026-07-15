@@ -17,9 +17,24 @@ import {
   gmailGetDraft,
   gmailListDrafts,
 } from "./handlers";
+import { TOOL_REGISTRY } from "./registry";
 import type { ToolContext } from "./types";
 
 const FAKE_TOKEN = "ya29.fake-token-for-tests";
+
+// B6.1 wave A3+D — gmail_create_draft is now PIPELINE_EGRESS: the header/recipient-
+// allowlist/secret gate is fired by the CHOKE POINT (withToolContext) via the tool's
+// egress descriptor, and the slimmed handler reads the gate's shape off ctx.egress. This
+// vehicle reproduces that pre-handler step (extract → gate → store on ctx.egress →
+// handler) so a direct handler call still exercises the gate. A draft is literal-only
+// (D3), so no recipient resolver is passed. Byte-identical to the pre-A3 gmailCreateDraft
+// (which ran the same header + egress gates internally).
+async function gmailCreateDraftVia(ctx: ToolContext, args: Record<string, unknown>): Promise<unknown> {
+  const d = TOOL_REGISTRY.gmail_create_draft!.egress!;
+  const out = await d.gate(ctx, d.extract(args));
+  if (out !== undefined) ctx.egress = out;
+  return gmailCreateDraft(ctx, args);
+}
 const FAKE_CTX: ToolContext = { allowedAccounts: null,
   credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
   audit: NOOP_AUDIT,
@@ -76,7 +91,7 @@ describe("gmailCreateDraft (WRITE tool)", () => {
       opts = o as CapturedOpts;
       return { data: { id: "r123", message: { id: "m1", threadId: "t1", labelIds: ["DRAFT"] } }, status: 200 };
     });
-    const result = (await gmailCreateDraft(FAKE_CTX, {
+    const result = (await gmailCreateDraftVia(FAKE_CTX, {
       to: "bob@example.com",
       subject: "Hello",
       body: "Draft body",
@@ -99,7 +114,7 @@ describe("gmailCreateDraft (WRITE tool)", () => {
       opts = o as CapturedOpts;
       return { data: { id: "r2" }, status: 200 };
     });
-    await gmailCreateDraft(FAKE_CTX, { body: "just a note to myself" });
+    await gmailCreateDraftVia(FAKE_CTX, { body: "just a note to myself" });
     const raw = (opts?.data as { message?: { raw?: string } })?.message?.raw;
     const decoded = Buffer.from(raw!, "base64url").toString("utf-8");
     expect(decoded).not.toContain("To:");
@@ -114,8 +129,8 @@ describe("gmailCreateDraft (WRITE tool)", () => {
       called = true;
       return { data: {}, status: 200 };
     });
-    await expect(gmailCreateDraft(FAKE_CTX, {})).rejects.toThrow(/at least one/);
-    await expect(gmailCreateDraft(FAKE_CTX, { to: "   ", subject: "", body: "" })).rejects.toThrow(/at least one/);
+    await expect(gmailCreateDraftVia(FAKE_CTX, {})).rejects.toThrow(/at least one/);
+    await expect(gmailCreateDraftVia(FAKE_CTX, { to: "   ", subject: "", body: "" })).rejects.toThrow(/at least one/);
     expect(called).toBe(false);
   });
 
@@ -127,37 +142,37 @@ describe("gmailCreateDraft (WRITE tool)", () => {
       return { data: {}, status: 200 };
     });
     await expect(
-      gmailCreateDraft(FAKE_CTX, { to: "bob@example.com\r\nBcc: evil@x.com", body: "x" }),
+      gmailCreateDraftVia(FAKE_CTX, { to: "bob@example.com\r\nBcc: evil@x.com", body: "x" }),
     ).rejects.toThrow(/header injection/);
     await expect(
-      gmailCreateDraft(FAKE_CTX, { subject: "hi\nthere", body: "x" }),
+      gmailCreateDraftVia(FAKE_CTX, { subject: "hi\nthere", body: "x" }),
     ).rejects.toThrow(/header injection/);
     expect(called).toBe(false);
   });
 
   test("ASCII subject gate — non-ASCII subject → reject", async () => {
     await expect(
-      gmailCreateDraft(FAKE_CTX, { subject: "你好", body: "x" }),
+      gmailCreateDraftVia(FAKE_CTX, { subject: "你好", body: "x" }),
     ).rejects.toThrow(/ASCII/);
   });
 
   test("10-recipient cap — 11 across to+cc+bcc → reject", async () => {
     const eleven = Array.from({ length: 11 }, (_, i) => `u${i}@example.com`).join(",");
     await expect(
-      gmailCreateDraft(FAKE_CTX, { to: eleven, body: "x" }),
+      gmailCreateDraftVia(FAKE_CTX, { to: eleven, body: "x" }),
     ).rejects.toThrow(/at most 10 recipients/);
   });
 
   test("email-format gate — non-email recipient → reject (no contact lookup)", async () => {
     await expect(
-      gmailCreateDraft(FAKE_CTX, { to: "alice", body: "x" }),
+      gmailCreateDraftVia(FAKE_CTX, { to: "alice", body: "x" }),
     ).rejects.toThrow(/not a valid email address/);
   });
 
   test("body byte cap — body > 1 MiB → reject", async () => {
     const big = "a".repeat(1024 * 1024 + 1);
     await expect(
-      gmailCreateDraft(FAKE_CTX, { subject: "ok", body: big }),
+      gmailCreateDraftVia(FAKE_CTX, { subject: "ok", body: big }),
     ).rejects.toThrow(/exceeds/);
   });
 
@@ -172,7 +187,7 @@ describe("gmailCreateDraft (WRITE tool)", () => {
       return { data: {}, status: 200 };
     });
     await expect(
-      gmailCreateDraft(FAKE_CTX, { to: "bob@evil.com", subject: "hi", body: "x" }),
+      gmailCreateDraftVia(FAKE_CTX, { to: "bob@evil.com", subject: "hi", body: "x" }),
     ).rejects.toMatchObject({ errorName: "recipient_denied_by_policy" });
     expect(called).toBe(false);
   });
@@ -187,7 +202,7 @@ describe("gmailCreateDraft (WRITE tool)", () => {
       called = true;
       return { data: { id: "r3" }, status: 200 };
     });
-    const r = (await gmailCreateDraft(FAKE_CTX, {
+    const r = (await gmailCreateDraftVia(FAKE_CTX, {
       to: "bob@allowed.com",
       subject: "hi",
       body: "x",

@@ -5,9 +5,10 @@
 import { MCPError } from "../../errors";
 import { driveClientFromToken, gmailClientFromToken, tasksClientFromToken, youtubeClientFromToken } from "../../google-api/client";
 import { mapGoogleError } from "../../google-api/errors";
-import { withAllAccounts, type AccountSubContext, type MultiAccountResult, type WithAllAccountsDeps } from "../with-all-accounts";
+import type { ToolContext } from "../types";
+import { withAllAccounts, type MultiAccountResult, type WithAllAccountsDeps } from "../with-all-accounts";
 
-import { TASKLIST_ID_RE, clampYoutubeMaxResults } from "./shared";
+import { TASKLIST_ID_RE, clampYoutubeMaxResults, requireOAuth } from "./shared";
 
 /* ───────── v1.14 Phase 1: gmail_search_all (CROSS-ACCOUNT READ tool) ─────────
  *
@@ -90,13 +91,14 @@ export async function gmailSearchAll(
   return withAllAccounts<GmailSearchAllSubSuccess>(
     "gmail_search_all",
     args,
-    async (subAccount: AccountSubContext) => {
+    async (ctx: ToolContext) => {
+      const cred = requireOAuth(ctx);
       // Sub-call shape: parallel single-account gmail.users.messages.list
       // call per account. mapGoogleError re-throws with the right shape
       // (httpStatus / MCPError) — the helper catches and maps to
       // failures[] entries per design §6.
       try {
-        const gmail = gmailClientFromToken(subAccount.getAccessToken());
+        const gmail = gmailClientFromToken(cred.getAccessToken());
         const res = await gmail.users.messages.list({
           userId: "me",
           q: query,
@@ -112,12 +114,11 @@ export async function gmailSearchAll(
         // Re-throw via mapGoogleError so helper sees the
         // {httpStatus, MCPError} shape it expects. mapGoogleError is
         // declared `never` — execution does not continue past this point.
-        mapGoogleError(err, { tool: "gmail_search_all", email: subAccount.email });
+        mapGoogleError(err, { tool: "gmail_search_all", email: cred.accountId });
       }
     },
     {
       accounts: accountsFilter,
-      requiredScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
     },
     deps,
   );
@@ -216,13 +217,14 @@ export async function driveSearchAll(
   return withAllAccounts<DriveSearchAllSubSuccess>(
     "drive_search_all",
     args,
-    async (subAccount: AccountSubContext) => {
+    async (ctx: ToolContext) => {
+      const cred = requireOAuth(ctx);
       // Sub-call shape: parallel single-account drive.files.list call per
       // account. Note our input field name is `query` (matches single-account
       // drive_search input), but the Drive SDK parameter name is `q`. Keep
       // this mapping; do NOT rename either side.
       try {
-        const drive = driveClientFromToken(subAccount.getAccessToken());
+        const drive = driveClientFromToken(cred.getAccessToken());
         const res = await drive.files.list({
           q: query,
           pageSize: maxResults,
@@ -238,12 +240,11 @@ export async function driveSearchAll(
         // Re-throw via mapGoogleError so helper sees the
         // {httpStatus, MCPError} shape it expects. mapGoogleError is
         // declared `never` — execution does not continue past this point.
-        mapGoogleError(err, { tool: "drive_search_all", email: subAccount.email });
+        mapGoogleError(err, { tool: "drive_search_all", email: cred.accountId });
       }
     },
     {
       accounts: accountsFilter,
-      requiredScopes: ["https://www.googleapis.com/auth/drive.readonly"],
     },
     deps,
   );
@@ -310,8 +311,6 @@ export async function driveSearchAll(
 
 const YOUTUBE_SUBSCRIPTIONS_DEFAULT_MAX = 25;
 const YOUTUBE_SUBSCRIPTIONS_MAX_CAP = 50;
-
-const YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
 
 /* ── youtube_search burst-limit state ────────────────────────────────────
  *
@@ -380,9 +379,10 @@ export async function youtubeSubscriptionsAll(
   return withAllAccounts<YoutubeSubscriptionsAllSubSuccess>(
     "youtube_subscriptions_all",
     args,
-    async (subAccount: AccountSubContext) => {
+    async (ctx: ToolContext) => {
+      const cred = requireOAuth(ctx);
       try {
-        const yt = youtubeClientFromToken(subAccount.getAccessToken());
+        const yt = youtubeClientFromToken(cred.getAccessToken());
         const res = await yt.subscriptions.list({
           part: ["snippet"],
           mine: true,
@@ -400,13 +400,12 @@ export async function youtubeSubscriptionsAll(
         if (err instanceof MCPError) throw err;
         mapGoogleError(err, {
           tool: "youtube_subscriptions_all",
-          email: subAccount.email,
+          email: cred.accountId,
         });
       }
     },
     {
       accounts: accountsFilter,
-      requiredScopes: [YOUTUBE_READONLY_SCOPE],
     },
     deps,
   );
@@ -516,7 +515,8 @@ export async function tasksSearchAll(
   return withAllAccounts<TasksSearchAllSubSuccess>(
     "tasks_search_all",
     args,
-    async (subAccount: AccountSubContext) => {
+    async (ctx: ToolContext) => {
+      const cred = requireOAuth(ctx);
       // Per-account sub-call shape: parallel single-account tasks.tasks.list
       // per account, then client-side title+notes substring filter.
       //
@@ -525,7 +525,7 @@ export async function tasksSearchAll(
       // state the user did not consciously mark visible; completed tasks
       // are usually clutter in a cross-account search.
       try {
-        const tasks = tasksClientFromToken(subAccount.getAccessToken());
+        const tasks = tasksClientFromToken(cred.getAccessToken());
         const res = await tasks.tasks.list({
           tasklist: tasklistId,
           maxResults,
@@ -560,13 +560,12 @@ export async function tasksSearchAll(
         if (err instanceof MCPError) throw err;
         mapGoogleError(err, {
           tool: "tasks_search_all",
-          email: subAccount.email,
+          email: cred.accountId,
         });
       }
     },
     {
       accounts: accountsFilter,
-      requiredScopes: ["https://www.googleapis.com/auth/tasks"],
     },
     deps,
   );

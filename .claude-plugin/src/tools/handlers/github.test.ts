@@ -12,6 +12,7 @@ import { sanitize } from "../../sanitize";
 import { github } from "../source";
 import { capturingAudit, NOOP_AUDIT, oauthCred } from "../test-audit";
 import type { Credential, ToolContext } from "../types";
+import { TOOL_REGISTRY } from "../registry";
 import {
   githubCreateIssue,
   githubCreateIssueComment,
@@ -38,6 +39,16 @@ function githubCred(token = "gho_SECRET_TOKEN"): Credential {
 }
 function ctx(token = "gho_SECRET_TOKEN"): ToolContext {
   return { allowedAccounts: null, credential: githubCred(token), tier: "read", audit: NOOP_AUDIT };
+}
+
+// B6.1 wave A — the github egress gates are now PIPELINE-FIRED (with-context.ts via each
+// write tool's egress descriptor), not handler-called. The gate-DENIAL / F3a cases below
+// (formerly driven through the handler) now drive the SAME registry-carried descriptor
+// (extract → gate), exactly the choke-point sequence — the handler no longer gates.
+async function fireGate(tool: string, gctx: ToolContext, args: Record<string, unknown>): Promise<void> {
+  const d = TOOL_REGISTRY[tool]?.egress;
+  if (d === undefined) throw new Error(`no egress descriptor on ${tool}`);
+  await d.gate(gctx, d.extract(args));
 }
 
 /** A fetch stub returning `body` (JSON-serialized) with `status`; records the URLs. */
@@ -405,34 +416,28 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
     expect(reqBody(f.calls)).toEqual({ title: "T", body: "B", state: "open" });
   });
 
-  // ── the DEFAULT-DENY repo allowlist (gate #3) ──
-  test("a repo NOT in the allowlist → -32042 not_in_allowlist, NO fetch", async () => {
-    const f = fetchStub({}, 201);
+  // ── the DEFAULT-DENY repo allowlist (gate #3) — pipeline-fired (fireGate) ──
+  test("a repo NOT in the allowlist → -32042 not_in_allowlist (pipeline gate)", async () => {
     await expect(
-      githubCreateIssue(ctx(), { owner: "someone", repo: "else", title: "x" }, { fetchImpl: f.impl }),
+      fireGate("github_create_issue", ctx(), { owner: "someone", repo: "else", title: "x" }),
     ).rejects.toMatchObject({ errorName: "github_write_denied_by_policy", errorData: { reason: "not_in_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
-  test("allowlist OFF (env unset) → -32042 no_allowlist (HARD-DENY), NO fetch", async () => {
+  test("allowlist OFF (env unset) → -32042 no_allowlist (HARD-DENY)", async () => {
     delete process.env.SAFESPACE_GITHUB_WRITE_TARGETS;
     ghWriteTargets.resetSingletons();
-    const f = fetchStub({}, 201);
     await expect(
-      githubCreateIssueComment(ctx(), { owner: "octo", repo: "repo", number: 1, body: "x" }, { fetchImpl: f.impl }),
+      fireGate("github_create_issue_comment", ctx(), { owner: "octo", repo: "repo", number: 1, body: "x" }),
     ).rejects.toMatchObject({ errorName: "github_write_denied_by_policy", errorData: { reason: "no_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
-  // ── the public-surface body gates (F3a secret-shape + outbound REJECT) ──
-  test("a secret-shaped body under autonomous mode → -32035, NO fetch (F3a)", async () => {
+  // ── the public-surface body gate (F3a secret-shape) — pipeline-fired ──
+  test("a secret-shaped body under autonomous mode → -32035 (F3a, pipeline gate)", async () => {
     process.env.SAFESPACE_AUTONOMOUS = "true";
-    const f = fetchStub({}, 201);
     const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34Gk\n-----END RSA PRIVATE KEY-----";
     await expect(
-      githubCreateIssue(ctx(), { owner: "octo", repo: "repo", title: "hi", body: pem }, { fetchImpl: f.impl }),
+      fireGate("github_create_issue", ctx(), { owner: "octo", repo: "repo", title: "hi", body: pem }),
     ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("a zero-width char in the body → outbound_sanitize_rejected (-32027)", async () => {
@@ -474,14 +479,14 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
     expect(f.calls).toHaveLength(0);
   });
 
-  test("interactive (non-autonomous) secret-shape body → records a flag, does NOT block", async () => {
+  test("interactive (non-autonomous) secret-shape body → the pipeline gate records a flag, does NOT block", async () => {
     const audit = capturingAudit();
     const ctxFlag: ToolContext = { allowedAccounts: null, credential: githubCred(), tier: "write", audit: audit.sink };
-    const f = fetchStub({ number: 3 }, 201);
     const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34Gk\n-----END RSA PRIVATE KEY-----";
-    await githubCreateIssue(ctxFlag, { owner: "octo", repo: "repo", title: "hi", body: pem }, { fetchImpl: f.impl });
+    // Gate resolves (does NOT throw) — the handler would then proceed to write.
+    await fireGate("github_create_issue", ctxFlag, { owner: "octo", repo: "repo", title: "hi", body: pem });
     expect(audit.has("outboundSecretShape")).toBe(true); // flagged, not blocked
-    expect(f.calls).toHaveLength(1); // the write proceeded (interactive)
+    expect(ctxFlag.egressGateFired).toBe(true);
   });
 
   // ── v1.81 — github_create_pull_request (same public-surface egress slice) ──
@@ -513,12 +518,10 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
     expect((reqBody(f.calls) as Record<string, unknown>).draft).toBe(true);
   });
 
-  test("create_pull_request: repo NOT in allowlist → -32042, NO fetch", async () => {
-    const f = fetchStub({}, 201);
+  test("create_pull_request: repo NOT in allowlist → -32042 (pipeline gate)", async () => {
     await expect(
-      githubCreatePullRequest(ctx(), { owner: "someone", repo: "else", title: "x", head: "f", base: "main" }, { fetchImpl: f.impl }),
+      fireGate("github_create_pull_request", ctx(), { owner: "someone", repo: "else", title: "x", head: "f", base: "main" }),
     ).rejects.toMatchObject({ errorName: "github_write_denied_by_policy", errorData: { reason: "not_in_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("create_pull_request: a traversal ref (head/base with '..') is rejected, NO fetch", async () => {
@@ -539,14 +542,12 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
     expect(f.calls).toHaveLength(0);
   });
 
-  test("create_pull_request: autonomous secret-shape body → outbound_secret_rejected (-32035), NO fetch", async () => {
+  test("create_pull_request: autonomous secret-shape body → outbound_secret_rejected (-32035, pipeline gate)", async () => {
     process.env.SAFESPACE_AUTONOMOUS = "true";
-    const f = fetchStub({}, 201);
     const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34Gk\n-----END RSA PRIVATE KEY-----";
     await expect(
-      githubCreatePullRequest(ctx(), { owner: "octo", repo: "repo", title: "hi", head: "f", base: "main", body: pem }, { fetchImpl: f.impl }),
+      fireGate("github_create_pull_request", ctx(), { owner: "octo", repo: "repo", title: "hi", head: "f", base: "main", body: pem }),
     ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("create_pull_request: an empty title is rejected", async () => {
@@ -602,12 +603,10 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
     expect(f.calls).toHaveLength(0);
   });
 
-  test("set_issue_labels: repo NOT in allowlist → -32042, NO fetch", async () => {
-    const f = fetchStub([], 200);
+  test("set_issue_labels: repo NOT in allowlist → -32042 (pipeline gate)", async () => {
     await expect(
-      githubSetIssueLabels(ctx(), { owner: "someone", repo: "else", number: 1, labels: ["x"] }, { fetchImpl: f.impl }),
+      fireGate("github_set_issue_labels", ctx(), { owner: "someone", repo: "else", number: 1, labels: ["x"] }),
     ).rejects.toMatchObject({ errorName: "github_write_denied_by_policy", errorData: { reason: "not_in_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("set_issue_labels: a zero-width char in a label name → outbound_sanitize_rejected, NO fetch", async () => {
@@ -695,22 +694,18 @@ describe("github MERGE handler — github_merge_pull_request (v1.82, IRREVERSIBL
     expect(f.calls).toHaveLength(0);
   });
 
-  test("repo NOT in merge allowlist → -32046 not_in_allowlist, NO fetch", async () => {
-    const f = fetchStub({}, 200);
+  test("repo NOT in merge allowlist → -32046 not_in_allowlist (pipeline gate)", async () => {
     await expect(
-      githubMergePullRequest(ctx(), { owner: "someone", repo: "else", number: 1 }, { fetchImpl: f.impl }),
+      fireGate("github_merge_pull_request", ctx(), { owner: "someone", repo: "else", number: 1 }),
     ).rejects.toMatchObject({ errorName: "github_merge_denied_by_policy", errorData: { reason: "not_in_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
-  test("merge allowlist OFF (unset) → -32046 no_allowlist, NO fetch", async () => {
+  test("merge allowlist OFF (unset) → -32046 no_allowlist (pipeline gate)", async () => {
     delete process.env.SAFESPACE_GITHUB_MERGE_TARGETS;
     ghMergeTargets.resetSingletons();
-    const f = fetchStub({}, 200);
     await expect(
-      githubMergePullRequest(ctx(), { owner: "octo", repo: "repo", number: 1 }, { fetchImpl: f.impl }),
+      fireGate("github_merge_pull_request", ctx(), { owner: "octo", repo: "repo", number: 1 }),
     ).rejects.toMatchObject({ errorName: "github_merge_denied_by_policy", errorData: { reason: "no_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("write-allowlisted but NOT merge-allowlisted → still -32046 (the separation is real)", async () => {
@@ -718,11 +713,9 @@ describe("github MERGE handler — github_merge_pull_request (v1.82, IRREVERSIBL
     process.env.SAFESPACE_GITHUB_MERGE_TARGETS = "octo/other"; // …but NOT mergeable
     ghWriteTargets.resetSingletons();
     ghMergeTargets.resetSingletons();
-    const f = fetchStub({}, 200);
     await expect(
-      githubMergePullRequest(ctx(), { owner: "octo", repo: "repo", number: 1 }, { fetchImpl: f.impl }),
+      fireGate("github_merge_pull_request", ctx(), { owner: "octo", repo: "repo", number: 1 }),
     ).rejects.toMatchObject({ errorName: "github_merge_denied_by_policy", errorData: { reason: "not_in_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("zero-width char in commit_message → outbound_sanitize_rejected, NO fetch", async () => {
@@ -733,14 +726,12 @@ describe("github MERGE handler — github_merge_pull_request (v1.82, IRREVERSIBL
     expect(f.calls).toHaveLength(0);
   });
 
-  test("autonomous secret-shape in commit_message → outbound_secret_rejected, NO fetch", async () => {
+  test("autonomous secret-shape in commit_message → outbound_secret_rejected (pipeline gate)", async () => {
     process.env.SAFESPACE_AUTONOMOUS = "true";
-    const f = fetchStub({}, 200);
     const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34Gk\n-----END RSA PRIVATE KEY-----";
     await expect(
-      githubMergePullRequest(ctx(), { owner: "octo", repo: "repo", number: 7, commit_message: pem }, { fetchImpl: f.impl }),
+      fireGate("github_merge_pull_request", ctx(), { owner: "octo", repo: "repo", number: 7, commit_message: pem }),
     ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("a GOOGLE credential → R8 backstop throws before any gate/fetch", async () => {
@@ -847,32 +838,26 @@ describe("github REVIEW handler — github_create_pull_request_review (v1.90, EV
     expect(body(f)).toEqual({ event: "REQUEST_CHANGES", body: "please fix X" });
   });
 
-  test("THE SEPARATION: write-allowlisted but NOT approve-allowlisted APPROVE → -32048, NO fetch", async () => {
+  test("THE SEPARATION: write-allowlisted but NOT approve-allowlisted APPROVE → -32048 (pipeline gate)", async () => {
     process.env.SAFESPACE_GITHUB_APPROVE_TARGETS = "octo/other"; // writable…not approvable
     ghApproveTargets.resetSingletons();
-    const f = fetchStub({}, 200);
     await expect(
-      githubCreatePullRequestReview(ctx(), { owner: "octo", repo: "repo", number: 7, event: "APPROVE" }, { fetchImpl: f.impl }),
+      fireGate("github_create_pull_request_review", ctx(), { owner: "octo", repo: "repo", number: 7, event: "APPROVE" }),
     ).rejects.toMatchObject({ errorName: "github_approve_denied_by_policy", errorData: { reason: "not_in_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
-  test("approve allowlist OFF (unset) → APPROVE -32048 no_allowlist, NO fetch", async () => {
+  test("approve allowlist OFF (unset) → APPROVE -32048 no_allowlist (pipeline gate)", async () => {
     delete process.env.SAFESPACE_GITHUB_APPROVE_TARGETS;
     ghApproveTargets.resetSingletons();
-    const f = fetchStub({}, 200);
     await expect(
-      githubCreatePullRequestReview(ctx(), { owner: "octo", repo: "repo", number: 7, event: "APPROVE" }, { fetchImpl: f.impl }),
+      fireGate("github_create_pull_request_review", ctx(), { owner: "octo", repo: "repo", number: 7, event: "APPROVE" }),
     ).rejects.toMatchObject({ errorName: "github_approve_denied_by_policy", errorData: { reason: "no_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
-  test("COMMENT on a repo NOT in the WRITE allowlist → -32042, NO fetch", async () => {
-    const f = fetchStub({}, 200);
+  test("COMMENT on a repo NOT in the WRITE allowlist → -32042 (pipeline gate)", async () => {
     await expect(
-      githubCreatePullRequestReview(ctx(), { owner: "someone", repo: "else", number: 1, event: "COMMENT", body: "hi" }, { fetchImpl: f.impl }),
+      fireGate("github_create_pull_request_review", ctx(), { owner: "someone", repo: "else", number: 1, event: "COMMENT", body: "hi" }),
     ).rejects.toMatchObject({ errorName: "github_write_denied_by_policy", errorData: { reason: "not_in_allowlist" } });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("COMMENT without a body → local validation error, NO fetch", async () => {
@@ -923,14 +908,12 @@ describe("github REVIEW handler — github_create_pull_request_review (v1.90, EV
     expect(f.calls).toHaveLength(0);
   });
 
-  test("autonomous secret-shape in an APPROVE body → outbound_secret_rejected, NO fetch", async () => {
+  test("autonomous secret-shape in an APPROVE body → outbound_secret_rejected (pipeline gate)", async () => {
     process.env.SAFESPACE_AUTONOMOUS = "true";
-    const f = fetchStub({}, 200);
     const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34Gk\n-----END RSA PRIVATE KEY-----";
     await expect(
-      githubCreatePullRequestReview(ctx(), { owner: "octo", repo: "repo", number: 7, event: "APPROVE", body: pem }, { fetchImpl: f.impl }),
+      fireGate("github_create_pull_request_review", ctx(), { owner: "octo", repo: "repo", number: 7, event: "APPROVE", body: pem }),
     ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("a GOOGLE credential → R8 backstop throws before any gate/fetch", async () => {

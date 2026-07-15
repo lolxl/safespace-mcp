@@ -12,10 +12,15 @@
 // envelope (tier / write-burst / sanitize / audit) is applied by withNonOAuthContext
 // around it.
 //
-// EGRESS: the handler calls the centralized enforceSlackEgressGates (tools/egress.ts)
-// BEFORE the API call (the B3 handler-called posture, consistent with gmail_send /
-// line / telegram / discord): secret-shape (F3a) on the body + the Slack recipient
-// allowlist on `channel`.
+// EGRESS (B6.1 wave A1 — PIPELINE-FIRED): the egress gate — secret-shape (F3a) on the
+// body + the Slack recipient allowlist on `channel` — is fired by withNonOAuthContext
+// via this tool's egress descriptor (tools/egress-pipeline.ts) BEFORE this handler
+// runs. The gate input is the RAW text (the agent-authored content, exactly what the
+// pre-A1 handler passed); escapeSlackText below is purely for Slack's wire
+// interpretation, never a substitute for the secret-shape scan. The handler must NOT
+// invoke the gate itself (a double fire would double requireSendApproval + the denial
+// audit rows); the call-site sentinel (egress-callsite.test.ts) enforces both
+// directions.
 //
 // AUTH IS A HEADER, NOT A URL (like Discord): Slack uses `Authorization: Bearer <token>`
 // against the fixed host slack.com — the token is NOT a URL path segment, so there is no
@@ -42,7 +47,6 @@
 
 import { SLACK_CHANNEL_ID_RE } from "../../policy/slack-recipient-allowlist";
 import { slackApiGet } from "../../auth/slack/client";
-import { enforceSlackEgressGates } from "../egress";
 import type { ToolContext } from "../types";
 import { postServiceTokenJson, type ServiceTokenReason } from "./service-token-fetch";
 import { assertEgressHost } from "../../policy/egress-destinations";
@@ -115,23 +119,26 @@ function escapeSlackText(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-export async function slackSendMessage(
-  ctx: ToolContext,
+/** B6.1 wave A1 — the slack_send_message arg validator, extracted so ONE pure function
+ *  serves both call sites (single source, no drift): the pipeline's egress descriptor
+ *  (`extract` in tools/egress-pipeline.ts, which runs BEFORE this handler) and the
+ *  handler below. Returns the RAW text (the gate input; escaping is wire-only, applied
+ *  later in the handler). Throws the tool's plain-Error validation messages; echoes
+ *  the RULE, never the value.
+ *
+ *  1. Conversation id well-formedness — a well-formed id Slack later rejects →
+ *     slack_api_failed{invalid_recipient}. The fixed alphabet also forecloses
+ *     `#name`/`@name` addressing (IDs only).
+ *  2. Text body: non-empty + the Slack character limit. */
+export function validateSlackSendArgs(
   args: Record<string, unknown>,
-  deps: SlackDeps = {},
-): Promise<unknown> {
-  // 1. Validate the conversation id (well-formedness). Plain Error (bad input) — mirrors
-  //    the discord/telegram/line convention; echoes the RULE, never the value. A
-  //    well-formed id Slack later rejects → slack_api_failed{invalid_recipient} below.
-  //    The fixed alphabet also forecloses `#name`/`@name` addressing (IDs only).
+): { channel: string; text: string } {
   const channel = args.channel;
   if (typeof channel !== "string" || !SLACK_CHANNEL_ID_RE.test(channel)) {
     throw new Error(
       "slack_send_message: 'channel' must be a Slack conversation id (channel C…, group G…, DM D…, or user U…/W…)",
     );
   }
-
-  // 2. Validate the text body.
   const text = args.text;
   if (typeof text !== "string" || text.length === 0) {
     throw new Error("slack_send_message: 'text' must be a non-empty string");
@@ -141,18 +148,20 @@ export async function slackSendMessage(
       `slack_send_message: 'text' exceeds the ${SLACK_TEXT_MAX}-character Slack limit`,
     );
   }
+  return { channel, text };
+}
 
-  // 3. Egress gates (handler-called, B3 posture): secret-shape (F3a) on the body then
-  //    the Slack recipient allowlist on `channel`. Throws -32035 / -32019 on denial. The
-  //    gate runs on the RAW text (the agent-authored content); escaping below is purely
-  //    for Slack's wire interpretation, not a substitute for the secret-shape scan.
-  await enforceSlackEgressGates(ctx, {
-    tool: "slack_send_message",
-    channel,
-    body: text,
-  });
+export async function slackSendMessage(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: SlackDeps = {},
+): Promise<unknown> {
+  // 1. Validate args. The pipeline already validated them via this SAME function (the
+  //    egress descriptor's extract, BEFORE this handler); this call is defense-in-depth
+  //    + the unit-test surface (pure, identical result — cheap re-validation).
+  const { channel, text } = validateSlackSendArgs(args);
 
-  // 4. Send. The token is read inline from the service-token credential and placed in the
+  // 2. Send. The token is read inline from the service-token credential and placed in the
   //    Authorization header (never the URL, never logged/echoed).
   const token = requireServiceToken(ctx).token();
   const url = `${SLACK_API}/chat.postMessage`;

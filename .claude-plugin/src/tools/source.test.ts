@@ -2,7 +2,6 @@
 
 import { describe, expect, test } from "bun:test";
 import { MCPError } from "../errors";
-import { toGoogleError } from "../google-api/errors";
 import { SKIP_FIELDS } from "../sanitize/patterns";
 import { IMPLEMENTED_TOOLS, TOOL_REGISTRY } from "./registry";
 import { discord, github, googleWorkspace, line, notion, slack, sourceFor, telegram, webFetch, x } from "./source";
@@ -23,25 +22,6 @@ describe("Source descriptor — googleWorkspace (v1.64 B6)", () => {
     // global drives, or the google-workspace sanitize tree-walk would diverge.
     expect(googleWorkspace.skipFields).toBe(SKIP_FIELDS);
   });
-
-  test("mapError IS toGoogleError (the B4 returning catch boundary)", () => {
-    expect(googleWorkspace.mapError).toBe(toGoogleError);
-  });
-
-  test("mapError passes an MCPError through unchanged (identity — a handler's own validation reject)", () => {
-    const e = new MCPError("rate_limited", { tool: "drive_get_file_content" });
-    expect(googleWorkspace.mapError(e, { tool: "drive_get_file_content" })).toBe(e);
-  });
-
-  test("mapError maps a 404 Gaxios error to an UpstreamError carrying httpStatus", () => {
-    const gaxios = { response: { status: 404, data: { error: { message: "Not Found" } } } };
-    const mapped = googleWorkspace.mapError(gaxios, {
-      tool: "drive_get_file_content",
-    }) as Error & { httpStatus?: number };
-    expect(mapped).toBeInstanceOf(Error);
-    expect(mapped).not.toBeInstanceOf(MCPError);
-    expect(mapped.httpStatus).toBe(404);
-  });
 });
 
 describe("Source descriptor — webFetch (v1.65 Phase C — the first keyless connector)", () => {
@@ -52,14 +32,6 @@ describe("Source descriptor — webFetch (v1.65 Phase C — the first keyless co
 
   test("skipFields is EMPTY — a remote page is all untrusted, so every field wraps", () => {
     expect(webFetch.skipFields.size).toBe(0);
-  });
-
-  test("mapError passes an MCPError through + wraps a non-MCPError as web_fetch_failed", () => {
-    const e = new MCPError("url_blocked_by_policy", { reason: "scheme_not_allowed" });
-    expect(webFetch.mapError(e, { tool: "web_fetch" })).toBe(e);
-    const wrapped = webFetch.mapError(new Error("boom"), { tool: "web_fetch" });
-    expect(wrapped).toBeInstanceOf(MCPError);
-    expect((wrapped as MCPError).errorName).toBe("web_fetch_failed");
   });
 });
 
@@ -160,14 +132,6 @@ describe("Source descriptor — line (v1.66 Phase C PR 2)", () => {
     expect(sourceFor({ source: "line" })).toBe(line);
   });
 
-  test("mapError passes an MCPError through + wraps a non-MCPError as line_api_failed", () => {
-    const e = new MCPError("line_api_failed", { reason: "auth_failed" });
-    expect(line.mapError(e, { tool: "line_push_message" })).toBe(e);
-    const wrapped = line.mapError(new Error("boom"), { tool: "line_push_message" });
-    expect((wrapped as MCPError).errorName).toBe("line_api_failed");
-    expect((wrapped as MCPError).errorData.reason).toBe("api_error");
-  });
-
   test("authorize is a no-op (no scope; tier proxy-enforced; token presence in resolveCredential)", () => {
     expect(() => line.authorize(TOOL_REGISTRY["line_push_message"], {})).not.toThrow();
   });
@@ -194,14 +158,6 @@ describe("Source descriptor — telegram (v1.68)", () => {
     expect(sourceFor({ source: "telegram" })).toBe(telegram);
   });
 
-  test("mapError passes an MCPError through + wraps a non-MCPError as telegram_api_failed", () => {
-    const e = new MCPError("telegram_api_failed", { reason: "auth_failed" });
-    expect(telegram.mapError(e, { tool: "telegram_send_message" })).toBe(e);
-    const wrapped = telegram.mapError(new Error("boom"), { tool: "telegram_send_message" });
-    expect((wrapped as MCPError).errorName).toBe("telegram_api_failed");
-    expect((wrapped as MCPError).errorData.reason).toBe("api_error");
-  });
-
   test("authorize is a no-op (no scope; tier proxy-enforced; token presence in resolveCredential)", () => {
     expect(() => telegram.authorize(TOOL_REGISTRY["telegram_send_message"], {})).not.toThrow();
   });
@@ -216,14 +172,6 @@ describe("Source descriptor — discord (v1.69)", () => {
 
   test("sourceFor('discord') resolves the discord connector", () => {
     expect(sourceFor({ source: "discord" })).toBe(discord);
-  });
-
-  test("mapError passes an MCPError through + wraps a non-MCPError as discord_api_failed", () => {
-    const e = new MCPError("discord_api_failed", { reason: "auth_failed" });
-    expect(discord.mapError(e, { tool: "discord_send_message" })).toBe(e);
-    const wrapped = discord.mapError(new Error("boom"), { tool: "discord_send_message" });
-    expect((wrapped as MCPError).errorName).toBe("discord_api_failed");
-    expect((wrapped as MCPError).errorData.reason).toBe("api_error");
   });
 
   test("authorize is a no-op (no scope; tier proxy-enforced; token presence in resolveCredential)", () => {
@@ -248,14 +196,6 @@ describe("Source descriptor — slack (v1.95)", () => {
 
   test("sourceFor('slack') resolves the slack connector", () => {
     expect(sourceFor({ source: "slack" })).toBe(slack);
-  });
-
-  test("mapError passes an MCPError through + wraps a non-MCPError as slack_api_failed", () => {
-    const e = new MCPError("slack_api_failed", { reason: "auth_failed" });
-    expect(slack.mapError(e, { tool: "slack_send_message" })).toBe(e);
-    const wrapped = slack.mapError(new Error("boom"), { tool: "slack_send_message" });
-    expect((wrapped as MCPError).errorName).toBe("slack_api_failed");
-    expect((wrapped as MCPError).errorData.reason).toBe("api_error");
   });
 
   test("authorize is a no-op (no scope; tier proxy-enforced; token presence in resolveCredential)", () => {
@@ -289,14 +229,6 @@ describe("Source descriptor — notion (v1.78 — the 3rd OAuth source)", () => 
     }
   });
 
-  test("mapError passes an MCPError through + wraps a non-MCPError as notion_api_failed", () => {
-    const e = new MCPError("notion_api_failed", { reason: "not_found" });
-    expect(notion.mapError(e, { tool: "notion_get_page" })).toBe(e);
-    const wrapped = notion.mapError(new Error("boom"), { tool: "notion_get_page" });
-    expect((wrapped as MCPError).errorName).toBe("notion_api_failed");
-    expect((wrapped as MCPError).errorData.reason).toBe("api_error");
-  });
-
   test("authorize is a no-op (no scope; tier proxy-enforced; token presence in resolveCredential)", () => {
     expect(() => notion.authorize(TOOL_REGISTRY["notion_get_page"], {})).not.toThrow();
   });
@@ -326,14 +258,6 @@ describe("Source descriptor — x (v1.113 — the 4th OAuth source; ZERO tools y
     for (const k of ["name", "description", "text", "username"]) {
       expect(x.skipFields.has(k)).toBe(false);
     }
-  });
-
-  test("mapError passes an MCPError through + wraps a non-MCPError as x_api_failed", () => {
-    const e = new MCPError("x_api_failed", { reason: "consent_required" });
-    expect(x.mapError(e, { tool: "x_placeholder" })).toBe(e);
-    const wrapped = x.mapError(new Error("boom"), { tool: "x_placeholder" });
-    expect((wrapped as MCPError).errorName).toBe("x_api_failed");
-    expect((wrapped as MCPError).errorData.reason).toBe("api_error");
   });
 
   test("authorize is a no-op (fixed MVP scopes at consent; tier proxy-enforced)", () => {
@@ -468,14 +392,6 @@ describe("Source descriptor — github (v1.70 G2 — the 2nd OAuth source skelet
 
   test("authorize is a no-op (scopes are requested wholesale at consent)", () => {
     expect(() => github.authorize(undefined, {})).not.toThrow();
-  });
-
-  test("mapError passes an MCPError through + wraps a non-MCPError as github_api_failed", () => {
-    const e = new MCPError("github_api_failed", { reason: "not_found" });
-    expect(github.mapError(e, { tool: "github_get_issue" })).toBe(e);
-    const wrapped = github.mapError(new Error("boom"), { tool: "github_get_issue" });
-    expect((wrapped as MCPError).errorName).toBe("github_api_failed");
-    expect((wrapped as MCPError).errorData.reason).toBe("api_error");
   });
 
   test("skipFields carries opaque github ids but NOT attacker-influenced free text", () => {

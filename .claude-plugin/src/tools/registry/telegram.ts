@@ -7,8 +7,10 @@
 // through `withNonOAuthContext`. `requiredScopes: []` (no OAuth — the bot token is read
 // from the service-token store). `min_tier: "share"` (an egress send to a recipient —
 // the gmail_send / line_push_message tier). `direction: "outbound-write"` marks it for
-// the egress gates (fired handler-called via enforceTelegramEgressGates this cycle).
+// the egress gates — PIPELINE-FIRED via the def's descriptor field (B6.1 wave A1): the
+// non-OAuth choke point runs extract → gate (tools/egress-pipeline.ts) BEFORE the handler.
 
+import { telegramEgressDescriptor } from "../egress-pipeline";
 import * as handlers from "../handlers";
 import type { ToolDef } from "./types";
 
@@ -47,6 +49,7 @@ export const telegramTools: Record<string, ToolDef> = {
     min_tier: "share",
     source: "telegram",
     direction: "outbound-write",
+    egress: telegramEgressDescriptor,
   },
   telegram_get_updates: {
     name: "telegram_get_updates",

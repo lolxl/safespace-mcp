@@ -33,11 +33,8 @@ import {
   getVideoTargetAllowlistState,
   summarizeVideoTargetAllowlist,
 } from "./youtube-video-targets";
-import { lineAllowlistSummary } from "./line-recipient-allowlist";
-import { telegramAllowlistSummary } from "./telegram-recipient-allowlist";
-import { discordAllowlistSummary } from "./discord-recipient-allowlist";
-import { slackAllowlistSummary } from "./slack-recipient-allowlist";
-import { mattermostAllowlistSummary } from "./mattermost-recipient-allowlist";
+import { SERVICE_TOKEN_PACKS } from "../tools/service-token-pack";
+import { makeServiceTokenRecipientAllowlist } from "./service-token-recipient-allowlist";
 import {
   getGithubWriteAllowlistState,
   summarizeGithubWriteAllowlist,
@@ -56,6 +53,16 @@ import {
 } from "./x-post-allowlist";
 import { fsRootsSummary } from "./fs-gate";
 import { webfetchAllowlistSummary } from "./url-gate";
+
+/** The 5 service-token connectors share the off→ALLOW posture and one ordered pack list.
+ *  Build each pack's live count-only summary reader ONCE (mirrors the thin modules' own
+ *  module-scope singletons; the factory is a pure closure that reads env per-call), so the
+ *  posture rows are DERIVED from SERVICE_TOKEN_PACKS — a new service-token connector's pack
+ *  auto-enrolls here in the same locked order, with no hand-added row to drift. */
+const SERVICE_TOKEN_POSTURE = SERVICE_TOKEN_PACKS.map((pack) => ({
+  id: pack.id,
+  summary: makeServiceTokenRecipientAllowlist(pack).summary,
+}));
 
 export type EgressStatus = "pass" | "warn";
 
@@ -121,11 +128,12 @@ export async function evaluateEgressPosture(): Promise<EgressRow[]> {
   const tasksDelete = summarizeTasksDeleteAllowlist(getTasksDeleteAllowlistState());
   const ytComment = summarizeCommentTargetAllowlist(getCommentTargetAllowlistState());
   const ytVideo = summarizeVideoTargetAllowlist(getVideoTargetAllowlistState());
-  const line = lineAllowlistSummary();
-  const telegram = telegramAllowlistSummary();
-  const discord = discordAllowlistSummary();
-  const slack = slackAllowlistSummary();
-  const mattermost = mattermostAllowlistSummary();
+  // The 5 service-token rows (line, telegram, discord, slack, mattermost) — derived from
+  // SERVICE_TOKEN_PACKS in its locked order; all share the off→ALLOW posture.
+  const serviceTokenRows = SERVICE_TOKEN_POSTURE.map(({ id, summary }) => {
+    const s = summary();
+    return classifyEgress(id, s.kind === "active", s.id_count, "allow", auto);
+  });
   const ghWrite = summarizeGithubWriteAllowlist(getGithubWriteAllowlistState());
   const ghMerge = summarizeGithubMergeAllowlist(getGithubMergeAllowlistState());
   const ghApprove = summarizeGithubApproveAllowlist(getGithubApproveAllowlistState());
@@ -144,11 +152,7 @@ export async function evaluateEgressPosture(): Promise<EgressRow[]> {
     classifyEgress("tasks-delete", tasksDelete.kind === "active", tasksDelete.count, "allow", auto),
     classifyEgress("youtube-comment", ytComment.kind === "active", ytComment.count, "deny", auto),
     classifyEgress("youtube-video", ytVideo.kind === "active", ytVideo.count, "deny", auto),
-    classifyEgress("line", line.kind === "active", line.id_count, "allow", auto),
-    classifyEgress("telegram", telegram.kind === "active", telegram.id_count, "allow", auto),
-    classifyEgress("discord", discord.kind === "active", discord.id_count, "allow", auto),
-    classifyEgress("slack", slack.kind === "active", slack.id_count, "allow", auto),
-    classifyEgress("mattermost", mattermost.kind === "active", mattermost.id_count, "allow", auto),
+    ...serviceTokenRows,
     classifyEgress("github-write", ghWrite.kind === "active", ghWrite.count, "deny", auto),
     classifyEgress("github-merge", ghMerge.kind === "active", ghMerge.count, "deny", auto),
     classifyEgress("github-approve", ghApprove.kind === "active", ghApprove.count, "deny", auto),

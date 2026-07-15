@@ -48,8 +48,9 @@ export async function inboxRead(
     result = await read(file, provider, afterSeq, limit, now());
   } catch (e) {
     // A corrupt / unreadable store → fail-loud throw → a closed-set MCPError (no content
-    // echoed). The NonOAuth choke point does not run source.mapError (B6.1), so the
-    // handler maps it here, mirroring web_fetch / fs_read.
+    // echoed). The NonOAuth choke point has no error-mapping strategy (a future B6.1
+    // shared pipeline would add one), so the handler maps it here, mirroring
+    // web_fetch / fs_read.
     if (e instanceof MCPError) throw e;
     throw new MCPError("inbox_read_failed", { reason: "store_unavailable" });
   }

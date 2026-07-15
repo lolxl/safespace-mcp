@@ -2,6 +2,9 @@
 // auth/github/client.ts). The X OAuth tools use these for authenticated GETs/POSTs
 // against `https://api.x.com{path}`.
 //
+// B6.1-B — this client IS the connector's error mapper (`x_api_failed`, closed-set
+// reasons): the contract is stated in src/auth/http/connector-error-contract.ts.
+//
 // SECURITY / no-leak:
 //   - the bearer token is placed ONLY in the Authorization header, never logged or
 //     echoed; on ANY failure this throws ONLY `x_api_failed{reason}` with a CLOSED-SET

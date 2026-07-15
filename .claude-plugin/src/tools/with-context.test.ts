@@ -344,7 +344,10 @@ describe("withToolContext — HTTP error mapping", () => {
     await expect(
       withToolContext(
         "gmail_send",
-        { account_id: "alice@example.com", to: "x", subject: "x", body: "x" },
+        // B6.1 wave A3+D — gmail_send is PIPELINE_EGRESS; the choke point fires the gate
+        // before the handler, so the args must pass it (valid recipient) for the handler's
+        // thrown MCPError to be the one under test.
+        { account_id: "alice@example.com", to: "x@example.com", subject: "x", body: "x" },
         handler,
         fk.deps,
       ),
@@ -1062,9 +1065,14 @@ describe("withToolContext — scope mismatch auto-detect", () => {
 describe("withToolContext — v1.15 Phase 3 resolvedRecipientHash threading", () => {
   let tmpDir: string;
   let prevConfigDir: string | undefined;
+  // B6.1 wave A2b — the commentPostMeta plumbing test below drives youtube_comment_reply,
+  // whose egress gate is now PIPELINE-FIRED (allowlist runs pre-handler); save/restore
+  // its allowlist env so the test can let the REAL gate pass.
+  let prevYtCommentTargets: string | undefined;
 
   beforeEach(async () => {
     prevConfigDir = process.env.SAFESPACE_CONFIG_DIR;
+    prevYtCommentTargets = process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS;
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "safespace-p3-with-ctx-"));
     process.env.SAFESPACE_CONFIG_DIR = tmpDir;
   });
@@ -1072,6 +1080,9 @@ describe("withToolContext — v1.15 Phase 3 resolvedRecipientHash threading", ()
   afterEach(async () => {
     if (prevConfigDir === undefined) delete process.env.SAFESPACE_CONFIG_DIR;
     else process.env.SAFESPACE_CONFIG_DIR = prevConfigDir;
+    if (prevYtCommentTargets === undefined) delete process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS;
+    else process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = prevYtCommentTargets;
+    (await import("../policy/youtube-comment-targets")).__internal.resetSingletons();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -1093,6 +1104,7 @@ describe("withToolContext — v1.15 Phase 3 resolvedRecipientHash threading", ()
     const fk = makeDeps();
     const HASH = "b".repeat(64);
     const handler = async (ctx: ToolContext) => {
+      ctx.egressGateFired = true; // v1.116 — stub stands in for a gate-calling outbound handler
       ctx.audit.record("resolvedRecipientHash", HASH);
       return { ok: true };
     };
@@ -1161,6 +1173,11 @@ describe("withToolContext — v1.15 Phase 3 resolvedRecipientHash threading", ()
   // BEFORE it leaks into the handler tests (handlers stub auditEnd via the
   // ctx callback; this end-to-end test wires the real audit serializer).
   test("recordCommentPostMeta plumbing: handler-set meta reaches auditEnd (present) and absent → fields not serialized", async () => {
+    // B6.1 wave A2b — youtube_comment_reply is now pipeline-gated (allowlist fires at
+    // the choke point BEFORE the handler): allowlist the video so the REAL gate passes
+    // and the mock handler (the assertion target) runs. Assertions unchanged.
+    process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = "video:dQw4w9WgXcQ";
+    (await import("../policy/youtube-comment-targets")).__internal.resetSingletons();
     // ─── Positive path: handler CALLS recordCommentPostMeta ──────────
     const fkA = makeDeps();
     const VHASH = "d".repeat(64);
@@ -1780,9 +1797,14 @@ describe("withToolContext — v1.15 Phase 3 resolvedRecipientHash threading", ()
 describe("withToolContext — v1.24 Phase 1 Item 2 error_code stamping", () => {
   let tmpDir: string;
   let prevConfigDir: string | undefined;
+  // B6.1 wave A2b — the -32025 stamping test below drives youtube_video_comment_post,
+  // whose egress gate is now PIPELINE-FIRED; save/restore its allowlist env so the
+  // test can let the REAL gate pass and reach the mock handler.
+  let prevYtCommentTargets: string | undefined;
 
   beforeEach(async () => {
     prevConfigDir = process.env.SAFESPACE_CONFIG_DIR;
+    prevYtCommentTargets = process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS;
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "safespace-v124-p1-i2-"));
     process.env.SAFESPACE_CONFIG_DIR = tmpDir;
   });
@@ -1790,6 +1812,9 @@ describe("withToolContext — v1.24 Phase 1 Item 2 error_code stamping", () => {
   afterEach(async () => {
     if (prevConfigDir === undefined) delete process.env.SAFESPACE_CONFIG_DIR;
     else process.env.SAFESPACE_CONFIG_DIR = prevConfigDir;
+    if (prevYtCommentTargets === undefined) delete process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS;
+    else process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = prevYtCommentTargets;
+    (await import("../policy/youtube-comment-targets")).__internal.resetSingletons();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -1839,7 +1864,9 @@ describe("withToolContext — v1.24 Phase 1 Item 2 error_code stamping", () => {
     try {
       await withToolContext(
         "gmail_send",
-        { to: "alice", subject: "s", body: "b", account_id: "alice@example.com" },
+        // B6.1 wave A3+D — valid recipient so the pipeline gate passes and the handler's
+        // thrown MCPError (the error_code under test) is what reaches the audit row.
+        { to: "alice@example.com", subject: "s", body: "b", account_id: "alice@example.com" },
         handler,
         fk.deps,
       );
@@ -1853,6 +1880,12 @@ describe("withToolContext — v1.24 Phase 1 Item 2 error_code stamping", () => {
   });
 
   test("handler throws MCPError('comment_burst_limit_exceeded') → audit row carries error_code: -32025 (v1.23 forward-compat safety net LIVE)", async () => {
+    // B6.1 wave A2b — youtube_video_comment_post is now pipeline-gated (extract +
+    // allowlist fire at the choke point BEFORE the handler): use a VALID, allowlisted
+    // video_id so the real pipeline passes and the mock handler throws the -32025 this
+    // test stamps. Assertion unchanged.
+    process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = "video:dQw4w9WgXcQ";
+    (await import("../policy/youtube-comment-targets")).__internal.resetSingletons();
     const fk = makeDeps();
     const handler = async () => {
       throw new MCPError("comment_burst_limit_exceeded", { tool: "youtube_video_comment_post" });
@@ -1860,7 +1893,7 @@ describe("withToolContext — v1.24 Phase 1 Item 2 error_code stamping", () => {
     try {
       await withToolContext(
         "youtube_video_comment_post",
-        { video_id: "abc", text: "hi", account_id: "alice@example.com" },
+        { video_id: "dQw4w9WgXcQ", text: "hi", account_id: "alice@example.com" },
         handler,
         fk.deps,
       );
@@ -2061,7 +2094,8 @@ describe("withToolContext — v1.52 F1 write/delete burst guard wiring", () => {
     process.env.SAFESPACE_WRITE_BURST_LIMIT = "2";
     const fk = makeDeps();
     let handlerCalls = 0;
-    const handler = async () => {
+    const handler = async (ctx: ToolContext) => {
+      ctx.egressGateFired = true; // v1.116 — stub stands in for a gate-calling outbound handler
       handlerCalls++;
       return { ok: true };
     };
@@ -2208,7 +2242,8 @@ describe("withToolContext — v1.54 F4 autonomous permanent-delete deny wiring",
     process.env.SAFESPACE_AUTONOMOUS = "true";
     const fk = makeDeps();
     let handlerCalls = 0;
-    const handler = async () => {
+    const handler = async (ctx: ToolContext) => {
+      ctx.egressGateFired = true; // v1.116 — stub stands in for a gate-calling outbound handler
       handlerCalls++;
       return { ok: true };
     };
@@ -2271,10 +2306,19 @@ describe("withToolContext — v1.56 F3b tainted_source audit threading", () => {
   test("handler calls ctx.recordTaintedSource → audit row carries tainted_source: true", async () => {
     const fk = makeDeps();
     const handler = async (ctx: ToolContext) => {
+      ctx.egressGateFired = true; // v1.116 — stub stands in for a gate-calling outbound handler
       ctx.audit.record("taintedSource");
       return { ok: true };
     };
-    await withToolContext("gmail_send", { account_id: "alice@example.com" }, handler, fk.deps);
+    // B6.1 wave A3+D — gmail_send is PIPELINE_EGRESS; the choke point fires the gate before
+    // the stub handler, so pass valid clean args (the gate records nothing on them → the row
+    // carries only what the stub records).
+    await withToolContext(
+      "gmail_send",
+      { account_id: "alice@example.com", to: "bob@example.com", subject: "s", body: "hi" },
+      handler,
+      fk.deps,
+    );
     const rows = await readRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]!.tainted_source).toBe(true);
@@ -2282,8 +2326,19 @@ describe("withToolContext — v1.56 F3b tainted_source audit threading", () => {
 
   test("handler that does NOT call it → tainted_source ABSENT (byte-stable)", async () => {
     const fk = makeDeps();
-    const handler = async () => ({ ok: true });
-    await withToolContext("gmail_send", { account_id: "alice@example.com" }, handler, fk.deps);
+    const handler = async (ctx: ToolContext) => {
+      ctx.egressGateFired = true; // v1.116 — stub stands in for a gate-calling outbound handler
+      return { ok: true };
+    };
+    // B6.1 wave A3+D — gmail_send is PIPELINE_EGRESS; the choke point fires the gate before
+    // the stub handler, so pass valid clean args (the gate records nothing on them → the row
+    // carries only what the stub records).
+    await withToolContext(
+      "gmail_send",
+      { account_id: "alice@example.com", to: "bob@example.com", subject: "s", body: "hi" },
+      handler,
+      fk.deps,
+    );
     const rows = await readRows();
     expect(rows).toHaveLength(1);
     expect("tainted_source" in rows[0]!).toBe(false);
@@ -2292,10 +2347,19 @@ describe("withToolContext — v1.56 F3b tainted_source audit threading", () => {
   test("v1.57 F3a — handler calls ctx.recordOutboundSecretShape → row carries outbound_secret_shape: <class>", async () => {
     const fk = makeDeps();
     const handler = async (ctx: ToolContext) => {
+      ctx.egressGateFired = true; // v1.116 — stub stands in for a gate-calling outbound handler
       ctx.audit.record("outboundSecretShape", "private_key");
       return { ok: true };
     };
-    await withToolContext("gmail_send", { account_id: "alice@example.com" }, handler, fk.deps);
+    // B6.1 wave A3+D — gmail_send is PIPELINE_EGRESS; the choke point fires the gate before
+    // the stub handler, so pass valid clean args (the gate records nothing on them → the row
+    // carries only what the stub records).
+    await withToolContext(
+      "gmail_send",
+      { account_id: "alice@example.com", to: "bob@example.com", subject: "s", body: "hi" },
+      handler,
+      fk.deps,
+    );
     const rows = await readRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]!.outbound_secret_shape).toBe("private_key");
@@ -2303,8 +2367,19 @@ describe("withToolContext — v1.56 F3b tainted_source audit threading", () => {
 
   test("v1.57 F3a — handler that does NOT call it → outbound_secret_shape ABSENT (byte-stable)", async () => {
     const fk = makeDeps();
-    const handler = async () => ({ ok: true });
-    await withToolContext("gmail_send", { account_id: "alice@example.com" }, handler, fk.deps);
+    const handler = async (ctx: ToolContext) => {
+      ctx.egressGateFired = true; // v1.116 — stub stands in for a gate-calling outbound handler
+      return { ok: true };
+    };
+    // B6.1 wave A3+D — gmail_send is PIPELINE_EGRESS; the choke point fires the gate before
+    // the stub handler, so pass valid clean args (the gate records nothing on them → the row
+    // carries only what the stub records).
+    await withToolContext(
+      "gmail_send",
+      { account_id: "alice@example.com", to: "bob@example.com", subject: "s", body: "hi" },
+      handler,
+      fk.deps,
+    );
     const rows = await readRows();
     expect("outbound_secret_shape" in rows[0]!).toBe(false);
   });

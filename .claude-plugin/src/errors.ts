@@ -41,6 +41,20 @@ export type ErrorName =
   | "outbound_secret_rejected"
   | "url_blocked_by_policy"
   | "web_fetch_failed"
+  // ── `*_api_failed` brand set — FROZEN as of v1.118 (pack step 3, arch-review F8) ──
+  // The per-connector `*_api_failed` names — the class-B service-token cluster below
+  // (line / telegram / discord / slack / mattermost) PLUS the class-A OAuth connectors
+  // further down (github_api_failed / notion_api_failed / x_api_failed) — form a CLOSED
+  // 8-member set. Rationale: every connector so far minted its OWN brand code, growing
+  // this global, closed error taxonomy LINEARLY with connectors, across two hand-synced
+  // growth points (here + `ServiceTokenErrorName` in
+  // tools/handlers/service-token-fetch.ts). The set is now FROZEN: a FUTURE connector
+  // must NOT add a 9th `*_api_failed` name — it reuses a shared generic code to be
+  // designed at that time through the owner gate. Enforced by the sentinel in
+  // errors.test.ts ("*_api_failed brand set — FROZEN"); adding a new brand name here
+  // fails that sentinel until the freeze is revisited at the owner gate.
+  // (Work-order note: pack step 3 named 7 members and omitted notion_api_failed; the
+  // ERROR_CODES table below is the source of truth — the real frozen set is these 8.)
   | "line_api_failed"
   | "telegram_api_failed"
   | "discord_api_failed"
@@ -59,6 +73,14 @@ export type ErrorName =
   | "egress_destination_blocked"
   | "inbox_read_failed"
   | "internal_routing_error";
+
+/** B6.1-B — the FROZEN `*_api_failed` brand set as a TYPE, derived from the union
+ *  above by suffix (template-literal Extract) so it can NEVER drift from ErrorName:
+ *  adding a 9th `*_api_failed` member up there automatically widens this type and
+ *  fails the errors.test.ts freeze sentinel. The authoritative statement of the
+ *  client-layer error-mapping CONTRACT (who maps, where, and the three deliberate
+ *  handler-level exceptions) lives in src/auth/http/connector-error-contract.ts. */
+export type ConnectorApiFailedName = Extract<ErrorName, `${string}_api_failed`>;
 
 interface Spec {
   code: number;
@@ -288,11 +310,11 @@ export const ERROR_CODES: Record<ErrorName, Spec> = {
   // invariant tripwires. A should-never-fire internal misconfiguration (unknown
   // ToolDef.source, a handler that received the wrong credential kind/provider,
   // or an envelope choke-point / resolveCredential invariant breach).
-  // errorData.reason ∈ {unknown_source, credential_mismatch, invariant_violation}
-  // (closed set). NEVER echoes the bogus source string, which credential
-  // kind/provider arrived, or which invariant fired — those details must not
+  // errorData.reason ∈ {unknown_source, credential_mismatch, invariant_violation,
+  // egress_gate_not_fired} (closed set). NEVER echoes the bogus source string, which
+  // credential kind/provider arrived, or which invariant fired — those details must not
   // reach a client. -32054 is reserved by an in-flight X-connector PR; this takes -32055.
-  internal_routing_error: { code: -32055, recovery: "Internal source-routing misconfiguration; this is a bug — report it. errorData.reason ∈ {unknown_source, credential_mismatch, invariant_violation}. Not a user-actionable condition (no tool args or env can fix it)." },
+  internal_routing_error: { code: -32055, recovery: "Internal source-routing misconfiguration; this is a bug — report it. errorData.reason ∈ {unknown_source, credential_mismatch, invariant_violation, egress_gate_not_fired}. Not a user-actionable condition (no tool args or env can fix it)." },
 };
 
 export class MCPError extends Error {

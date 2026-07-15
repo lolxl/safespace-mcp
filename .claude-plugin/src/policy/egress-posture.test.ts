@@ -148,3 +148,52 @@ describe("evaluateEgressPosture", () => {
     expect(joined).not.toContain("internal.corp");
   });
 });
+
+// Pack-step-2 byte-identity PIN: the 5 service-token rows are being re-derived from
+// SERVICE_TOKEN_PACKS. This locks their exact ORDER + exact detail strings so the
+// derivation cannot silently drift the `doctor --posture` output. Hermetic over ALL 5
+// connectors' recipient env vars (the outer ENV_VARS list omits slack + mattermost).
+describe("service-token posture rows — byte-identity pin (pack step 2)", () => {
+  const ST_VARS = [
+    "SAFESPACE_LINE_RECIPIENT_ALLOW", "SAFESPACE_LINE_RECIPIENT_ALLOW_EXTRA",
+    "SAFESPACE_TELEGRAM_RECIPIENT_ALLOW", "SAFESPACE_TELEGRAM_RECIPIENT_ALLOW_EXTRA",
+    "SAFESPACE_DISCORD_RECIPIENT_ALLOW", "SAFESPACE_DISCORD_RECIPIENT_ALLOW_EXTRA",
+    "SAFESPACE_SLACK_RECIPIENT_ALLOW", "SAFESPACE_SLACK_RECIPIENT_ALLOW_EXTRA",
+    "SAFESPACE_MATTERMOST_RECIPIENT_ALLOW", "SAFESPACE_MATTERMOST_RECIPIENT_ALLOW_EXTRA",
+  ] as const;
+  const stSaved: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    for (const v of ST_VARS) { stSaved[v] = process.env[v]; delete process.env[v]; }
+  });
+  afterEach(() => {
+    for (const v of ST_VARS) {
+      if (stSaved[v] === undefined) delete process.env[v];
+      else process.env[v] = stSaved[v];
+    }
+  });
+
+  const OPEN = "OPEN (unset + interactive → unrestricted; set the allowlist or enable SAFESPACE_AUTONOMOUS)";
+
+  test("order is line, telegram, discord, slack, mattermost at indices 4..8", async () => {
+    const rows = await evaluateEgressPosture();
+    expect(rows.slice(4, 9).map((r) => r.connector)).toEqual([
+      "line", "telegram", "discord", "slack", "mattermost",
+    ]);
+  });
+
+  test("all-unset + interactive → each service-token row is warn/OPEN (exact detail)", async () => {
+    const rows = await evaluateEgressPosture();
+    for (const name of ["line", "telegram", "discord", "slack", "mattermost"]) {
+      const row = rows.find((r) => r.connector === name)!;
+      expect(row.status, name).toBe("warn");
+      expect(row.detail, name).toBe(OPEN);
+    }
+  });
+
+  test("a populated line allowlist → restricted pass with the exact count string", async () => {
+    process.env.SAFESPACE_LINE_RECIPIENT_ALLOW = "U" + "0".repeat(32);
+    const row = (await evaluateEgressPosture()).find((r) => r.connector === "line")!;
+    expect(row.status).toBe("pass");
+    expect(row.detail).toBe("restricted — 1 entry allowlisted");
+  });
+});

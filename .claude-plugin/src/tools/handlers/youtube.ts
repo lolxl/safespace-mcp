@@ -12,11 +12,13 @@ import { getYoutubeSearchBurstLimit } from "../../policy/youtube-search-burst";
 import { isYoutubeAnalyticsMonetaryEnabled } from "../../policy/youtube-analytics-monetary";
 import type { ToolContext } from "../types";
 import type { VideoMutationAuditMeta } from "../../audit";
-import { checkCommentBurst, incrementCommentBurst } from "../../policy/youtube-comment-burst";
-import { getCommentTargetAllowlistState, isCommentTargetAllowed } from "../../policy/youtube-comment-targets";
-import { getVideoTargetAllowlistState, isVideoTargetAllowed } from "../../policy/youtube-video-targets";
-import { enforceOutboundSecret } from "../egress";
-import { outboundSanitize } from "../../sanitize/outbound";
+// B6.1 wave A2b — the comment allowlist / burst PRE-check / outbound-sanitize gate +
+// the video-update allowlist / per-field sanitize / F3a gate MOVED to the pipeline-
+// fired composite wrappers (tools/egress.ts, fired by withToolContext via each tool's
+// egress descriptor). The handlers keep ONLY the success-only burst INCREMENT + read
+// the gate's sanitized bytes off ctx.egress (requireEgressResult).
+import { incrementCommentBurst } from "../../policy/youtube-comment-burst";
+import { requireEgressResult } from "../egress-pipeline";
 
 import { requireGoogle, clampYoutubeMaxResults, sha256Hex, HEADER_INJECTION_RE } from "./shared";
 
@@ -498,32 +500,17 @@ const YOUTUBE_COMMENT_ID_RE = /^[A-Za-z0-9_.\-]{1,256}$/;
 const YOUTUBE_FORCE_SSL_SCOPE_HANDLERS =
   "https://www.googleapis.com/auth/youtube.force-ssl";
 
-/**
- * `youtube_video_comment_post` — WRITE TIER. POST a top-level comment to
- * a YouTube video. PUBLIC + PERMANENT + identity-tied + spam-sensitive.
- *
- * Gate order (FAIL-FAST sequencing):
- *   1. Input validation (video_id regex, text non-empty, channel_id regex
- *      if present) — RAW shape errors throw plain `Error` (NOT MCPError),
- *      same convention as v1.13 calendar / v1.15 contacts handlers.
- *   2. Tier check — defense-in-depth (proxy normally hides write tools at
- *      tier=read; if a caller bypasses, we catch + audit + throw here).
- *   3. Allowlist resolution — `video:<id>` direct match (first-cut; design
- *      §4.1.1 footnote: NO channel: / playlist: resolution in Phase 2b —
- *      revisit if quota measurement shows pain). Default-empty hard-deny.
- *   4. Burst-limit pre-check (NOT increment yet).
- *   5. Outbound sanitize on text (6-step pipeline; throws on reject).
- *   6. Construct requestBody LITERALLY (NEGATIVE sentinel: 15-forbidden).
- *   7. SDK call commentThreads.insert.
- *   8. ON SUCCESS — increment burst counter; audit allowed metadata.
- *
- * Quota cost: 50 units / call (commentThreads.insert). Audit records
- * via `target_video_hash` + `comment_length` + `policy_decision`. */
-export async function youtubeVideoCommentPost(
-  ctx: ToolContext,
-  args: Record<string, unknown>,
-): Promise<unknown> {
-  // ─── 1. Input validation ────────────────────────────────────────────
+/** B6.1 wave A2b — the SINGLE-SOURCE youtube_video_comment_post input validator:
+ *  video_id (11-char) + non-empty text + optional channel_id (24-char). Messages
+ *  VERBATIM from the pre-A2b inline block. Called by BOTH the pipeline descriptor's
+ *  `extract` (tools/egress-pipeline.ts — the production gate input) and the handler
+ *  below (defense-in-depth re-run of the same pure check), so the two can never
+ *  drift. Never echoes video_id / text. */
+export function validateYoutubeCommentPostArgs(args: Record<string, unknown>): {
+  videoId: string;
+  text: string;
+  channelId?: string;
+} {
   if (typeof args.video_id !== "string") {
     throw new Error("youtube_video_comment_post: 'video_id' must be a string");
   }
@@ -554,8 +541,42 @@ export async function youtubeVideoCommentPost(
     }
     channelId = args.channel_id;
   }
-  const videoId = args.video_id;
-  const text = args.text;
+  return channelId === undefined
+    ? { videoId: args.video_id, text: args.text }
+    : { videoId: args.video_id, text: args.text, channelId };
+}
+
+/**
+ * `youtube_video_comment_post` — WRITE TIER. POST a top-level comment to
+ * a YouTube video. PUBLIC + PERMANENT + identity-tied + spam-sensitive.
+ *
+ * Gate order (FAIL-FAST sequencing):
+ *   1. Input validation (video_id regex, text non-empty, channel_id regex
+ *      if present) — RAW shape errors throw plain `Error` (NOT MCPError). SINGLE-
+ *      SOURCE validateYoutubeCommentPostArgs, which the pipeline's `extract` also
+ *      ran; re-run here for defense-in-depth (pure, identical result).
+ *   2. Tier check — defense-in-depth (proxy normally hides write tools at
+ *      tier=read; if a caller bypasses, we catch + audit + throw here).
+ *   3. Egress gate — PIPELINE-FIRED (B6.1 wave A2b): the default-empty hard-deny
+ *      comment allowlist → per-session burst PRE-check → 6-step outbound-sanitize
+ *      REJECT all run at the withToolContext choke point via this tool's egress
+ *      descriptor (enforceYoutubeCommentEgressGates, tools/egress.ts) BEFORE this
+ *      handler; the handler reads the gate's SANITIZED text off ctx.egress and must
+ *      NOT call the gate (anti-double-fire, egress-callsite.test.ts).
+ *   4. Construct requestBody LITERALLY (NEGATIVE sentinel: 15-forbidden).
+ *   5. SDK call commentThreads.insert.
+ *   6. ON SUCCESS — increment burst counter (success-only STAYS here); audit
+ *      allowed metadata is recorded BEFORE the SDK call.
+ *
+ * Quota cost: 50 units / call (commentThreads.insert). Audit records
+ * via `target_video_hash` + `comment_length` + `policy_decision`. */
+export async function youtubeVideoCommentPost(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  // ─── 1. Input validation (defense-in-depth; the pipeline's extract already ran
+  //        the SAME validator) ─────────────────────────────────────────
+  const { videoId, text, channelId } = validateYoutubeCommentPostArgs(args);
   const videoHash = sha256Hex(videoId);
   const textLen = text.length;
 
@@ -579,57 +600,16 @@ export async function youtubeVideoCommentPost(
     });
   }
 
-  // ─── 3. Allowlist gate ─────────────────────────────────────────────
-  // Default-empty hard-deny per youtube-comment-targets.ts +
-  // design §4.1 sec-rev hook #9. First-cut: direct `video:<id>` match only
-  // (no channel: / playlist: resolution — see design §4.1.1 footnote).
-  const state = getCommentTargetAllowlistState();
-  const allowed = isCommentTargetAllowed("video", videoId, state);
-  if (!allowed) {
-    ctx.audit.record("commentPostMeta", {
-      target_video_hash: videoHash,
-      comment_length: textLen,
-      policy_decision:
-        state.kind === "off" ? "denied_no_allowlist" : "denied_not_in_allowlist",
-    });
-    // Generic message — NO video_id echo per design §8 (PII oracle defense).
-    throw new MCPError("comment_target_denied_by_policy", {
-      tool: "youtube_video_comment_post",
-    });
-  }
+  // ─── 3. Egress gate is PIPELINE-FIRED ──────────────────────────────
+  // The allowlist → burst PRE-check → outbound-sanitize gate now runs at the
+  // withToolContext choke point via this tool's egress descriptor (B6.1 wave A2b,
+  // enforceYoutubeCommentEgressGates in tools/egress.ts) BEFORE this handler; the
+  // handler must NOT call the gate itself (anti-double-fire — egress-callsite.test.ts).
+  // Read the gate's SANITIZED text off ctx.egress — the vetted bytes for the wire
+  // (never a local recomputation; no TOCTOU).
+  const sanitizedText = requireEgressResult(ctx, "youtube-comment").body;
 
-  // ─── 4. Burst-limit pre-check (NO increment yet) ────────────────────
-  // Per design hook #18 + Phase 2a module spec: success-only increment so
-  // denied calls don't consume budget. Failed SDK calls also don't consume
-  // (allowlist + sanitize bounded the retry storm upstream).
-  const burst = checkCommentBurst();
-  if (!burst.ok) {
-    ctx.audit.record("commentPostMeta", {
-      target_video_hash: videoHash,
-      comment_length: textLen,
-      policy_decision: "denied_burst_limit",
-    });
-    throw new MCPError("comment_burst_limit_exceeded", {
-      tool: "youtube_video_comment_post",
-    });
-  }
-
-  // ─── 5. Outbound sanitize ──────────────────────────────────────────
-  // Throws MCPError("outbound_sanitize_rejected") on any of 5 reject
-  // reasons. Audit denial BEFORE re-raising (forensic completeness).
-  let sanitizedText: string;
-  try {
-    sanitizedText = outboundSanitize(text, { tool: "youtube_video_comment_post" });
-  } catch (err) {
-    ctx.audit.record("commentPostMeta", {
-      target_video_hash: videoHash,
-      comment_length: textLen,
-      policy_decision: "denied_outbound_sanitize_rejected",
-    });
-    throw err;
-  }
-
-  // ─── 6. Construct requestBody LITERALLY ────────────────────────────
+  // ─── 4. Construct requestBody LITERALLY ────────────────────────────
   // ALLOWED keys (per design §9 + sec-rev hook #11):
   //   snippet.videoId
   //   snippet.channelId          (optional caller-supplied)
@@ -660,19 +640,19 @@ export async function youtubeVideoCommentPost(
     snippet: outerSnippet,
   };
 
-  // ─── 7. Record allow-meta BEFORE the SDK call ─────────────────────
+  // ─── 5. Record allow-meta BEFORE the SDK call ─────────────────────
   // FORENSIC COMPLETENESS: record meta BEFORE SDK call. policy_decision="allowed"
-  // because all 4 gates (tier + scope + allowlist + burst) AND outbound sanitize
-  // passed. If SDK throws (Google 5xx, network), the meta is already captured —
-  // the audit row shows what Claude attempted + the failure status. Per design §7
-  // + PR #135 pre-merge review INFO-4 reconciliation.
+  // because the tier check (here) AND the pipeline-fired egress gate (allowlist +
+  // burst + outbound sanitize) passed. If SDK throws (Google 5xx, network), the
+  // meta is already captured — the audit row shows what Claude attempted + the
+  // failure status. Per design §7 + PR #135 pre-merge review INFO-4 reconciliation.
   ctx.audit.record("commentPostMeta", {
     target_video_hash: videoHash,
     comment_length: textLen,
     policy_decision: "allowed",
   });
 
-  // ─── 8. SDK call (burst counter increments only on real success) ──
+  // ─── 6. SDK call (burst counter increments only on real success) ──
   try {
     const yt = youtubeClientFromToken(requireGoogle(ctx).getAccessToken());
     const res = await yt.commentThreads.insert({
@@ -697,43 +677,19 @@ const YOUTUBE_CATEGORY_ID_RE = /^[0-9]{1,3}$/;
  *  YouTube enforces its own ~500-char total-tag limit server-side. */
 const YOUTUBE_VIDEO_MAX_TAGS = 50;
 
-/**
- * `youtube_video_update` — WRITE TIER. Update a video's PUBLIC snippet metadata
- * (title / description / tags) on a video YOUR channel owns (videos.update 403s
- * for videos you do not own). PUBLIC + identity-tied — a video's title /
- * description is the most visible, identity-defining text on the channel.
- *
- * REPLACE-by-part: SafeSpace sends ONLY `part: ["snippet"]`, so status /
- * privacy / madeForKids are STRUCTURALLY untouchable (no premature-publish /
- * unpublish path in v1). The snippet is constructed LITERALLY: `title` +
- * `category_id` are REQUIRED (the API mandates both when writing snippet);
- * `description` / `tags` are optional and OMITTING them CLEARS the existing
- * value — pass every field you want to keep. NO pre-fetch (avoids TOCTOU; read
- * current values via youtube_video_get parts=snippet first).
- *
- * Gate order (FAIL-FAST):
- *   1. Input validation (video_id / category_id regex; title non-empty;
- *      description/tags shape) — plain Error.
- *   2. Tier check (defense-in-depth) — record denied_tier, throw scope_mismatch.
- *   3. Target allowlist — SAFESPACE_YOUTUBE_VIDEO_TARGETS default-deny; miss →
- *      video_target_denied_by_policy (-32052), NO video_id echo.
- *   4. outboundSanitize each PUBLIC field (title, description, each tag) — on
- *      reject record denied_outbound_sanitize_rejected, re-raise (-32027).
- *   5. F3a secret-shape on the combined text — autonomous → -32035, else flag.
- *   6. Construct requestBody LITERALLY (NEGATIVE sentinel: snippet keys ⊆
- *      {title, categoryId, description?, tags?}; NO status, NO arbitrary keys).
- *   7. Record videoMutationMeta allowed BEFORE the SDK call.
- *   8. SDK videos.update. F1 universal write-burst auto-covers at the choke
- *      point (write-tier → write bucket).
- *
- * Quota: videos.update = 50 units / call. Audit records target_video_hash +
- * operation='video_update' + title_length (+ description_length / tag_count when
- * supplied) + policy_decision (NEVER the plaintext title/description/tags). */
-export async function youtubeVideoUpdate(
-  ctx: ToolContext,
-  args: Record<string, unknown>,
-): Promise<unknown> {
-  // ─── 1. Input validation ────────────────────────────────────────────
+/** B6.1 wave A2b — the SINGLE-SOURCE youtube_video_update input validator: video_id
+ *  (11-char) + non-empty title + numeric category_id + optional description / tags
+ *  (shape + 50-entry cap + non-empty entries). Messages VERBATIM from the pre-A2b
+ *  inline block. Called by BOTH the pipeline descriptor's `extract`
+ *  (tools/egress-pipeline.ts) and the handler below (defense-in-depth re-run), so the
+ *  two can never drift. Never echoes the field values. */
+export function validateYoutubeVideoUpdateArgs(args: Record<string, unknown>): {
+  videoId: string;
+  title: string;
+  categoryId: string;
+  description?: string;
+  tags?: string[];
+} {
   if (typeof args.video_id !== "string") {
     throw new Error("youtube_video_update: 'video_id' must be a string");
   }
@@ -787,12 +743,60 @@ export async function youtubeVideoUpdate(
     }
     tags = args.tags as string[];
   }
-  const videoId = args.video_id;
-  const title = args.title;
-  const categoryId = args.category_id;
+  return {
+    videoId: args.video_id,
+    title: args.title,
+    categoryId: args.category_id,
+    ...(description !== undefined ? { description } : {}),
+    ...(tags !== undefined ? { tags } : {}),
+  };
+}
+
+/**
+ * `youtube_video_update` — WRITE TIER. Update a video's PUBLIC snippet metadata
+ * (title / description / tags) on a video YOUR channel owns (videos.update 403s
+ * for videos you do not own). PUBLIC + identity-tied — a video's title /
+ * description is the most visible, identity-defining text on the channel.
+ *
+ * REPLACE-by-part: SafeSpace sends ONLY `part: ["snippet"]`, so status /
+ * privacy / madeForKids are STRUCTURALLY untouchable (no premature-publish /
+ * unpublish path in v1). The snippet is constructed LITERALLY: `title` +
+ * `category_id` are REQUIRED (the API mandates both when writing snippet);
+ * `description` / `tags` are optional and OMITTING them CLEARS the existing
+ * value — pass every field you want to keep. NO pre-fetch (avoids TOCTOU; read
+ * current values via youtube_video_get parts=snippet first).
+ *
+ * Gate order (FAIL-FAST):
+ *   1. Input validation (video_id / category_id regex; title non-empty;
+ *      description/tags shape) — plain Error, SINGLE-SOURCE validateYoutubeVideoUpdateArgs
+ *      (the pipeline's extract ran it too; re-run here defense-in-depth).
+ *   2. Tier check (defense-in-depth) — record denied_tier, throw scope_mismatch.
+ *   3. Egress gate — PIPELINE-FIRED (B6.1 wave A2b): the SAFESPACE_YOUTUBE_VIDEO_TARGETS
+ *      default-deny target allowlist (miss → -32052, NO video_id echo) → per-field
+ *      outboundSanitize (-32027) → F3a secret-shape on the combined text (-32035) all
+ *      run at the withToolContext choke point via this tool's egress descriptor
+ *      (enforceYoutubeVideoUpdateEgressGates, tools/egress.ts) BEFORE this handler; the
+ *      handler reads the per-field SANITIZED snippet off ctx.egress (must NOT call the
+ *      gate — anti-double-fire, egress-callsite.test.ts).
+ *   4. Construct requestBody LITERALLY (NEGATIVE sentinel: snippet keys ⊆
+ *      {title, categoryId, description?, tags?}; NO status, NO arbitrary keys).
+ *   5. Record videoMutationMeta allowed BEFORE the SDK call.
+ *   6. SDK videos.update. F1 universal write-burst auto-covers at the choke
+ *      point (write-tier → write bucket).
+ *
+ * Quota: videos.update = 50 units / call. Audit records target_video_hash +
+ * operation='video_update' + title_length (+ description_length / tag_count when
+ * supplied) + policy_decision (NEVER the plaintext title/description/tags). */
+export async function youtubeVideoUpdate(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  // ─── 1. Input validation (defense-in-depth; the pipeline's extract already ran
+  //        the SAME validator) ─────────────────────────────────────────
+  const { videoId, title, categoryId, description, tags } = validateYoutubeVideoUpdateArgs(args);
   const videoHash = sha256Hex(videoId);
 
-  // The forensic-meta builder reused at every exit point (denial + allow) so the
+  // The forensic-meta builder reused at the tier-denial + allow exit points so the
   // shape stays 1:1 with the audit channel (typed off `VideoMutationAuditMeta` minus
   // policy_decision, so it can't drift from the interface). title_length always
   // present; description_length / tag_count PRESENT only when supplied (mirrors the
@@ -800,7 +804,8 @@ export async function youtubeVideoUpdate(
   // NOTE: lengths are the PRE-sanitize INPUT lengths. outboundSanitize REJECTS rather
   // than silently shortening, so on the `allowed` path these match what is sent (modulo
   // a rare NFC char-count shift) — never the plaintext. Same raw-length convention as
-  // the comment / playlist channels.
+  // the comment / playlist channels. (The sanitize-reject denial row is recorded by the
+  // pipeline gate, tools/egress.ts, with the same baseMeta shape.)
   const baseMeta = (): Omit<VideoMutationAuditMeta, "policy_decision"> => {
     const m: Omit<VideoMutationAuditMeta, "policy_decision"> = {
       target_video_hash: videoHash,
@@ -821,70 +826,37 @@ export async function youtubeVideoUpdate(
     });
   }
 
-  // ─── 3. Target allowlist (default-empty hard-deny) ──────────────────
-  // No videoMutationMeta on this miss — the denial is captured via the row's
-  // errorCode (-32052), the github-write model. NO video_id echo (PII oracle).
-  const state = getVideoTargetAllowlistState();
-  if (!isVideoTargetAllowed(videoId, state)) {
-    throw new MCPError("video_target_denied_by_policy", {
-      tool: "youtube_video_update",
-      reason: state.kind === "off" ? "no_allowlist" : "not_in_allowlist",
-    });
-  }
+  // ─── 3. Egress gate is PIPELINE-FIRED ──────────────────────────────
+  // The target allowlist → per-field outbound-sanitize → F3a secret-shape gate now
+  // runs at the withToolContext choke point via this tool's egress descriptor (B6.1
+  // wave A2b, enforceYoutubeVideoUpdateEgressGates in tools/egress.ts) BEFORE this
+  // handler; the handler reads the gate's per-field SANITIZED snippet off ctx.egress
+  // and must NOT call the gate (anti-double-fire — egress-callsite.test.ts).
+  const out = requireEgressResult(ctx, "youtube-video-update");
 
-  // ─── 4. Outbound sanitize each PUBLIC field ─────────────────────────
-  // category_id is NOT sanitized: the `^[0-9]{1,3}$` regex at step 1 already
-  // bounds it to digits-only, so zero-width / confusable / secret-shape
-  // injection is impossible by construction (no public free-text reaches it).
-  let sanitizedTitle: string;
-  let sanitizedDescription: string | undefined;
-  let sanitizedTags: string[] | undefined;
-  try {
-    sanitizedTitle = outboundSanitize(title, { tool: "youtube_video_update" });
-    if (description !== undefined) {
-      sanitizedDescription = outboundSanitize(description, { tool: "youtube_video_update" });
-    }
-    if (tags !== undefined) {
-      sanitizedTags = tags.map((t) => outboundSanitize(t, { tool: "youtube_video_update" }));
-    }
-  } catch (err) {
-    ctx.audit.record("videoMutationMeta", {
-      ...baseMeta(),
-      policy_decision: "denied_outbound_sanitize_rejected",
-    });
-    throw err;
-  }
-
-  // ─── 5. F3a outbound secret-shape on the combined public text ───────
-  // Autonomous → throw outbound_secret_rejected (-32035); interactive → record a
-  // scalar flag (outbound_secret_shape) and proceed. Defends against an agent
-  // leaking a private-key / API-key SHAPE into a public video description.
-  enforceOutboundSecret(
-    ctx,
-    [sanitizedTitle, sanitizedDescription ?? "", ...(sanitizedTags ?? [])].join("\n"),
-  );
-
-  // ─── 6. Construct requestBody LITERALLY (NEGATIVE sentinel) ─────────
+  // ─── 4. Construct requestBody LITERALLY (NEGATIVE sentinel) ─────────
   // snippet keys ⊆ {title, categoryId, description?, tags?}. NO status part is
   // ever sent (part is ["snippet"] only) ⇒ privacyStatus / madeForKids cannot be
-  // changed. `id` is top-level (the video to update), not a snippet field.
+  // changed. `id` is top-level (the video to update), not a snippet field. The
+  // free-text fields are the PIPELINE's vetted (sanitized) bytes read off ctx.egress;
+  // category_id is the handler's own validated digit-only value (never sanitized).
   const snippet: {
     title: string;
     categoryId: string;
     description?: string;
     tags?: string[];
   } = {
-    title: sanitizedTitle,
+    title: out.title,
     categoryId,
   };
-  if (sanitizedDescription !== undefined) snippet.description = sanitizedDescription;
-  if (sanitizedTags !== undefined) snippet.tags = sanitizedTags;
+  if (out.description !== undefined) snippet.description = out.description;
+  if (out.tags !== undefined) snippet.tags = [...out.tags];
   const requestBody = { id: videoId, snippet };
 
-  // ─── 7. Record allow-meta BEFORE the SDK call (forensic completeness) ─
+  // ─── 5. Record allow-meta BEFORE the SDK call (forensic completeness) ─
   ctx.audit.record("videoMutationMeta", { ...baseMeta(), policy_decision: "allowed" });
 
-  // ─── 8. SDK call ────────────────────────────────────────────────────
+  // ─── 6. SDK call ────────────────────────────────────────────────────
   try {
     const yt = youtubeClientFromToken(requireGoogle(ctx).getAccessToken());
     const res = await yt.videos.update({
@@ -895,6 +867,52 @@ export async function youtubeVideoUpdate(
   } catch (err) {
     throw toGoogleError(err, { tool: "youtube_video_update", email: requireGoogle(ctx).accountId });
   }
+}
+
+/** B6.1 wave A2b — the SINGLE-SOURCE youtube_comment_reply input validator:
+ *  parent_comment_id (1-256 char) + caller-supplied video_id (11-char, TOCTOU
+ *  divergence) + non-empty text. Messages VERBATIM from the pre-A2b inline block.
+ *  Called by BOTH the pipeline descriptor's `extract` (tools/egress-pipeline.ts) and
+ *  the handler below (defense-in-depth re-run), so the two can never drift. Never
+ *  echoes the field values. */
+export function validateYoutubeCommentReplyArgs(args: Record<string, unknown>): {
+  parentCommentId: string;
+  videoId: string;
+  text: string;
+} {
+  if (typeof args.parent_comment_id !== "string") {
+    throw new Error(
+      "youtube_comment_reply: 'parent_comment_id' must be a string",
+    );
+  }
+  if (!YOUTUBE_COMMENT_ID_RE.test(args.parent_comment_id)) {
+    throw new Error(
+      "youtube_comment_reply: 'parent_comment_id' must match /^[A-Za-z0-9_.\\-]{1,256}$/ (YouTube comment ID; length cap 256 = DoS guard)",
+    );
+  }
+  if (typeof args.video_id !== "string") {
+    // TOCTOU divergence: caller MUST supply video_id to close the resolution
+    // window. Per design §4 + code-H4 patch.
+    throw new Error(
+      "youtube_comment_reply: 'video_id' (videoId of the parent comment's video) must be a string. SafeSpace requires caller-supplied video_id to avoid TOCTOU resolution. If you don't know it, call youtube_video_comments_list to look up the parent comment.",
+    );
+  }
+  if (!YOUTUBE_VIDEO_ID_RE.test(args.video_id)) {
+    throw new Error(
+      "youtube_comment_reply: 'video_id' must match /^[A-Za-z0-9_-]{11}$/ (11-char YouTube video-ID format)",
+    );
+  }
+  if (typeof args.text !== "string") {
+    throw new Error("youtube_comment_reply: 'text' must be a string");
+  }
+  if (args.text.trim().length === 0) {
+    throw new Error("youtube_comment_reply requires a non-empty 'text' string");
+  }
+  return {
+    parentCommentId: args.parent_comment_id,
+    videoId: args.video_id,
+    text: args.text,
+  };
 }
 
 /**
@@ -926,38 +944,9 @@ export async function youtubeCommentReply(
   ctx: ToolContext,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  // ─── 1. Input validation ────────────────────────────────────────────
-  if (typeof args.parent_comment_id !== "string") {
-    throw new Error(
-      "youtube_comment_reply: 'parent_comment_id' must be a string",
-    );
-  }
-  if (!YOUTUBE_COMMENT_ID_RE.test(args.parent_comment_id)) {
-    throw new Error(
-      "youtube_comment_reply: 'parent_comment_id' must match /^[A-Za-z0-9_.\\-]{1,256}$/ (YouTube comment ID; length cap 256 = DoS guard)",
-    );
-  }
-  if (typeof args.video_id !== "string") {
-    // TOCTOU divergence: caller MUST supply video_id to close the resolution
-    // window. Per design §4 + code-H4 patch.
-    throw new Error(
-      "youtube_comment_reply: 'video_id' (videoId of the parent comment's video) must be a string. SafeSpace requires caller-supplied video_id to avoid TOCTOU resolution. If you don't know it, call youtube_video_comments_list to look up the parent comment.",
-    );
-  }
-  if (!YOUTUBE_VIDEO_ID_RE.test(args.video_id)) {
-    throw new Error(
-      "youtube_comment_reply: 'video_id' must match /^[A-Za-z0-9_-]{11}$/ (11-char YouTube video-ID format)",
-    );
-  }
-  if (typeof args.text !== "string") {
-    throw new Error("youtube_comment_reply: 'text' must be a string");
-  }
-  if (args.text.trim().length === 0) {
-    throw new Error("youtube_comment_reply requires a non-empty 'text' string");
-  }
-  const parentCommentId = args.parent_comment_id;
-  const videoId = args.video_id;
-  const text = args.text;
+  // ─── 1. Input validation (defense-in-depth; the pipeline's extract already ran
+  //        the SAME validator) ─────────────────────────────────────────
+  const { parentCommentId, videoId, text } = validateYoutubeCommentReplyArgs(args);
   const videoHash = sha256Hex(videoId);
   const parentHash = sha256Hex(parentCommentId);
   const textLen = text.length;
@@ -977,51 +966,16 @@ export async function youtubeCommentReply(
     });
   }
 
-  // ─── 3. Allowlist gate (on caller-supplied video_id) ───────────────
-  const state = getCommentTargetAllowlistState();
-  const allowed = isCommentTargetAllowed("video", videoId, state);
-  if (!allowed) {
-    ctx.audit.record("commentPostMeta", {
-      target_video_hash: videoHash,
-      parent_comment_id_hash: parentHash,
-      comment_length: textLen,
-      policy_decision:
-        state.kind === "off" ? "denied_no_allowlist" : "denied_not_in_allowlist",
-    });
-    throw new MCPError("comment_target_denied_by_policy", {
-      tool: "youtube_comment_reply",
-    });
-  }
+  // ─── 3. Egress gate is PIPELINE-FIRED ──────────────────────────────
+  // The allowlist → burst PRE-check → outbound-sanitize gate (which carries
+  // parent_comment_id_hash on its DENIAL rows) runs at the withToolContext choke
+  // point via this tool's egress descriptor (B6.1 wave A2b,
+  // enforceYoutubeCommentEgressGates in tools/egress.ts) BEFORE this handler; the
+  // handler reads the gate's SANITIZED text off ctx.egress and must NOT call the
+  // gate (anti-double-fire — egress-callsite.test.ts).
+  const sanitizedText = requireEgressResult(ctx, "youtube-comment").body;
 
-  // ─── 4. Burst-limit pre-check ──────────────────────────────────────
-  const burst = checkCommentBurst();
-  if (!burst.ok) {
-    ctx.audit.record("commentPostMeta", {
-      target_video_hash: videoHash,
-      parent_comment_id_hash: parentHash,
-      comment_length: textLen,
-      policy_decision: "denied_burst_limit",
-    });
-    throw new MCPError("comment_burst_limit_exceeded", {
-      tool: "youtube_comment_reply",
-    });
-  }
-
-  // ─── 5. Outbound sanitize ──────────────────────────────────────────
-  let sanitizedText: string;
-  try {
-    sanitizedText = outboundSanitize(text, { tool: "youtube_comment_reply" });
-  } catch (err) {
-    ctx.audit.record("commentPostMeta", {
-      target_video_hash: videoHash,
-      parent_comment_id_hash: parentHash,
-      comment_length: textLen,
-      policy_decision: "denied_outbound_sanitize_rejected",
-    });
-    throw err;
-  }
-
-  // ─── 6. Construct requestBody LITERALLY ────────────────────────────
+  // ─── 4. Construct requestBody LITERALLY ────────────────────────────
   // ALLOWED keys for comments.insert (per design §9 + Phase 2b
   // implementer responsibility):
   //   snippet.parentId          (REQUIRED for replies — opposite valence
@@ -1040,12 +994,12 @@ export async function youtubeCommentReply(
     snippet: innerSnippet,
   };
 
-  // ─── 7. Record allow-meta BEFORE the SDK call ─────────────────────
+  // ─── 5. Record allow-meta BEFORE the SDK call ─────────────────────
   // FORENSIC COMPLETENESS: record meta BEFORE SDK call. policy_decision="allowed"
-  // because all 4 gates (tier + scope + allowlist + burst) AND outbound sanitize
-  // passed. If SDK throws (Google 5xx, network), the meta is already captured —
-  // the audit row shows what Claude attempted + the failure status. Per design §7
-  // + PR #135 pre-merge review INFO-4 reconciliation.
+  // because the tier check (here) AND the pipeline-fired egress gate (allowlist +
+  // burst + outbound sanitize) passed. If SDK throws (Google 5xx, network), the
+  // meta is already captured — the audit row shows what Claude attempted + the
+  // failure status. Per design §7 + PR #135 pre-merge review INFO-4 reconciliation.
   ctx.audit.record("commentPostMeta", {
     target_video_hash: videoHash,
     parent_comment_id_hash: parentHash,
@@ -1053,7 +1007,7 @@ export async function youtubeCommentReply(
     policy_decision: "allowed",
   });
 
-  // ─── 8. SDK call (burst counter increments only on real success) ──
+  // ─── 6. SDK call (burst counter increments only on real success) ──
   try {
     const yt = youtubeClientFromToken(requireGoogle(ctx).getAccessToken());
     const res = await yt.comments.insert({
@@ -1172,15 +1126,18 @@ export async function youtubeCommentDelete(
   }
 
   // ─── 3. NO allowlist check (bypass per design §2.5 + §8 hook #4) ──
-  // Intentional: getCommentTargetAllowlistState() / isCommentTargetAllowed()
-  // are NOT called here. Recovery > Policy: a mis-posted comment must be
-  // deletable even if the target is no longer in (or never was in) the
-  // SAFESPACE_YOUTUBE_COMMENT_TARGETS allowlist.
+  // Intentional: youtube_comment_delete carries NO egress descriptor, so the
+  // pipeline-fired comment allowlist gate (enforceYoutubeCommentEgressGates in
+  // tools/egress.ts, which youtube_video_comment_post / youtube_comment_reply now
+  // route through — B6.1 wave A2b) does NOT run for a delete. Recovery > Policy: a
+  // mis-posted comment must be deletable even if the target is no longer in (or
+  // never was in) the SAFESPACE_YOUTUBE_COMMENT_TARGETS allowlist.
 
   // ─── 4. NO burst-counter check (bypass per design §2.5 + §8 hook #4) ─
-  // Intentional: checkCommentBurst() / incrementCommentBurst() are NOT
-  // called here. The burst counter counts POSTS only; deletes can only
-  // undo posts (bounded by the Phase 2a 10-per-session post limit).
+  // Intentional: neither the pipeline gate's burst PRE-check nor the post-success
+  // increment (both in the post/reply path) is consulted here. The burst counter
+  // counts POSTS only; deletes can only undo posts (bounded by the Phase 2a
+  // 10-per-session post limit).
 
   // ─── 5. Record audit meta BEFORE the SDK call ─────────────────────
   // FORENSIC COMPLETENESS: record meta BEFORE SDK call (mirror v1.16

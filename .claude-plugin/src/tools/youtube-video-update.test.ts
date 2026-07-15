@@ -15,7 +15,7 @@ import { oauthCred, recorderSink } from "./test-audit";
 import { youtubeVideoUpdate } from "./handlers";
 import type { VideoMutationAuditMeta } from "../audit";
 import { MCPError } from "../errors";
-import type { ToolContext } from "./types";
+import type { ToolContext, YoutubeVideoUpdateEgressShape } from "./types";
 import {
   __internal as videoTargets,
   ENV_TARGETS,
@@ -39,6 +39,20 @@ function makeCtx(tier: "read" | "write" | "share"): ToolContext {
 
 const WRITE_CTX = makeCtx("write");
 const READ_CTX = makeCtx("read");
+
+// B6.1 wave A2b — the allowlist/per-field-sanitize/F3a gate is now PIPELINE-FIRED
+// (the MOVED gate cases live in tools/egress-pipeline.test.ts). A DIRECT handler call
+// reads the gate's per-field SANITIZED snippet off ctx.egress (what withToolContext
+// stores pre-handler); this helper supplies it for the requestBody-shape tests below.
+function ctxWithEgress(egress: YoutubeVideoUpdateEgressShape): ToolContext {
+  return {
+    allowedAccounts: null,
+    credential: oauthCred("alice@example.com", () => "fake-token"),
+    tier: "write",
+    audit: recorderSink({ videoMutationMeta: (m) => { captured = m; } }),
+    egress,
+  };
+}
 
 const ENV_KEYS = [ENV_TARGETS, ENV_TARGETS_EXTRA, ENV_AUTONOMOUS] as const;
 let envBackup: Record<string, string | undefined>;
@@ -132,76 +146,20 @@ describe("youtube_video_update — tier gate (defense-in-depth)", () => {
   });
 });
 
-describe("youtube_video_update — SAFESPACE_YOUTUBE_VIDEO_TARGETS gate (default-deny)", () => {
-  test("unset (off) → video_target_denied_by_policy reason=no_allowlist, no SDK, no video_id echo", async () => {
-    delete process.env[ENV_TARGETS];
-    videoTargets.resetSingletons();
-    const wasCalled = await noSdk();
-    let caught: unknown;
-    try {
-      await youtubeVideoUpdate(WRITE_CTX, { video_id: VID, title: "T", category_id: "22" });
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(MCPError);
-    expect((caught as MCPError).errorName).toBe("video_target_denied_by_policy");
-    expect((caught as MCPError).errorData).toMatchObject({ reason: "no_allowlist" });
-    expect(JSON.stringify((caught as MCPError).errorData)).not.toContain(VID);
-    // denial is errorCode-captured (github-write model), NOT a videoMutationMeta row
-    expect(captured).toBeUndefined();
-    expect(wasCalled()).toBe(false);
-  });
+// B6.1 wave A2b — the GATE cases (SAFESPACE_YOUTUBE_VIDEO_TARGETS default-deny off/miss;
+// per-field outbound-sanitize REJECT; F3a secret-shape) MOVED to
+// tools/egress-pipeline.test.ts (same assertions, driven through the registry-carried
+// youtube_video_update descriptor). Validation + tier + requestBody-shape cases stay here.
 
-  test("active but target not listed → reason=not_in_allowlist", async () => {
-    process.env[ENV_TARGETS] = `video:${OTHER_VID}`;
-    videoTargets.resetSingletons();
+describe("youtube_video_update — pipeline-bypass backstop (B6.1 wave A2b)", () => {
+  test("ctx.egress ABSENT → internal_routing_error{invariant_violation}, NO SDK", async () => {
     const wasCalled = await noSdk();
     await expect(
       youtubeVideoUpdate(WRITE_CTX, { video_id: VID, title: "T", category_id: "22" }),
     ).rejects.toMatchObject({
-      errorName: "video_target_denied_by_policy",
-      errorData: { reason: "not_in_allowlist" },
+      errorName: "internal_routing_error",
+      errorData: { reason: "invariant_violation" },
     });
-    expect(wasCalled()).toBe(false);
-  });
-});
-
-describe("youtube_video_update — outbound sanitize REJECT", () => {
-  test("zero-width char in title → denied_outbound_sanitize_rejected audit + throw, no SDK", async () => {
-    const wasCalled = await noSdk();
-    await expect(
-      youtubeVideoUpdate(WRITE_CTX, { video_id: VID, title: "hi​there", category_id: "22" }),
-    ).rejects.toMatchObject({ errorName: "outbound_sanitize_rejected" });
-    expect(captured?.policy_decision).toBe("denied_outbound_sanitize_rejected");
-    expect(wasCalled()).toBe(false);
-  });
-
-  test("zero-width char in a tag is also rejected", async () => {
-    const wasCalled = await noSdk();
-    await expect(
-      youtubeVideoUpdate(WRITE_CTX, {
-        video_id: VID,
-        title: "ok",
-        category_id: "22",
-        tags: ["fine", "ba​d"],
-      }),
-    ).rejects.toMatchObject({ errorName: "outbound_sanitize_rejected" });
-    expect(wasCalled()).toBe(false);
-  });
-});
-
-describe("youtube_video_update — F3a outbound secret-shape", () => {
-  test("autonomous + secret shape in description → outbound_secret_rejected, no SDK", async () => {
-    process.env[ENV_AUTONOMOUS] = "true";
-    const wasCalled = await noSdk();
-    await expect(
-      youtubeVideoUpdate(WRITE_CTX, {
-        video_id: VID,
-        title: "ok",
-        category_id: "22",
-        description: "my key AKIAIOSFODNN7EXAMPLE oops",
-      }),
-    ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
     expect(wasCalled()).toBe(false);
   });
 });
@@ -217,7 +175,11 @@ describe("youtube_video_update — happy path + literal requestBody", () => {
       return { data: { id: VID }, status: 200 };
     });
 
-    await youtubeVideoUpdate(WRITE_CTX, { video_id: VID, title: "New Title", category_id: "22" });
+    await youtubeVideoUpdate(ctxWithEgress({ kind: "youtube-video-update", videoId: VID, title: "New Title" }), {
+      video_id: VID,
+      title: "New Title",
+      category_id: "22",
+    });
 
     expect(params.part).toEqual(["snippet"]);
     expect(body.id).toBe(VID);
@@ -243,13 +205,22 @@ describe("youtube_video_update — happy path + literal requestBody", () => {
       return { data: { id: VID }, status: 200 };
     });
 
-    await youtubeVideoUpdate(WRITE_CTX, {
-      video_id: VID,
-      title: "T",
-      category_id: "27",
-      description: "line one\nline two",
-      tags: ["alpha", "beta"],
-    });
+    await youtubeVideoUpdate(
+      ctxWithEgress({
+        kind: "youtube-video-update",
+        videoId: VID,
+        title: "T",
+        description: "line one\nline two",
+        tags: ["alpha", "beta"],
+      }),
+      {
+        video_id: VID,
+        title: "T",
+        category_id: "27",
+        description: "line one\nline two",
+        tags: ["alpha", "beta"],
+      },
+    );
 
     expect(body.snippet?.description).toBe("line one\nline two");
     expect(body.snippet?.tags).toEqual(["alpha", "beta"]);
@@ -265,7 +236,7 @@ describe("youtube_video_update — happy path + literal requestBody", () => {
       return { data: { id: VID }, status: 200 };
     });
 
-    await youtubeVideoUpdate(WRITE_CTX, {
+    await youtubeVideoUpdate(ctxWithEgress({ kind: "youtube-video-update", videoId: VID, title: "T" }), {
       video_id: VID,
       title: "T",
       category_id: "22",

@@ -13,6 +13,15 @@
 // google V1_SCOPES union). `min_tier: "read"` (pure inbound). `direction:
 // "inbound-read"` (no egress gate — read-only).
 
+import {
+  githubCreateIssueCommentEgressDescriptor,
+  githubCreateIssueEgressDescriptor,
+  githubCreatePullRequestEgressDescriptor,
+  githubCreatePullRequestReviewEgressDescriptor,
+  githubMergePullRequestEgressDescriptor,
+  githubSetIssueLabelsEgressDescriptor,
+  githubUpdateIssueEgressDescriptor,
+} from "../egress-pipeline";
 import type { ToolDef } from "./types";
 import * as handlers from "../handlers";
 
@@ -190,6 +199,7 @@ export const githubTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "github",
     direction: "outbound-write",
+    egress: githubCreateIssueEgressDescriptor,
   },
   github_create_issue_comment: {
     name: "github_create_issue_comment",
@@ -213,6 +223,7 @@ export const githubTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "github",
     direction: "outbound-write",
+    egress: githubCreateIssueCommentEgressDescriptor,
   },
   github_update_issue: {
     name: "github_update_issue",
@@ -239,6 +250,7 @@ export const githubTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "github",
     direction: "outbound-write",
+    egress: githubUpdateIssueEgressDescriptor,
   },
   // ── v1.81 — open a pull request (the one PR write with no issues-API equivalent;
   // PR comments + title/body/state edits already ride github_create_issue_comment /
@@ -280,6 +292,7 @@ export const githubTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "github",
     direction: "outbound-write",
+    egress: githubCreatePullRequestEgressDescriptor,
   },
   // ── v1.82 — merge a PR. IRREVERSIBLE → its OWN default-deny allowlist
   // SAFESPACE_GITHUB_MERGE_TARGETS (separate from the write allowlist). ──
@@ -323,6 +336,7 @@ export const githubTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "github",
     direction: "outbound-write",
+    egress: githubMergePullRequestEgressDescriptor,
   },
   // ── v1.90 — submit a PR review. EVENT-CONDITIONAL gating: APPROVE rides its OWN
   // default-deny SAFESPACE_GITHUB_APPROVE_TARGETS (it can unblock a protected-branch merge),
@@ -373,6 +387,7 @@ export const githubTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "github",
     direction: "outbound-write",
+    egress: githubCreatePullRequestReviewEgressDescriptor,
   },
   // ── v1.84 — set the label set on an issue/PR (triage). Same default-deny write
   // allowlist + outbound-sanitize as the issue writes (a new label name = agent text). ──
@@ -406,6 +421,7 @@ export const githubTools: Record<string, ToolDef> = {
     min_tier: "write",
     source: "github",
     direction: "outbound-write",
+    egress: githubSetIssueLabelsEgressDescriptor,
   },
 
   // ── v1.76 — READ deepening: let the agent read repo code + activity (pure inbound;

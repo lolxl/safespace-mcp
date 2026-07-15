@@ -1,5 +1,9 @@
 // v1.69.1 — the shared class-B service-token egress fetch (LINE / Telegram / Discord).
 //
+// B6.1-B — this helper IS the error mapper for all 5 class-B connectors (the
+// `<id>_api_failed` cluster, closed-set reasons): the contract is stated in
+// src/auth/http/connector-error-contract.ts.
+//
 // docs/v1.69.1-service-token-fetch-hardening.md. Before v1.69.1 each of the three
 // service-token connector handlers (line.ts / telegram.ts / discord.ts) carried a
 // BYTE-IDENTICAL `fetch → catch→api_error → !res.ok→map(status)` block, and NONE of them
@@ -34,7 +38,11 @@ export type ServiceTokenReason =
   | "invalid_recipient"
   | "api_error";
 
-/** The `*_api_failed` MCPError names of the class-B service-token connectors. */
+/** The `*_api_failed` MCPError names of the class-B service-token connectors.
+ *  FROZEN as of v1.118 (pack step 3, arch-review F8): these 5 are a SUBSET of the
+ *  CLOSED 8-member `*_api_failed` brand set — a new connector does NOT extend this
+ *  union; it reuses a shared generic code via the owner gate. See the freeze note +
+ *  sentinel in `../../errors.ts`. */
 export type ServiceTokenErrorName =
   | "line_api_failed"
   | "telegram_api_failed"

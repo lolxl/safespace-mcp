@@ -7,8 +7,10 @@
 // through `withNonOAuthContext`. `requiredScopes: []` (no OAuth — the bot token is read
 // from the service-token store). `min_tier: "share"` (an egress send to a recipient —
 // the gmail_send / line / telegram tier). `direction: "outbound-write"` marks it for the
-// egress gates (fired handler-called via enforceDiscordEgressGates this cycle).
+// egress gates — PIPELINE-FIRED via the def's descriptor field (B6.1 wave A1): the
+// non-OAuth choke point runs extract → gate (tools/egress-pipeline.ts) BEFORE the handler.
 
+import { discordEgressDescriptor } from "../egress-pipeline";
 import * as handlers from "../handlers";
 import type { ToolDef } from "./types";
 
@@ -46,5 +48,6 @@ export const discordTools: Record<string, ToolDef> = {
     min_tier: "share",
     source: "discord",
     direction: "outbound-write",
+    egress: discordEgressDescriptor,
   },
 };

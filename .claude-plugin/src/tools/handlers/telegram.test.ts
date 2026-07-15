@@ -153,31 +153,7 @@ describe("telegramSendMessage — the bot token (in the URL) never leaks into er
   });
 });
 
-describe("telegramSendMessage — egress gates", () => {
-  test("recipient NOT in an active allowlist → recipient_denied_by_policy (never hits Telegram)", async () => {
-    process.env[ENV_TG_ALLOW] = OTHER; // active allowlist excluding CHAT
-    const f = fetchStub(200);
-    await expect(
-      telegramSendMessage(ctx(), { chat_id: CHAT, text: "x" }, { fetchImpl: f.impl }),
-    ).rejects.toMatchObject({ errorName: "recipient_denied_by_policy" });
-    expect(f.calls).toHaveLength(0);
-  });
-
-  test("recipient IN the allowlist → allowed", async () => {
-    process.env[ENV_TG_ALLOW] = CHAT;
-    const f = fetchStub(200);
-    const out = await telegramSendMessage(ctx(), { chat_id: CHAT, text: "x" }, { fetchImpl: f.impl });
-    expect(out).toMatchObject({ sent: true });
-  });
-
-  test("autonomous + secret-shape body → outbound_secret_rejected (never hits Telegram)", async () => {
-    process.env.SAFESPACE_AUTONOMOUS = "true";
-    process.env[ENV_TG_ALLOW] = CHAT; // allow the recipient so secret-shape is the gate
-    const f = fetchStub(200);
-    const body = "-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----";
-    await expect(
-      telegramSendMessage(ctx(), { chat_id: CHAT, text: body }, { fetchImpl: f.impl }),
-    ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
-  });
-});
+// B6.1 wave A1 — the "telegramSendMessage — egress gates" describe MOVED to
+// tools/egress-pipeline.test.ts (same assertions, driven through the pipeline's
+// egress descriptor): the gate is now PIPELINE-FIRED (withNonOAuthContext runs
+// extract → gate BEFORE the handler), so the handler no longer calls it.

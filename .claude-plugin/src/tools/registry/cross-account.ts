@@ -20,7 +20,10 @@ import {
 // runtime cycle through with-all-accounts → registry.
 function operatorDeps(ctx: ToolContext): WithAllAccountsDeps {
   const s = ctx as CrossAccountSentinel;
-  return { operator: s.operator, confineToAccounts: s.allowedAccounts };
+  // v1.120 (F6 step 2) — forward the sentinel's ToolContext `tier` (the per-operator
+  // privilege tier under Model B; `currentTier()` under Model A) so each per-account
+  // sub-context gets tier parity with the single-account choke point.
+  return { operator: s.operator, confineToAccounts: s.allowedAccounts, tier: s.tier };
 }
 
 export const crossAccountTools: Record<string, ToolDef> = {

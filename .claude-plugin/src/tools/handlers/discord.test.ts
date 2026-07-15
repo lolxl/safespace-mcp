@@ -156,31 +156,7 @@ describe("discordSendMessage — the bot token never leaks into errors", () => {
   });
 });
 
-describe("discordSendMessage — egress gates", () => {
-  test("recipient NOT in an active allowlist → recipient_denied_by_policy (never hits Discord)", async () => {
-    process.env[ENV_DC_ALLOW] = OTHER; // active allowlist excluding CHAN
-    const f = fetchStub(200);
-    await expect(
-      discordSendMessage(ctx(), { channel_id: CHAN, content: "x" }, { fetchImpl: f.impl }),
-    ).rejects.toMatchObject({ errorName: "recipient_denied_by_policy" });
-    expect(f.calls).toHaveLength(0);
-  });
-
-  test("recipient IN the allowlist → allowed", async () => {
-    process.env[ENV_DC_ALLOW] = CHAN;
-    const f = fetchStub(200);
-    const out = await discordSendMessage(ctx(), { channel_id: CHAN, content: "x" }, { fetchImpl: f.impl });
-    expect(out).toMatchObject({ sent: true });
-  });
-
-  test("autonomous + secret-shape body → outbound_secret_rejected (never hits Discord)", async () => {
-    process.env.SAFESPACE_AUTONOMOUS = "true";
-    process.env[ENV_DC_ALLOW] = CHAN; // allow the recipient so secret-shape is the gate
-    const f = fetchStub(200);
-    const body = "-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----";
-    await expect(
-      discordSendMessage(ctx(), { channel_id: CHAN, content: body }, { fetchImpl: f.impl }),
-    ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
-  });
-});
+// B6.1 wave A1 — the "discordSendMessage — egress gates" describe MOVED to
+// tools/egress-pipeline.test.ts (same assertions, driven through the pipeline's
+// egress descriptor): the gate is now PIPELINE-FIRED (withNonOAuthContext runs
+// extract → gate BEFORE the handler), so the handler no longer calls it.

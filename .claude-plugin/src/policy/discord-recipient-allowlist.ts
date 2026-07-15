@@ -1,9 +1,10 @@
 // v1.69 — Discord recipient (channel_id snowflake) allowlist.
 //
-// The per-connector ID regex + the two env-var names; the parse / state /
-// membership / summary logic is the shared policy/service-token-allowlist.ts
-// factory. The Discord snowflake regex stays a named export here —
-// tools/handlers/discord.ts imports it for pre-egress syntactic validation.
+// Thin pack instantiation: the per-connector ID regex + the two env-var names live
+// on DISCORD_PACK; the parse / state / membership / summary logic is the shared
+// makeServiceTokenRecipientAllowlist factory. The Discord snowflake regex stays a
+// named export here — tools/handlers/discord.ts imports it for pre-egress syntactic
+// validation.
 //
 //   SAFESPACE_DISCORD_RECIPIENT_ALLOW        (persistent)
 //   SAFESPACE_DISCORD_RECIPIENT_ALLOW_EXTRA  (shell-only, additive, per-session)
@@ -13,31 +14,25 @@
 // posture, NOT the public youtube-comment deny-default); under SAFESPACE_AUTONOMOUS
 // unset/empty DENIES ALL (F2 deny-by-default). See service-token-allowlist.ts.
 
+import { DISCORD_PACK } from "../tools/service-token-pack";
 import {
-  ENV_DISCORD_RECIPIENT_ALLOW as ENV_DC_ALLOW,
-  ENV_DISCORD_RECIPIENT_ALLOW_EXTRA as ENV_DC_ALLOW_EXTRA,
-} from "../config";
-import {
-  makeServiceTokenAllowlist,
+  makeServiceTokenRecipientAllowlist,
   type ServiceTokenAllowlistState,
-} from "./service-token-allowlist";
+} from "./service-token-recipient-allowlist";
 
-export { ENV_DC_ALLOW, ENV_DC_ALLOW_EXTRA };
+export const ENV_DC_ALLOW = DISCORD_PACK.env.recipientAllow;
+export const ENV_DC_ALLOW_EXTRA = DISCORD_PACK.env.recipientAllowExtra;
 
 /** A Discord channel target: a numeric snowflake id. Discord snowflakes are 64-bit
  *  (currently 18–19 digits; the 64-bit max is 20 digits), so 17–20 digits covers the
  *  full range with margin. Anchored + digit-only implicitly rejects CR/LF/NUL/`@name`/
  *  path/whitespace/sign (the gmail/LINE recipient-gate invariant) — and since the id
  *  is also a URL path segment in the handler, digit-only forecloses any traversal. */
-export const DISCORD_CHANNEL_ID_RE = /^\d{17,20}$/;
+export const DISCORD_CHANNEL_ID_RE = DISCORD_PACK.recipientIdSpec.regex;
 
 export type DiscordAllowlistState = ServiceTokenAllowlistState;
 
-const allowlist = makeServiceTokenAllowlist({
-  idRe: DISCORD_CHANNEL_ID_RE,
-  envAllow: ENV_DC_ALLOW,
-  envExtra: ENV_DC_ALLOW_EXTRA,
-});
+const allowlist = makeServiceTokenRecipientAllowlist(DISCORD_PACK);
 
 /** Resolve the current Discord allowlist state from the two env layers. */
 export function getDiscordAllowlistState(): DiscordAllowlistState {

@@ -439,6 +439,44 @@ recovery: the operator re-runs `safespace line set-token`. **Inbound LINE (webho
 is out of scope** — it is a push model (a public HTTPS endpoint + signature
 verification), a separate architecture, deferred.
 
+### 12. X (Twitter) post egress (`x_post_create`) — v1.113 / v1.115
+
+X is SafeSpace's 4th **OAuth** source (class A) and the first non-Google source
+whose access tokens expire (2h): consent runs a **PKCE S256** loopback flow
+(`src/auth/x/pkce.ts` — RFC 7636 `code_verifier`/`code_challenge`; `src/auth/x/consent.ts`),
+never a client-secret-only exchange. Access tokens refresh **proactively** inside
+`resolveCredential` (`src/auth/x/oauth.ts`) rather than through the choke point's
+Google-only 401-retry (the Source is `refreshable: false`). Fixed MVP scopes:
+`tweet.read users.read tweet.write offline.access` (`src/auth/x/consent.ts`).
+
+`x_post_create` (POST `/2/tweets`) is a **public-surface write** — the same threat
+class as a GitHub issue or a YouTube comment — so it is gated in a fixed order
+(`src/policy/x-post-allowlist.ts`):
+
+1. `SAFESPACE_TIER=write` (proxy tier filter).
+2. A valid X OAuth credential (`requireX`; scopes fixed at consent).
+3. **`SAFESPACE_X_POST_ACCOUNTS` post-account allowlist** — a two-layer env config
+   (`SAFESPACE_X_POST_ACCOUNTS` / `..._EXTRA`) of numeric X **user ids** (usernames
+   rotate, so the stable numeric id is required; validated `^[0-9]{1,32}$`).
+   **Default empty = HARD-DENY** (the public-surface deny-default idiom, matching
+   the YouTube-comment and GitHub-write allowlists — the opposite of the private
+   `SAFESPACE_RECIPIENT_ALLOW` default). Denial raises
+   `-32056 x_post_denied_by_policy`; the account id is never echoed.
+4. **F3a outbound secret-shape scan** + the standard `outboundSanitize` REJECT
+   pipeline (`tools/egress.ts enforceXPostEgressGates`) on the post text.
+
+Before any of the above, a **local weighted-280 precheck** (`src/tools/handlers/x.ts`)
+rejects an over-limit post with **zero network calls**: URLs cost 23 weighted
+characters each (`https?://\S+`), CJK/Hangul/fullwidth/emoji code points cost 2,
+everything else costs 1 (`X_WEIGHTED_MAX = 280`).
+
+Operational X API failures raise `-32054 x_api_failed` with a **closed-set**
+`reason` — the status code alone decides it (`429`→`rate_limited`, `401`→
+`consent_required`, everything else→`api_error`), **never** the X error body's
+free-text `title`/`detail` (`src/auth/x/client.ts`). No token, refresh token, or
+user id is echoed. The request body is allowlist-constructed (`{text}` only — no
+reply/quote fields), so a caller cannot smuggle extra API parameters through.
+
 ---
 
 ## Secret handling
@@ -553,9 +591,9 @@ universal write-burst limiter already covers them.
 ## Audit
 
 Every tool call writes a structured JSONL audit row (`src/audit.ts`):
-- **7 forensic channels** (comment-post, calendar-mutation, docs-modify,
-  comment-delete, tasks-mutation, sheets-mutation, playlist-mutation) carry
-  per-operation metadata.
+- **8 forensic channels** (comment-post, calendar-mutation, docs-modify,
+  comment-delete, tasks-mutation, sheets-mutation, playlist-mutation,
+  video-mutation) carry per-operation metadata.
 - Sensitive targets (recipient emails, document/task/comment IDs) are
   **HMAC-SHA256 hashed** with a per-install salt
   (`~/.config/safespace/audit-salt`, mode `0600`).

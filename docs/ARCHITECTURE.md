@@ -6,10 +6,11 @@ threat model and trust boundary — and [`docs/DESIGN.md`](DESIGN.md), the locke
 design decisions. **Read `SECURITY.md` first** for the threat model; this document
 focuses on the structure that implements it.
 
-> **Status:** v1.80.0 — 108 MCP tools across 8 connectors (Google Workspace 84 ·
-> GitHub 14 · Notion 5 · web-fetch 1 · fs-read 1 · LINE 1 · Telegram 1 ·
-> Discord 1). Two supported deployments: **Model A** — one human operator per
-> local process, MCP over stdio — and **Model B** — one shared server on a
+> **Status:** v1.125.1 — 130 MCP tools across 11 connectors (Google Workspace 85 ·
+> GitHub 18 · Notion 8 · X 3 · web-fetch 1 · fs-read 1 · LINE 1 · Telegram 2 ·
+> Discord 1 · Slack 5 · Mattermost 4) + the inbound-webhook inbox (`inbox_read`,
+> `source:"webhook"`). Two supported deployments: **Model A** — one human operator
+> per local process, MCP over stdio — and **Model B** — one shared server on a
 > private tailnet serving several authenticated operators over Streamable HTTP
 > (see [`model-b-deployment.md`](model-b-deployment.md) + [`DEPLOY.md`](DEPLOY.md)).
 
@@ -24,10 +25,11 @@ every external source and mediates every call:
 
 ```
 ┌──────────┐  stdio (Model A)          ┌──────────────────────────┐   per-connector client    ┌──────────────────────┐
-│ AI agent │ ◄──────────────────────►  │   SafeSpace proxy         │ ◄──────────────────────► │ Google Workspace      │
+│ AI agent │ ◄──────────────────────►  │   SafeSpace proxy         │ ◄──────────────────────► │ Google Workspace · X   │
 │ (Claude  │  Streamable HTTP over a   │   (TypeScript on Bun)     │   googleapis SDK ·       │ GitHub · Notion       │
 │  Code …) │  tailnet (Model B)        │                           │   hardened REST ·        │ web-fetch · fs-read   │
 └──────────┘ ◄──────────────────────►  └──────────────────────────┘   gated node:https        │ LINE·Telegram·Discord │
+                                                                                              │ Slack · Mattermost    │
                                                                                               └──────────────────────┘
                               every tool call passes the same envelope:
                               ├─ operator: per-connection identity + tier (Model B: Tailscale WhoIs → operators.json)
@@ -51,20 +53,21 @@ every external source and mediates every call:
 
 | Module | Responsibility |
 |---|---|
-| `auth/` | `SecretBackend` interface + `KeychainBackend` / `FileBackend`, the token-store facade, Google token refresh (mutex-coalesced, 60s buffer, force-refresh on upstream 401), `service-token-store.ts` (LINE / Telegram / Discord), `github/` + `notion/` (per-provider consent + store + hardened REST clients), `oauth-callback.ts` (shared loopback consent server) |
-| `tools/source.ts` | The **`Source` descriptor** per connector — `authModel`, credential resolution / authorization strategies, per-source sanitize skip-fields, error mapper |
+| `auth/` | `SecretBackend` interface + `KeychainBackend` / `FileBackend`, the token-store facade, Google token refresh (mutex-coalesced, 60s buffer, force-refresh on upstream 401), `service-token-store.ts` (LINE / Telegram / Discord / Slack / Mattermost), `github/` + `notion/` + `x/` (per-provider consent + store + hardened REST/API clients — `x/consent.ts` + `x/pkce.ts` implement the PKCE S256 loopback consent, `x/oauth.ts` the multi-account token store with proactive refresh, `x/client.ts` the hardened `api.x.com` REST client), `oauth-callback.ts` (shared loopback consent server) |
+| `tools/source.ts` | The **`Source` descriptor** per OAuth/keyless connector — `authModel`, credential resolution / authorization strategies, per-source sanitize skip-fields, error mapper; `tools/service-token-pack.ts` mirrors it for the 5 class-B service-token connectors (LINE / Telegram / Discord / Slack / Mattermost) |
 | `tools/registry/` | Per-tool declarations — `min_tier`, `requiredScopes`, `source`, `direction`, input schema (split per connector behind barrels) |
 | `tools/handlers/` | Per-tool implementations — build the connector client, call it, shape the response (split per connector) |
-| `tools/with-context.ts` | The **OAuth choke point** (Google / GitHub / Notion): resolve account, tier + scope pre-check, resolve credential, run handler, map errors, sanitize, write audit |
-| `tools/with-nonoauth-context.ts` | The **keyless / service-token choke point** (web-fetch, fs-read, LINE, Telegram, Discord) — same envelope, no account resolution |
+| `tools/with-context.ts` | The **OAuth choke point** (Google / GitHub / Notion / X): resolve account, tier + scope pre-check, resolve credential, run handler, map errors, sanitize, write audit; also fires the pipeline egress descriptor (below) for the OAuth-routed pipeline tools |
+| `tools/with-nonoauth-context.ts` | The **keyless / service-token choke point** (web-fetch, fs-read, LINE, Telegram, Discord, Slack, Mattermost) — same envelope, no account resolution |
 | `tools/with-all-accounts.ts` | Cross-account `*_all` fan-out (per-account sanitize nonce + audit rows; operator-confined under Model B) |
-| `tools/egress.ts` | Centralized egress gates — recipient allowlist, GitHub write-target allowlist, outbound secret-shape scan, tainted-source flag |
+| `tools/egress.ts` | The composite egress gate wrappers (per-connector `enforce*EgressGates`) — recipient/target allowlists, F3a outbound secret-shape scan, tainted-source flag |
+| `tools/egress-pipeline.ts` | **Pipeline-fired egress descriptors** (B6.1) — each descriptor's `extract`→`gate` fires at the choke point *before* the handler runs (the choke point owns enforcement; a drifted handler can no longer skip the gate). As of v1.126.0 all 21 `outbound-write` tools are pipeline-fired this way; the sole survivor of the older handler-called posture is `drive_share_file` (bespoke whitelist gate, `HANDLER_GATED_EXTERNAL` — see `tools/egress-coverage.sets.ts` for the live bucket membership). `gmail_send`'s pipeline gate resolves contact names through the google-workspace Source strategy (`source.resolveRecipients`), protected by a gate-stage 401 force-refresh retry (since A3+D) |
 | `identity/` | `OperatorContext` / resolvers (env under Model A; Tailscale-WhoIs + hot-reloaded `operators.json` registry under Model B) |
 | `transport/http.ts` | The opt-in Model B Streamable-HTTP transport — per-session server, session-peer binding, DNS-rebind protection |
 | `sanitize/` | Inbound untrusted-content pipeline + `outbound.ts` REJECT pipeline for public surfaces (100% branch-coverage gate) |
 | `sheets/` | `formula-reject.ts` (formula REJECT) + `homoglyph-normalize.ts` (UTS #39 normalization) + `a1.ts` (A1 coordinate parser) |
-| `policy/` | Allowlist parsers, burst limiters, autonomy hardening (`autonomous-mode.ts`, `write-burst.ts`, `outbound-secret.ts`, `tainted-source.ts`), the `url-gate.ts` SSRF gate, the `fs-gate.ts` path gate |
-| `audit.ts` | The 7-channel audit registry, HMAC hashing, `run_id`, JSONL writer |
+| `policy/` | Allowlist parsers, burst limiters, autonomy hardening (`autonomous-mode.ts`, `write-burst.ts`, `outbound-secret.ts`, `tainted-source.ts`), the `url-gate.ts` SSRF gate, the `fs-gate.ts` path gate, the `x-post-allowlist.ts` default-deny X post-account gate, `egress-destinations.ts` (the auditable egress-host registry) |
+| `audit.ts` | The 8-channel audit registry (`audit/meta-channels.ts`), HMAC hashing, `run_id`, JSONL writer |
 | `google-api/client.ts` | The 11 Google SDK client factories (one per API) |
 | `tier.ts` | `SAFESPACE_TIER` parsing; scope hierarchy lives in `auth/scopes.ts` |
 
@@ -77,15 +80,15 @@ keyless / service-token · `with-all-accounts.ts` cross-account fan-out):
 1. **Resolve the operator** — a per-call `OperatorContext` (env-derived under Model A; the connection's verified identity under Model B) supplies `tier` + `allowedAccounts`.
 2. **Resolve account + credential** — via the connector's `Source` strategies: `args.account_id` → persisted active → per-source last-used (OAuth, confined to `allowedAccounts`); a service token from the `SecretBackend`; or none (keyless). Google tokens refresh mutex-coalesced with a 60s buffer + force-refresh on upstream 401.
 3. **Pre-flight gate** — `min_tier`, `requiredScopes` (Google), autonomy-hardening gates (permanent-delete deny, write/delete burst caps) — all *before* any network call.
-4. **Egress gates** (outbound tools) — recipient / target allowlists + outbound secret-shape scan on the resolved recipients / body.
+4. **Egress gates** (outbound tools) — recipient / target allowlists + outbound secret-shape scan on the resolved recipients / body. As of v1.126.0 every `outbound-write` tool but `drive_share_file` fires this as a **pipeline-fired egress descriptor** (`tools/egress-pipeline.ts`): the registry def carries `extract`→`gate`, and the choke point runs it *before* the handler — the handler can no longer skip it. `drive_share_file` alone keeps its bespoke handler-called whitelist gate.
 5. **Handler** — builds the connector client and calls it (typed `googleapis` SDK; hardened GitHub/Notion REST; the SSRF-gated `web_fetch` request; the path-gated `fs_read`).
-6. **Error mapping** — upstream statuses become stable `MCPError` codes via the source's `mapError`; an `MCPError` passes through unchanged.
+6. **Error mapping** — each handler maps upstream statuses to stable `MCPError` codes in its own catch (Google → `toGoogleError`; `web_fetch` → `mapWebFetchError`; `fs_read` → `mapFsReadError`; the REST connectors throw their own `*_api_failed` code directly); an `MCPError` passes through unchanged.
 7. **Sanitize** — the result is wrapped in `<untrusted-source-${nonce}>` (per-source opaque-field skip list) before it returns to the agent.
 8. **Audit** — one structured JSONL row (timestamp, `run_id`, source, tool, account, operator, args sha256, status, latency); sensitive mutations also write a forensic row with hashed targets.
 
 ### Tool surface & multi-account
 
-- **108 MCP tools across 8 connectors:** Gmail 17 / Drive 11 / Docs 4 / Calendar 8 / Contacts 5 / YouTube 16 / Tasks 9 / Sheets 6 / Slides 3 / Forms 5 (= Google Workspace 84) · GitHub 14 · Notion 5 · web-fetch 1 · fs-read 1 · LINE 1 · Telegram 1 · Discord 1.
+- **130 MCP tools across 11 connectors:** Gmail 17 / Drive 11 / Docs 4 / Calendar 8 / Contacts 5 / YouTube 17 / Tasks 9 / Sheets 6 / Slides 3 / Forms 5 (= Google Workspace 85) · GitHub 18 · Notion 8 · X 3 · web-fetch 1 · fs-read 1 · LINE 1 · Telegram 2 · Discord 1 · Slack 5 · Mattermost 4 — plus the inbound-webhook inbox (`inbox_read`, `source:"webhook"`, separate from the 11 connectors).
 - **Multi-account:** `accounts.json` (schema v2, mode `0600`, metadata only — never tokens) plus a per-account token store; Notion mirrors the same model per workspace. `gmail_search_all` / `drive_search_all` / `tasks_search_all` / `youtube_subscriptions_all` use the `withAllAccounts` middleware to fan a query across accounts in parallel — each account gets a fresh sanitize nonce and its own audit row, plus one aggregate row; under Model B the fan-out set is intersected with the operator's `allowedAccounts`.
 
 ---
@@ -163,12 +166,23 @@ flat scopes never enter the Google scope union. Notion has no
 granular scopes — access is the pages the workspace owner shares with the
 integration.
 
+**X (Twitter)** is the 4th OAuth provider (class A) and the first non-Google
+source with expiring access tokens: a fixed MVP scope set `tweet.read users.read
+tweet.write offline.access` (`auth/x/consent.ts`), granted via a **PKCE S256**
+loopback consent flow (`auth/x/pkce.ts` — RFC 7636; `auth/x/consent.ts`). Access
+tokens (2h) are refreshed **proactively** inside `resolveCredential`
+(`auth/x/oauth.ts`) rather than via the choke point's Google-only 401-retry
+(`refreshable: false`, `tools/source.ts`). Posting (`x_post_create`) is
+bounded by the default-deny `SAFESPACE_X_POST_ACCOUNTS` numeric-account
+allowlist (`policy/x-post-allowlist.ts`), not the scope — same pattern as
+GitHub's write-target allowlist.
+
 ### Audit
 
 Every call writes a structured JSONL row stamped with the per-process **`run_id`**
-and the always-present **`source`**. **7 forensic channels** (comment-post,
+and the always-present **`source`**. **8 forensic channels** (comment-post,
 calendar-mutation, docs-modify, comment-delete, tasks-mutation, sheets-mutation,
-playlist-mutation) carry per-operation metadata. Sensitive targets (recipient
+playlist-mutation, video-mutation) carry per-operation metadata. Sensitive targets (recipient
 emails, doc/task/comment IDs) are **HMAC-SHA256 hashed** with a per-install salt
 (`0600`). The human **`operator`** (env-derived under Model A; the connection's
 verified identity under Model B) and the `account` identify who acted. **No
@@ -180,13 +194,15 @@ verdict).
 
 ### Error-code taxonomy
 
-27 `MCPError` codes. The security-relevant ones: `-32027` outbound sanitize
+54 `MCPError` codes. The security-relevant ones: `-32027` outbound sanitize
 rejected, `-32029` formula rejected, `-32030` tasks-delete denied by policy,
 `-32031` secret store corrupt, `-32032` write-burst limit, `-32033` destructive
 denied in autonomous mode, `-32034`/`-32035` tainted-recipient / outbound-secret
 rejected, `-32036` URL blocked by policy (SSRF gate), `-32042` GitHub write
 denied by policy, `-32043` path blocked by policy (fs gate), `-32020` batch too
-large.
+large, `-32047` egress destination blocked (the connector egress-host registry
+backstop), `-32053` Mattermost API failed, `-32054` X API failed, `-32056` X
+post denied by policy (the default-deny post-account allowlist).
 
 ---
 

@@ -13,91 +13,36 @@
 // must contain a call-shaped match of its gate function name(s). Import-only
 // references do not count. Dependency-free (node:fs / node:path); no AST.
 //
+// B6.1 wave A1 — PIPELINE_EGRESS tools invert the rule: their gate is fired by
+// the non-OAuth choke point via the registry def's egress descriptor, so the
+// DESCRIPTOR module (tools/egress-pipeline.ts) must contain the call-shaped gate
+// match, the HANDLER must NOT (anti-double-fire), and the def must carry the
+// descriptor (asserted via TOOL_REGISTRY). See the pipeline describe block below.
+//
 // Single source of truth for the sets: egress-coverage.sets.ts (shared with
 // the coverage partition sentinel).
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CENTRALIZED_EGRESS, HANDLER_GATED_EXTERNAL } from "./egress-coverage.sets";
+import {
+  CENTRALIZED_EGRESS,
+  HANDLER_GATED_EXTERNAL,
+  PIPELINE_EGRESS,
+} from "./egress-coverage.sets";
+import { TOOL_REGISTRY } from "./registry";
 
 /** Handler path is relative to `.claude-plugin/src/`. gates = exact centralized
  *  (or bespoke) gate function name(s) the handler must call (call-shaped, not
  *  merely imported). Derived by reading each handler's live call sites. */
 const GATE_TABLE: Record<string, { handlerFile: string; gates: string[] }> = {
   // ── CENTRALIZED_EGRESS (tools/egress.ts) ──────────────────────────────
-  gmail_send: {
-    handlerFile: "tools/handlers/gmail.ts",
-    gates: ["enforceEgressGates"],
-  },
-  gmail_create_draft: {
-    handlerFile: "tools/handlers/gmail.ts",
-    gates: ["enforceEgressGates"],
-  },
-  line_push_message: {
-    handlerFile: "tools/handlers/line.ts",
-    gates: ["enforceLineEgressGates"],
-  },
-  telegram_send_message: {
-    handlerFile: "tools/handlers/telegram.ts",
-    gates: ["enforceTelegramEgressGates"],
-  },
-  discord_send_message: {
-    handlerFile: "tools/handlers/discord.ts",
-    gates: ["enforceDiscordEgressGates"],
-  },
-  slack_send_message: {
-    handlerFile: "tools/handlers/slack.ts",
-    gates: ["enforceSlackEgressGates"],
-  },
-  mattermost_send_message: {
-    handlerFile: "tools/handlers/mattermost.ts",
-    gates: ["enforceMattermostEgressGates"],
-  },
-  github_create_issue: {
-    handlerFile: "tools/handlers/github.ts",
-    gates: ["enforceGithubWriteEgressGates"],
-  },
-  github_create_issue_comment: {
-    handlerFile: "tools/handlers/github.ts",
-    gates: ["enforceGithubWriteEgressGates"],
-  },
-  github_update_issue: {
-    handlerFile: "tools/handlers/github.ts",
-    gates: ["enforceGithubWriteEgressGates"],
-  },
-  github_create_pull_request: {
-    handlerFile: "tools/handlers/github.ts",
-    gates: ["enforceGithubWriteEgressGates"],
-  },
-  github_merge_pull_request: {
-    handlerFile: "tools/handlers/github.ts",
-    gates: ["enforceGithubMergeEgressGates"],
-  },
-  github_create_pull_request_review: {
-    handlerFile: "tools/handlers/github.ts",
-    gates: ["enforceGithubReviewEgressGates"],
-  },
-  github_set_issue_labels: {
-    handlerFile: "tools/handlers/github.ts",
-    gates: ["enforceGithubWriteEgressGates"],
-  },
-  notion_create_page: {
-    handlerFile: "tools/handlers/notion.ts",
-    gates: ["enforceNotionWriteEgressGates"],
-  },
-  notion_append_blocks: {
-    handlerFile: "tools/handlers/notion.ts",
-    gates: ["enforceNotionWriteEgressGates"],
-  },
-  notion_update_page: {
-    handlerFile: "tools/handlers/notion.ts",
-    gates: ["enforceNotionWriteEgressGates"],
-  },
-  x_post_create: {
-    handlerFile: "tools/handlers/x.ts",
-    gates: ["enforceXPostEgressGates"],
-  },
+  // B6.1 wave A3+D — gmail_send / gmail_create_draft MOVED to PIPELINE_TABLE below.
+  // B6.1 wave A (github + notion sweep) — the 7 github writes + 3 notion writes ALSO
+  // MOVED to PIPELINE_TABLE (their handler-called enforceGithub*/enforceNotionWriteEgressGates
+  // became CHECK-ONLY gates fired by withToolContext via each tool's egress descriptor).
+  // CENTRALIZED_EGRESS is now EMPTY, so this table's only remaining entry is the bespoke
+  // HANDLER_GATED_EXTERNAL drive_share_file below.
 
   // ── HANDLER_GATED_EXTERNAL (bespoke in-handler gates) ─────────────────
   // drive_share_file: whitelist ancestor walk + (share_type=user) recipient allowlist
@@ -105,19 +50,113 @@ const GATE_TABLE: Record<string, { handlerFile: string; gates: string[] }> = {
     handlerFile: "tools/handlers/drive.ts",
     gates: ["checkShareAllowed", "isRecipientAllowed"],
   },
-  // youtube comment-writes: default-deny target allowlist + burst + outbound sanitize
+  // B6.1 wave A2b — the 3 YouTube public-surface writes MIGRATED to PIPELINE_TABLE
+  // below (their gate blocks became composite wrappers fired by the choke point).
+};
+
+/** B6.1 wave A1 (A2a adds x_post_create) — the PIPELINE_EGRESS tools: the gate is
+ *  fired by the tool's choke point (withNonOAuthContext for the service-token
+ *  sends; withToolContext for x_post_create) via the registry def's egress
+ *  descriptor (tools/egress-pipeline.ts), NOT by the handler. `wrapper` = the
+ *  centralized gate function the DESCRIPTOR must call (call-shaped in
+ *  egress-pipeline.ts) and the HANDLER must NOT call (anti-double-fire — a double
+ *  fire would double requireSendApproval + the denial audit rows). Completeness of
+ *  the wiring itself is asserted via TOOL_REGISTRY (the def carries `egress`),
+ *  not by grep. */
+const PIPELINE_TABLE: Record<string, { handlerFile: string; wrapper: string }> = {
+  line_push_message: {
+    handlerFile: "tools/handlers/line.ts",
+    wrapper: "enforceLineEgressGates",
+  },
+  telegram_send_message: {
+    handlerFile: "tools/handlers/telegram.ts",
+    wrapper: "enforceTelegramEgressGates",
+  },
+  discord_send_message: {
+    handlerFile: "tools/handlers/discord.ts",
+    wrapper: "enforceDiscordEgressGates",
+  },
+  slack_send_message: {
+    handlerFile: "tools/handlers/slack.ts",
+    wrapper: "enforceSlackEgressGates",
+  },
+  mattermost_send_message: {
+    handlerFile: "tools/handlers/mattermost.ts",
+    wrapper: "enforceMattermostEgressGates",
+  },
+  x_post_create: {
+    handlerFile: "tools/handlers/x.ts",
+    wrapper: "enforceXPostEgressGates",
+  },
+  // B6.1 wave A2b — the 3 YouTube public-surface writes. comment_post + comment_reply
+  // share the comment wrapper (distinct `tool` literals in the descriptors); the
+  // handler must NOT call either wrapper (anti-double-fire).
   youtube_video_comment_post: {
     handlerFile: "tools/handlers/youtube.ts",
-    gates: ["isCommentTargetAllowed", "checkCommentBurst", "outboundSanitize"],
+    wrapper: "enforceYoutubeCommentEgressGates",
   },
   youtube_comment_reply: {
     handlerFile: "tools/handlers/youtube.ts",
-    gates: ["isCommentTargetAllowed", "checkCommentBurst", "outboundSanitize"],
+    wrapper: "enforceYoutubeCommentEgressGates",
   },
-  // youtube_video_update: default-deny video allowlist + per-field outbound sanitize + F3a
   youtube_video_update: {
     handlerFile: "tools/handlers/youtube.ts",
-    gates: ["isVideoTargetAllowed", "outboundSanitize", "enforceOutboundSecret"],
+    wrapper: "enforceYoutubeVideoUpdateEgressGates",
+  },
+  // B6.1 wave A3+D — the 2 gmail compose writes. Both share the compose wrapper
+  // (distinct `tool` literals in the descriptors); the handler must NOT call it
+  // (anti-double-fire).
+  gmail_send: {
+    handlerFile: "tools/handlers/gmail.ts",
+    wrapper: "enforceGmailComposeEgressGates",
+  },
+  gmail_create_draft: {
+    handlerFile: "tools/handlers/gmail.ts",
+    wrapper: "enforceGmailComposeEgressGates",
+  },
+  // B6.1 wave A (github sweep) — the 7 github writes. CHECK-ONLY gates; the descriptor
+  // (egress-pipeline.ts) calls the wrapper, the handler must NOT (anti-double-fire). Several
+  // tools share enforceGithubWriteEgressGates (the descriptor calls it once per tool).
+  github_create_issue: {
+    handlerFile: "tools/handlers/github.ts",
+    wrapper: "enforceGithubWriteEgressGates",
+  },
+  github_create_issue_comment: {
+    handlerFile: "tools/handlers/github.ts",
+    wrapper: "enforceGithubWriteEgressGates",
+  },
+  github_update_issue: {
+    handlerFile: "tools/handlers/github.ts",
+    wrapper: "enforceGithubWriteEgressGates",
+  },
+  github_create_pull_request: {
+    handlerFile: "tools/handlers/github.ts",
+    wrapper: "enforceGithubWriteEgressGates",
+  },
+  github_merge_pull_request: {
+    handlerFile: "tools/handlers/github.ts",
+    wrapper: "enforceGithubMergeEgressGates",
+  },
+  github_create_pull_request_review: {
+    handlerFile: "tools/handlers/github.ts",
+    wrapper: "enforceGithubReviewEgressGates",
+  },
+  github_set_issue_labels: {
+    handlerFile: "tools/handlers/github.ts",
+    wrapper: "enforceGithubWriteEgressGates",
+  },
+  // B6.1 wave A (notion sweep) — the 3 notion writes. CHECK-ONLY gates (model B: F3a only).
+  notion_create_page: {
+    handlerFile: "tools/handlers/notion.ts",
+    wrapper: "enforceNotionWriteEgressGates",
+  },
+  notion_append_blocks: {
+    handlerFile: "tools/handlers/notion.ts",
+    wrapper: "enforceNotionWriteEgressGates",
+  },
+  notion_update_page: {
+    handlerFile: "tools/handlers/notion.ts",
+    wrapper: "enforceNotionWriteEgressGates",
   },
 };
 
@@ -129,6 +168,54 @@ const SRC_ROOT = join(import.meta.dir, "..");
 function callShaped(gateName: string): RegExp {
   return new RegExp(String.raw`\b${gateName}\s*\(`);
 }
+
+describe("pipeline egress call-site sentinel (B6.1 wave A1) — descriptor-fired, never handler-fired", () => {
+  test("PIPELINE_TABLE keys are EXACTLY the PIPELINE_EGRESS set", () => {
+    expect(Object.keys(PIPELINE_TABLE).sort()).toEqual([...PIPELINE_EGRESS].sort());
+  });
+
+  test("(a) tools/egress-pipeline.ts calls every PIPELINE_EGRESS tool's gate wrapper (call-shaped)", () => {
+    const src = readFileSync(join(SRC_ROOT, "tools/egress-pipeline.ts"), "utf8");
+    const failures: string[] = [];
+    for (const [tool, { wrapper }] of Object.entries(PIPELINE_TABLE)) {
+      if (!callShaped(wrapper).test(src)) {
+        failures.push(
+          `${tool}: tools/egress-pipeline.ts is missing a call-site for ${wrapper} (expected /\\b${wrapper}\\s*\\(/)`,
+        );
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  test("(b) no PIPELINE_EGRESS handler calls its gate wrapper (anti-double-fire)", () => {
+    // The pipeline fires the gate; a handler-level call would DOUBLE-fire it
+    // (doubling requireSendApproval + the denial audit rows). Import-only or
+    // non-call mentions do not match (call-shaped regex).
+    const failures: string[] = [];
+    for (const [tool, { handlerFile, wrapper }] of Object.entries(PIPELINE_TABLE)) {
+      const src = readFileSync(join(SRC_ROOT, handlerFile), "utf8");
+      if (callShaped(wrapper).test(src)) {
+        failures.push(
+          `${tool}: handler ${handlerFile} contains a call-shaped ${wrapper} — the pipeline already fires it (double fire)`,
+        );
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  test("(c) every PIPELINE_EGRESS registry def carries the egress descriptor (via TOOL_REGISTRY, not grep)", () => {
+    const missing = [...PIPELINE_EGRESS].filter(
+      (t) => TOOL_REGISTRY[t]?.egress === undefined,
+    );
+    expect(missing).toEqual([]);
+    // And the inverse: no tool OUTSIDE the set carries a descriptor — the set is
+    // the single source of truth for what is pipeline-fired.
+    const extras = Object.entries(TOOL_REGISTRY)
+      .filter(([name, def]) => def.egress !== undefined && !PIPELINE_EGRESS.has(name))
+      .map(([name]) => name);
+    expect(extras).toEqual([]);
+  });
+});
 
 describe("egress call-site sentinel — every classified external tool calls its gate", () => {
   test("every CENTRALIZED_EGRESS tool has a GATE_TABLE entry", () => {

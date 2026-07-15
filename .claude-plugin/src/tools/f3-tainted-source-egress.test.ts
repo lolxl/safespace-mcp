@@ -12,6 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { currentTier } from "../tier";
 import { gmailCreateDraft } from "./handlers";
+import { TOOL_REGISTRY } from "./registry";
 import type { ToolContext } from "./types";
 import {
   __resetTaintedSourceForTests,
@@ -19,6 +20,20 @@ import {
 } from "../policy/tainted-source";
 
 const FAKE_TOKEN = "ya29.fake-token-for-tests";
+
+// B6.1 wave A3+D — gmail_create_draft is now PIPELINE_EGRESS: the F3b tainted-source flag
+// (via the shared enforceRecipientAllowlist seam) is fired by the CHOKE POINT
+// (withToolContext) through the tool's egress descriptor, and the slimmed handler reads
+// the gate's shape off ctx.egress. This vehicle reproduces that pre-handler step
+// (extract → gate → store on ctx.egress → handler) so a direct handler call still
+// exercises the seam. A draft is literal-only (D3) → no recipient resolver. Byte-identical
+// to the pre-A3 gmailCreateDraft (which ran the same gate internally).
+async function gmailCreateDraftVia(ctx: ToolContext, args: Record<string, unknown>): Promise<unknown> {
+  const d = TOOL_REGISTRY.gmail_create_draft!.egress!;
+  const out = await d.gate(ctx, d.extract(args));
+  if (out !== undefined) ctx.egress = out;
+  return gmailCreateDraft(ctx, args);
+}
 
 let tmpDir: string;
 let prevConfigDir: string | undefined;
@@ -77,7 +92,7 @@ describe("F3b egress — gmail recipient tainted-source flag", () => {
       }),
     };
 
-    const res = (await gmailCreateDraft(ctx, {
+    const res = (await gmailCreateDraftVia(ctx, {
       to: "attacker@evil.ru",
       subject: "Refund",
       body: "as requested",
@@ -108,7 +123,7 @@ describe("F3b egress — gmail recipient tainted-source flag", () => {
       }),
     };
 
-    await gmailCreateDraft(ctx, { to: "bob@example.com", subject: "Hi", body: "hello" });
+    await gmailCreateDraftVia(ctx, { to: "bob@example.com", subject: "Hi", body: "hello" });
     expect(taintedCalls).toBe(0);
   });
 
@@ -132,7 +147,7 @@ describe("F3b egress — gmail recipient tainted-source flag", () => {
         },
       }),
     };
-    await gmailCreateDraft(ctx, { to: "attacker@evil.ru", subject: "s", body: "b" });
+    await gmailCreateDraftVia(ctx, { to: "attacker@evil.ru", subject: "s", body: "b" });
     expect(taintedCalls).toBe(1);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ERROR_CODES, MCPError } from "./errors";
+import type { ConnectorApiFailedName } from "./auth/http/connector-error-contract";
 
 describe("ERROR_CODES table", () => {
   test("contains 54 names after v1.115 (added x_post_denied_by_policy)", () => {
@@ -253,6 +254,9 @@ describe("internal_routing_error — v1.112.8 fail-closed source routing", () =>
     // v1.115.3 — residual envelope tripwires (choke-point authModel / cross_account /
     // resolveCredential accountId backstops).
     expect(spec.recovery).toContain("invariant_violation");
+    // v1.116 — the choke-point egress tripwire (outbound-write handler returned
+    // without invoking its centralized egress gate).
+    expect(spec.recovery).toContain("egress_gate_not_fired");
   });
 
   test("toJsonRpc merges closed-set reason without leaking identifiers", () => {
@@ -261,5 +265,50 @@ describe("internal_routing_error — v1.112.8 fail-closed source routing", () =>
     expect(j.message).toBe("internal_routing_error");
     expect(j.data.reason).toBe("unknown_source");
     expect(j.data.recovery).toMatch(/misconfiguration/i);
+  });
+});
+
+describe("*_api_failed brand set — FROZEN as of v1.118 (pack step 3, arch-review F8)", () => {
+  // Every connector so far minted its OWN `<brand>_api_failed` code, growing the
+  // global (closed) error taxonomy linearly with connectors. As of v1.118 the set
+  // is FROZEN: a NEW connector reuses a shared generic path (designed through the
+  // owner gate) rather than minting a new brand code. This sentinel enumerates the
+  // `*_api_failed` names straight from the ERROR_CODES spec table (same way the
+  // "ERROR_CODES table" block above iterates Object.keys) and pins the set exactly.
+  //
+  // SOURCE-OF-TRUTH note: the pack-step-3 work order named a 7-member set
+  // {line,telegram,discord,slack,mattermost,github,x} and OMITTED notion_api_failed
+  // (-32045, the class-A Notion OAuth connector — see errors.ts). The real
+  // ERROR_CODES table carries 8 such names; SOURCE wins, so the frozen set is these 8.
+  // B6.1-B — the list is now TYPE-TIED to the contract's derived brand type
+  // (`ConnectorApiFailedName`, src/auth/http/connector-error-contract.ts) in BOTH
+  // directions: `satisfies` rejects a list entry outside the type; the `_Missing`
+  // anchor below rejects a type member absent from the list. The runtime filter
+  // test then ties both to the ERROR_CODES table.
+  const FROZEN_API_FAILED_BRANDS = [
+    "discord_api_failed",
+    "github_api_failed",
+    "line_api_failed",
+    "mattermost_api_failed",
+    "notion_api_failed",
+    "slack_api_failed",
+    "telegram_api_failed",
+    "x_api_failed",
+  ] as const satisfies readonly ConnectorApiFailedName[];
+  type _Missing = Exclude<ConnectorApiFailedName, (typeof FROZEN_API_FAILED_BRANDS)[number]>;
+  const _noneMissing: [_Missing] extends [never] ? true : never = true;
+  void _noneMissing;
+
+  test("the set of ErrorNames matching /_api_failed$/ is exactly the frozen 8", () => {
+    const actual = Object.keys(ERROR_CODES)
+      .filter((name) => /_api_failed$/.test(name))
+      .sort();
+    expect(
+      actual,
+      "The *_api_failed brand set is frozen — see the freeze note in errors.ts. " +
+        "A new connector reuses the shared generic path (owner gate); it does NOT " +
+        "mint another *_api_failed brand. Do not extend this list to make a new " +
+        "connector pass — take the freeze to the owner gate first.",
+    ).toEqual([...FROZEN_API_FAILED_BRANDS]);
   });
 });

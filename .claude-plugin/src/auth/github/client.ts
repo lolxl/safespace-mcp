@@ -1,5 +1,8 @@
 // v1.70 (G4) — the hardened GitHub REST GET helper (the G2-deferred file).
 //
+// B6.1-B — this client IS the connector's error mapper (`github_api_failed`, closed-set
+// reasons): the contract is stated in src/auth/http/connector-error-contract.ts.
+//
 // The READ analogue of tools/handlers/service-token-fetch.ts `postServiceTokenJson`:
 // a single place that performs an authenticated `GET https://api.github.com{path}`,
 // with the same robustness + no-leak discipline, but RETURNS the parsed JSON (the

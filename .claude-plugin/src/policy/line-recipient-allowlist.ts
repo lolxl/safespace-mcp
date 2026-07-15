@@ -1,10 +1,9 @@
 // v1.66 Phase C PR 2 — LINE recipient (userId / groupId / roomId) allowlist.
 //
-// The per-connector ID regex + the two env-var names; the parse / state /
-// membership / summary logic is the shared policy/service-token-allowlist.ts
-// factory (all 5 service-token allowlists were byte-identical except these). The
-// LINE id regex stays a named export here — tools/handlers/line.ts imports it for
-// pre-egress syntactic validation.
+// Thin pack instantiation: the per-connector ID regex + the two env-var names live
+// on LINE_PACK; the parse / state / membership / summary logic is the shared
+// makeServiceTokenRecipientAllowlist factory. The LINE id regex stays a named
+// export here — tools/handlers/line.ts imports it for pre-egress syntactic validation.
 //
 //   SAFESPACE_LINE_RECIPIENT_ALLOW        (persistent)
 //   SAFESPACE_LINE_RECIPIENT_ALLOW_EXTRA  (shell-only, additive, per-session)
@@ -15,29 +14,23 @@
 // (F2 deny-by-default). See service-token-allowlist.ts for the full policy + the
 // no-PII-echo contract.
 
+import { LINE_PACK } from "../tools/service-token-pack";
 import {
-  ENV_LINE_RECIPIENT_ALLOW as ENV_LINE_ALLOW,
-  ENV_LINE_RECIPIENT_ALLOW_EXTRA as ENV_LINE_ALLOW_EXTRA,
-} from "../config";
-import {
-  makeServiceTokenAllowlist,
+  makeServiceTokenRecipientAllowlist,
   type ServiceTokenAllowlistState,
-} from "./service-token-allowlist";
+} from "./service-token-recipient-allowlist";
 
-export { ENV_LINE_ALLOW, ENV_LINE_ALLOW_EXTRA };
+export const ENV_LINE_ALLOW = LINE_PACK.env.recipientAllow;
+export const ENV_LINE_ALLOW_EXTRA = LINE_PACK.env.recipientAllowExtra;
 
 /** A LINE messaging target id: user `U…`, group `C…`, or room `R…`, each followed
  *  by 32 lowercase hex chars. Anchored + restricted class implicitly rejects
  *  CR/LF/NUL/path/whitespace (the gmail recipient-gate invariant). */
-export const LINE_ID_RE = /^[UCR][0-9a-f]{32}$/;
+export const LINE_ID_RE = LINE_PACK.recipientIdSpec.regex;
 
 export type LineAllowlistState = ServiceTokenAllowlistState;
 
-const allowlist = makeServiceTokenAllowlist({
-  idRe: LINE_ID_RE,
-  envAllow: ENV_LINE_ALLOW,
-  envExtra: ENV_LINE_ALLOW_EXTRA,
-});
+const allowlist = makeServiceTokenRecipientAllowlist(LINE_PACK);
 
 /** Resolve the current LINE allowlist state from the two env layers. */
 export function getLineAllowlistState(): LineAllowlistState {

@@ -11,10 +11,12 @@
 // envelope (tier / write-burst / sanitize / audit) is applied by withNonOAuthContext
 // around it.
 //
-// EGRESS: the handler calls the centralized enforceDiscordEgressGates (tools/egress.ts)
-// BEFORE the SDK call (the B3 handler-called posture, consistent with gmail_send /
-// line_push_message / telegram_send_message): secret-shape (F3a) on the body + the
-// Discord recipient allowlist on `channel_id`.
+// EGRESS (B6.1 wave A1 — PIPELINE-FIRED): the egress gate — secret-shape (F3a) on the
+// body + the Discord recipient allowlist on `channel_id` — is fired by
+// withNonOAuthContext via this tool's egress descriptor (tools/egress-pipeline.ts)
+// BEFORE this handler runs. The handler must NOT invoke the gate itself (a double fire
+// would double requireSendApproval + the denial audit rows); the call-site sentinel
+// (egress-callsite.test.ts) enforces both directions.
 //
 // AUTH IS A HEADER, NOT A URL (cleaner than Telegram): Discord uses
 // `Authorization: Bot <token>` (the mandatory `Bot ` scheme prefix) against the fixed
@@ -32,7 +34,6 @@
 // → nothing Discord fetches server-side (no SSRF-by-proxy).
 
 import { DISCORD_CHANNEL_ID_RE } from "../../policy/discord-recipient-allowlist";
-import { enforceDiscordEgressGates } from "../egress";
 import type { ToolContext } from "../types";
 import { postServiceTokenJson } from "./service-token-fetch";
 import { assertEgressHost } from "../../policy/egress-destinations";
@@ -62,24 +63,25 @@ function mapStatusToReason(
   return "api_error";
 }
 
-export async function discordSendMessage(
-  ctx: ToolContext,
+/** B6.1 wave A1 — the discord_send_message arg validator, extracted so ONE pure
+ *  function serves both call sites (single source, no drift): the pipeline's egress
+ *  descriptor (`extract` in tools/egress-pipeline.ts, which runs BEFORE this handler)
+ *  and the handler below. Throws the tool's plain-Error validation messages; echoes
+ *  the RULE, never the value.
+ *
+ *  1. Channel id well-formedness — a well-formed id Discord later rejects (404) →
+ *     discord_api_failed{invalid_recipient} (distinct from this fail-fast check).
+ *     Digit-only also forecloses any path traversal via the channel_id URL segment.
+ *  2. Content body: non-empty + the Discord character limit. */
+export function validateDiscordSendArgs(
   args: Record<string, unknown>,
-  deps: DiscordSendDeps = {},
-): Promise<unknown> {
-  // 1. Validate the channel id (well-formedness). Plain Error (bad input) — mirrors the
-  //    telegram_send_message / line_push_message convention; echoes the RULE, never the
-  //    value. A well-formed id Discord later rejects (404) → discord_api_failed
-  //    {invalid_recipient} below (distinct from this fail-fast input check). Digit-only
-  //    also forecloses any path traversal via the channel_id URL segment.
+): { channel_id: string; content: string } {
   const channel_id = args.channel_id;
   if (typeof channel_id !== "string" || !DISCORD_CHANNEL_ID_RE.test(channel_id)) {
     throw new Error(
       "discord_send_message: 'channel_id' must be a numeric Discord channel id (17–20 digits)",
     );
   }
-
-  // 2. Validate the content body.
   const content = args.content;
   if (typeof content !== "string" || content.length === 0) {
     throw new Error("discord_send_message: 'content' must be a non-empty string");
@@ -89,16 +91,20 @@ export async function discordSendMessage(
       `discord_send_message: 'content' exceeds the ${DISCORD_CONTENT_MAX}-character Discord limit`,
     );
   }
+  return { channel_id, content };
+}
 
-  // 3. Egress gates (handler-called, B3 posture): secret-shape (F3a) on the body then
-  //    the Discord recipient allowlist on `channel_id`. Throws -32035 / -32019 on denial.
-  await enforceDiscordEgressGates(ctx, {
-    tool: "discord_send_message",
-    channel_id,
-    body: content,
-  });
+export async function discordSendMessage(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: DiscordSendDeps = {},
+): Promise<unknown> {
+  // 1. Validate args. The pipeline already validated them via this SAME function (the
+  //    egress descriptor's extract, BEFORE this handler); this call is defense-in-depth
+  //    + the unit-test surface (pure, identical result — cheap re-validation).
+  const { channel_id, content } = validateDiscordSendArgs(args);
 
-  // 4. Send. The token is read inline from the service-token credential and placed in
+  // 2. Send. The token is read inline from the service-token credential and placed in
   //    the Authorization header (never the URL, never logged/echoed).
   const token = requireServiceToken(ctx).token();
   const url = `${DISCORD_API}/channels/${channel_id}/messages`;

@@ -33,7 +33,6 @@
 import { MATTERMOST_ID_RE } from "../../policy/mattermost-recipient-allowlist";
 import { mattermostApiGet } from "../../auth/mattermost/client";
 import { requireMattermostBaseUrl } from "../../auth/mattermost/base-url";
-import { enforceMattermostEgressGates } from "../egress";
 import type { ToolContext } from "../types";
 import { postServiceTokenJson, type ServiceTokenReason } from "./service-token-fetch";
 import { assertEgressHost } from "../../policy/egress-destinations";
@@ -111,20 +110,22 @@ function shapePost(v: unknown): Obj {
   };
 }
 
-/** mattermost_send_message — POST one text message to a known channel (WRITE). */
-export async function mattermostSendMessage(
-  ctx: ToolContext,
+/** B6.1 wave A1 — the mattermost_send_message arg validator, extracted so ONE pure
+ *  function serves both call sites (single source, no drift): the pipeline's egress
+ *  descriptor (`extract` in tools/egress-pipeline.ts, which runs BEFORE this handler)
+ *  and the handler below. Throws the tool's plain-Error validation messages; echoes
+ *  the RULE, never the value.
+ *
+ *  1. Channel id well-formedness — a well-formed id the server rejects →
+ *     invalid_recipient (distinct from this fail-fast input check).
+ *  2. Message body: non-empty + the default server character limit. */
+export function validateMattermostSendArgs(
   args: Record<string, unknown>,
-  deps: MattermostDeps = {},
-): Promise<unknown> {
-  // 1. Validate the channel id (well-formedness). Plain Error (bad input) — echoes the
-  //    RULE, never the value. A well-formed id the server rejects → invalid_recipient below.
-  const channelId = args.channel_id;
-  if (typeof channelId !== "string" || !MATTERMOST_ID_RE.test(channelId)) {
+): { channel_id: string; message: string } {
+  const channel_id = args.channel_id;
+  if (typeof channel_id !== "string" || !MATTERMOST_ID_RE.test(channel_id)) {
     throw new Error("mattermost_send_message: 'channel_id' must be a 26-char Mattermost id ([a-z0-9])");
   }
-
-  // 2. Validate the message body.
   const message = args.message;
   if (typeof message !== "string" || message.length === 0) {
     throw new Error("mattermost_send_message: 'message' must be a non-empty string");
@@ -132,16 +133,27 @@ export async function mattermostSendMessage(
   if (message.length > MATTERMOST_MESSAGE_MAX) {
     throw new Error(`mattermost_send_message: 'message' exceeds the ${MATTERMOST_MESSAGE_MAX}-character limit`);
   }
+  return { channel_id, message };
+}
 
-  // 3. Egress gates (handler-called, B3 posture): secret-shape (F3a) on the body then the
-  //    Mattermost recipient allowlist on `channel_id`. Throws -32035 / -32019 on denial.
-  await enforceMattermostEgressGates(ctx, {
-    tool: "mattermost_send_message",
-    channel_id: channelId,
-    body: message,
-  });
+/** mattermost_send_message — POST one text message to a known channel (WRITE).
+ *  EGRESS (B6.1 wave A1 — PIPELINE-FIRED): the egress gate — secret-shape (F3a) on the
+ *  body + the Mattermost recipient allowlist on `channel_id` — is fired by
+ *  withNonOAuthContext via this tool's egress descriptor (tools/egress-pipeline.ts)
+ *  BEFORE this handler runs. The handler must NOT invoke the gate itself (a double
+ *  fire would double requireSendApproval + the denial audit rows); the call-site
+ *  sentinel (egress-callsite.test.ts) enforces both directions. */
+export async function mattermostSendMessage(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+  deps: MattermostDeps = {},
+): Promise<unknown> {
+  // 1. Validate args. The pipeline already validated them via this SAME function (the
+  //    egress descriptor's extract, BEFORE this handler); this call is defense-in-depth
+  //    + the unit-test surface (pure, identical result — cheap re-validation).
+  const { channel_id: channelId, message } = validateMattermostSendArgs(args);
 
-  // 4. Send. Token read inline → Authorization header (never the URL/logs). The base URL is
+  // 2. Send. Token read inline → Authorization header (never the URL/logs). The base URL is
   //    the configured server. NOTE: this is the SOLE egress pin for the WRITE path — the send
   //    goes through postServiceTokenJson (not mattermostApiGet, which is the read path's own
   //    pin), so this explicit assertEgressHost is load-bearing, not redundant.

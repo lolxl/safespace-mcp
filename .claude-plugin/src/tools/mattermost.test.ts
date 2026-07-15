@@ -85,23 +85,11 @@ describe("mattermost_send_message", () => {
     expect((call.init!.headers as Record<string, string>).Authorization).toBe("Bearer bot-tok");
   });
 
-  test("autonomous + secret-shape in message → outbound_secret_rejected, no fetch (F3a)", async () => {
-    process.env[ENV_AUTONOMOUS] = "true";
-    const s = stub(201, undefined);
-    await expect(
-      mattermostSendMessage(ctx(), { channel_id: CHAN, message: "key AKIAIOSFODNN7EXAMPLE" }, s),
-    ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(s.calls.length).toBe(0);
-  });
-
-  test("autonomous + channel NOT in allowlist → recipient_denied_by_policy, no fetch", async () => {
-    process.env[ENV_AUTONOMOUS] = "true"; // off→deny under autonomous
-    const s = stub(201, undefined);
-    await expect(
-      mattermostSendMessage(ctx(), { channel_id: CHAN, message: "hi" }, s),
-    ).rejects.toMatchObject({ errorName: "recipient_denied_by_policy" });
-    expect(s.calls.length).toBe(0);
-  });
+  // B6.1 wave A1 — the two egress-gate cases (autonomous secret-shape F3a +
+  // autonomous off→deny allowlist) MOVED to tools/egress-pipeline.test.ts (same
+  // assertions, driven through the pipeline's egress descriptor): the gate is now
+  // PIPELINE-FIRED (withNonOAuthContext runs extract → gate BEFORE the handler),
+  // so the handler no longer calls it.
 
   test("server URL unset → mattermost_api_failed{no_server_url}", async () => {
     delete process.env[ENV_MATTERMOST_SERVER_URL];

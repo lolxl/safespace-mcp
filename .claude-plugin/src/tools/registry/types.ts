@@ -1,5 +1,6 @@
 // ToolDef shape — extracted verbatim from the former monolithic src/tools/registry.ts.
 import type { Tier } from "../../tier";
+import type { EgressDescriptor } from "../egress-pipeline";
 import type { ToolHandler } from "../types";
 
 export interface ToolDef {
@@ -27,7 +28,7 @@ export interface ToolDef {
    *  forensics can attribute a call to its Source before any non-Google
    *  connector exists. A future connector (Telegram bot, etc.) sets its own
    *  id; the pipeline (B2+) resolves that Source's resolveCredential /
-   *  authorize / mapError / skipFields strategies from this field. Only a
+   *  authorize / skipFields strategies from this field. Only a
    *  label this cycle — nothing branches on it yet. */
   source?: string;
   /** Classification LABEL for the data-flow direction — read by the test-only
@@ -41,4 +42,15 @@ export interface ToolDef {
    *  external tool) means no egress classification. Pipeline-fired egress
    *  (auto-routing off this field inside with-context) remains future work. */
   direction?: "inbound-read" | "outbound-write";
+  /** B6.1 wave A1 — the PIPELINE-FIRED egress descriptor (tools/egress-pipeline.ts).
+   *  When present, the non-OAuth choke point (with-nonoauth-context.ts) fires
+   *  extract → gate BEFORE the handler runs; the handler must NOT call the gate
+   *  itself. The call-site sentinel (egress-callsite.test.ts) enforces both
+   *  directions: the descriptor module must call the tool's gate wrapper, and the
+   *  handler file must not (anti-double-fire). Carried today by the 5 class-B
+   *  service-token send tools (the PIPELINE_EGRESS set in egress-coverage.sets.ts);
+   *  unset on every other tool (the gmail/github/notion egress stays
+   *  handler-called through with-context.ts, the B3 posture — waves A3+D;
+   *  x_post_create migrated onto the pipeline in wave A2a, v1.123). */
+  egress?: EgressDescriptor;
 }

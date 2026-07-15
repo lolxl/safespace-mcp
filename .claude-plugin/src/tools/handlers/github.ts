@@ -29,12 +29,11 @@
 
 import { githubApiGet, githubApiWrite } from "../../auth/github/client";
 import { outboundSanitize } from "../../sanitize/outbound";
-import {
-  enforceGithubMergeEgressGates,
-  enforceGithubReviewEgressGates,
-  enforceGithubWriteEgressGates,
-  type GithubReviewEvent,
-} from "../egress";
+// B6.1 wave A — the github egress gates (enforceGithub*EgressGates) are now PIPELINE-FIRED
+// by with-context.ts via each write tool's egress descriptor (tools/egress-pipeline.ts);
+// the handlers no longer import/call them (anti-double-fire). Only the GithubReviewEvent
+// type is still needed (the review validator's return type).
+import type { GithubReviewEvent } from "../egress";
 import type { ToolContext } from "../types";
 import { requireGithub } from "./shared";
 
@@ -580,14 +579,15 @@ export async function githubGetFileContent(
 
 /* ── WRITE handlers (v1.71 — the PUBLIC-surface egress slice) ──────────────────
  *
- * Each write: requireGithub (R8 backstop) → validate → enforceGithubWriteEgressGates
- * (DEFAULT-DENY repo allowlist + F3a secret-shape) → per-field outboundSanitize (the
- * public-surface REJECT, byte-capped) → ALLOWLIST-CONSTRUCTED request body (ONLY
- * title/body/state — no agent-supplied assignee/label/HTML field can slip through) →
- * githubApiWrite → shape the created/updated resource (its echoed text is wrapped by
- * the choke point's sanitize like any read). Public OR private repo (v1.83 `repo`
- * scope); the default-deny allowlist — not the scope — is what bounds which repos a
- * write can touch. */
+ * Each write: [PIPELINE-FIRED egress — DEFAULT-DENY repo allowlist + F3a secret-shape,
+ * run by with-context.ts via the tool's egress descriptor BEFORE the handler; B6.1 wave A]
+ * → requireGithub (R8 backstop) → validate (the SAME exported validator the descriptor's
+ * extract ran) → per-field outboundSanitize (the public-surface REJECT, byte-capped) →
+ * ALLOWLIST-CONSTRUCTED request body (ONLY title/body/state — no agent-supplied assignee/
+ * label/HTML field can slip through) → githubApiWrite → shape the created/updated resource
+ * (its echoed text is wrapped by the choke point's sanitize like any read). Public OR private
+ * repo (v1.83 `repo` scope); the default-deny allowlist — not the scope — is what bounds which
+ * repos a write can touch. */
 
 const TITLE_MAX_BYTES = 256; // GitHub issue title limit
 const BODY_MAX_BYTES = 65536; // GitHub issue/comment body limit
@@ -609,6 +609,182 @@ function requireText(
   return v;
 }
 
+/* ── B6.1 wave A — exported validators (SINGLE SOURCE for the egress descriptor's
+ * `extract` + the handler). Each reproduces the tool's former pre-gate validation
+ * VERBATIM (same order, same plain-Error messages) and returns the validated fields;
+ * the descriptor's extract maps them to the gate's `body`, the handler consumes them
+ * for the allowlist-constructed request. The handler re-runs the validator (cheap,
+ * pure, identical result — defense-in-depth + the handler's own unit surface); the
+ * egress gate is now PIPELINE-FIRED (with-context.ts) so no handler calls it. ── */
+
+export function validateGithubCreateIssueArgs(args: Record<string, unknown>): {
+  owner: string;
+  repo: string;
+  title: string;
+  body: string | undefined;
+} {
+  const owner = requireOwnerRepo(args, "owner");
+  const repo = requireOwnerRepo(args, "repo");
+  const title = requireText(args, "title", true)!;
+  if (title.trim().length === 0) throw new Error("github: 'title' must be non-empty");
+  const body = requireText(args, "body", false);
+  return { owner, repo, title, body };
+}
+
+export function validateGithubCreateIssueCommentArgs(args: Record<string, unknown>): {
+  owner: string;
+  repo: string;
+  number: number;
+  body: string;
+} {
+  const owner = requireOwnerRepo(args, "owner");
+  const repo = requireOwnerRepo(args, "repo");
+  const number = requireNumber(args, "number");
+  const body = requireText(args, "body", true)!;
+  if (body.trim().length === 0) throw new Error("github: 'body' must be non-empty");
+  return { owner, repo, number, body };
+}
+
+export function validateGithubUpdateIssueArgs(args: Record<string, unknown>): {
+  owner: string;
+  repo: string;
+  number: number;
+  title: string | undefined;
+  body: string | undefined;
+  state: string | undefined;
+} {
+  const owner = requireOwnerRepo(args, "owner");
+  const repo = requireOwnerRepo(args, "repo");
+  const number = requireNumber(args, "number");
+  const title = requireText(args, "title", false);
+  const body = requireText(args, "body", false);
+  let state: string | undefined;
+  if (args.state !== undefined) {
+    if (typeof args.state !== "string" || !ISSUE_UPDATE_STATES.has(args.state)) {
+      throw new Error("github: 'state' must be 'open' or 'closed'");
+    }
+    state = args.state;
+  }
+  if (title === undefined && body === undefined && state === undefined) {
+    throw new Error("github: github_update_issue requires at least one of title / body / state");
+  }
+  if (title !== undefined && title.trim().length === 0) {
+    throw new Error("github: 'title' must be non-empty");
+  }
+  return { owner, repo, number, title, body, state };
+}
+
+export function validateGithubCreatePullRequestArgs(args: Record<string, unknown>): {
+  owner: string;
+  repo: string;
+  title: string;
+  head: string;
+  base: string;
+  body: string | undefined;
+  draft: boolean | undefined;
+} {
+  const owner = requireOwnerRepo(args, "owner");
+  const repo = requireOwnerRepo(args, "repo");
+  const title = requireText(args, "title", true)!;
+  if (title.trim().length === 0) throw new Error("github: 'title' must be non-empty");
+  const head = requireRef(args, "head", true)!;
+  const base = requireRef(args, "base", true)!;
+  const body = requireText(args, "body", false);
+  let draft: boolean | undefined;
+  if (args.draft !== undefined) {
+    if (typeof args.draft !== "boolean") throw new Error("github: 'draft' must be a boolean");
+    draft = args.draft;
+  }
+  return { owner, repo, title, head, base, body, draft };
+}
+
+export function validateGithubMergePullRequestArgs(args: Record<string, unknown>): {
+  owner: string;
+  repo: string;
+  number: number;
+  method: string;
+  sha: string | undefined;
+  commitTitle: string | undefined;
+  commitMessage: string | undefined;
+} {
+  const owner = requireOwnerRepo(args, "owner");
+  const repo = requireOwnerRepo(args, "repo");
+  const number = requireNumber(args, "number");
+
+  let method = "squash";
+  if (args.merge_method !== undefined) {
+    if (typeof args.merge_method !== "string" || !MERGE_METHODS.has(args.merge_method)) {
+      throw new Error("github: 'merge_method' must be one of merge / squash / rebase");
+    }
+    method = args.merge_method;
+  }
+  let sha: string | undefined;
+  if (args.sha !== undefined) {
+    if (typeof args.sha !== "string" || !SHA_RE.test(args.sha)) {
+      throw new Error("github: 'sha' must be a 7–40 char hex commit SHA");
+    }
+    sha = args.sha;
+  }
+  const commitTitle = requireText(args, "commit_title", false);
+  const commitMessage = requireText(args, "commit_message", false);
+  return { owner, repo, number, method, sha, commitTitle, commitMessage };
+}
+
+export function validateGithubReviewArgs(args: Record<string, unknown>): {
+  owner: string;
+  repo: string;
+  number: number;
+  event: GithubReviewEvent;
+  body: string | undefined;
+  commitId: string | undefined;
+} {
+  const owner = requireOwnerRepo(args, "owner");
+  const repo = requireOwnerRepo(args, "repo");
+  const number = requireNumber(args, "number");
+
+  if (typeof args.event !== "string" || !REVIEW_EVENTS.has(args.event)) {
+    throw new Error("github: 'event' must be one of APPROVE / REQUEST_CHANGES / COMMENT");
+  }
+  const event = args.event as GithubReviewEvent;
+  const body = requireText(args, "body", false);
+  if (event !== "APPROVE" && (body === undefined || body.trim().length === 0)) {
+    throw new Error(`github: 'body' is required (non-empty) for a ${event} review`);
+  }
+  let commitId: string | undefined;
+  if (args.commit_id !== undefined) {
+    if (typeof args.commit_id !== "string" || !SHA_RE.test(args.commit_id)) {
+      throw new Error("github: 'commit_id' must be a 7–40 char hex commit SHA");
+    }
+    commitId = args.commit_id;
+  }
+  return { owner, repo, number, event, body, commitId };
+}
+
+export function validateGithubSetIssueLabelsArgs(args: Record<string, unknown>): {
+  owner: string;
+  repo: string;
+  number: number;
+  rawLabels: string[];
+} {
+  const owner = requireOwnerRepo(args, "owner");
+  const repo = requireOwnerRepo(args, "repo");
+  const number = requireNumber(args, "number");
+  if (!Array.isArray(args.labels)) {
+    throw new Error("github: 'labels' must be an array of strings (use [] to clear all)");
+  }
+  if (args.labels.length > MAX_LABELS) {
+    throw new Error(`github: at most ${MAX_LABELS} labels per call (got ${args.labels.length})`);
+  }
+  const rawLabels: string[] = [];
+  for (let i = 0; i < args.labels.length; i++) {
+    const l = args.labels[i];
+    if (typeof l !== "string") throw new Error(`github: labels[${i}] must be a string`);
+    if (l.trim().length === 0) throw new Error(`github: labels[${i}] must be non-empty`);
+    rawLabels.push(l);
+  }
+  return { owner, repo, number, rawLabels };
+}
+
 /** POST /repos/{owner}/{repo}/issues — create an issue (title + optional body). */
 export async function githubCreateIssue(
   ctx: ToolContext,
@@ -616,20 +792,11 @@ export async function githubCreateIssue(
   deps: GithubReadDeps = {},
 ): Promise<unknown> {
   const token = requireGithub(ctx).getAccessToken();
-  const owner = requireOwnerRepo(args, "owner");
-  const repo = requireOwnerRepo(args, "repo");
-  const title = requireText(args, "title", true)!;
-  if (title.trim().length === 0) throw new Error("github: 'title' must be non-empty");
-  const body = requireText(args, "body", false);
+  const { owner, repo, title, body } = validateGithubCreateIssueArgs(args);
 
-  // Egress: DEFAULT-DENY repo allowlist (fail fast) + F3a secret-shape on the combined text.
-  enforceGithubWriteEgressGates(ctx, {
-    tool: "github_create_issue",
-    owner,
-    repo,
-    body: body === undefined ? title : `${title}\n${body}`,
-  });
-
+  // Egress (DEFAULT-DENY repo allowlist + F3a secret-shape) is PIPELINE-FIRED before this
+  // handler (with-context.ts via githubCreateIssueEgressDescriptor); the handler must NOT
+  // call the gate (anti-double-fire — egress-callsite.test.ts enforces both directions).
   // Public-surface REJECT + byte-cap, per field. Request body is allowlist-constructed.
   const reqBody: Record<string, unknown> = {
     title: outboundSanitize(title, { tool: "github_create_issue", maxBytes: TITLE_MAX_BYTES }),
@@ -654,14 +821,9 @@ export async function githubCreateIssueComment(
   deps: GithubReadDeps = {},
 ): Promise<unknown> {
   const token = requireGithub(ctx).getAccessToken();
-  const owner = requireOwnerRepo(args, "owner");
-  const repo = requireOwnerRepo(args, "repo");
-  const number = requireNumber(args, "number");
-  const body = requireText(args, "body", true)!;
-  if (body.trim().length === 0) throw new Error("github: 'body' must be non-empty");
+  const { owner, repo, number, body } = validateGithubCreateIssueCommentArgs(args);
 
-  enforceGithubWriteEgressGates(ctx, { tool: "github_create_issue_comment", owner, repo, body });
-
+  // Egress PIPELINE-FIRED before this handler (githubCreateIssueCommentEgressDescriptor).
   const reqBody = {
     body: outboundSanitize(body, { tool: "github_create_issue_comment", maxBytes: BODY_MAX_BYTES }),
   };
@@ -684,30 +846,11 @@ export async function githubUpdateIssue(
   deps: GithubReadDeps = {},
 ): Promise<unknown> {
   const token = requireGithub(ctx).getAccessToken();
-  const owner = requireOwnerRepo(args, "owner");
-  const repo = requireOwnerRepo(args, "repo");
-  const number = requireNumber(args, "number");
-  const title = requireText(args, "title", false);
-  const body = requireText(args, "body", false);
-  let state: string | undefined;
-  if (args.state !== undefined) {
-    if (typeof args.state !== "string" || !ISSUE_UPDATE_STATES.has(args.state)) {
-      throw new Error("github: 'state' must be 'open' or 'closed'");
-    }
-    state = args.state;
-  }
-  if (title === undefined && body === undefined && state === undefined) {
-    throw new Error("github: github_update_issue requires at least one of title / body / state");
-  }
-  if (title !== undefined && title.trim().length === 0) {
-    throw new Error("github: 'title' must be non-empty");
-  }
+  const { owner, repo, number, title, body, state } = validateGithubUpdateIssueArgs(args);
 
-  // secret-shape on the combined provided free text (target check always runs, even
-  // for a state-only update).
-  const combined = [title, body].filter((t): t is string => t !== undefined).join("\n");
-  enforceGithubWriteEgressGates(ctx, { tool: "github_update_issue", owner, repo, body: combined });
-
+  // Egress PIPELINE-FIRED before this handler (githubUpdateIssueEgressDescriptor). The
+  // descriptor's extract reproduces the combined-text scan input verbatim
+  // ([title, body].filter().join("\n")); the target check runs even for a state-only update.
   const reqBody: Record<string, unknown> = {};
   if (title !== undefined) {
     reqBody.title = outboundSanitize(title, { tool: "github_update_issue", maxBytes: TITLE_MAX_BYTES });
@@ -739,28 +882,10 @@ export async function githubCreatePullRequest(
   deps: GithubReadDeps = {},
 ): Promise<unknown> {
   const token = requireGithub(ctx).getAccessToken();
-  const owner = requireOwnerRepo(args, "owner");
-  const repo = requireOwnerRepo(args, "repo");
-  const title = requireText(args, "title", true)!;
-  if (title.trim().length === 0) throw new Error("github: 'title' must be non-empty");
-  const head = requireRef(args, "head", true)!;
-  const base = requireRef(args, "base", true)!;
-  const body = requireText(args, "body", false);
-  let draft: boolean | undefined;
-  if (args.draft !== undefined) {
-    if (typeof args.draft !== "boolean") throw new Error("github: 'draft' must be a boolean");
-    draft = args.draft;
-  }
+  const { owner, repo, title, head, base, body, draft } = validateGithubCreatePullRequestArgs(args);
 
-  // Egress: DEFAULT-DENY repo allowlist (fail fast) + F3a secret-shape on the combined
-  // free text. head/base are refs, not secret-bearing prose → not part of the scan.
-  enforceGithubWriteEgressGates(ctx, {
-    tool: "github_create_pull_request",
-    owner,
-    repo,
-    body: body === undefined ? title : `${title}\n${body}`,
-  });
-
+  // Egress PIPELINE-FIRED before this handler (githubCreatePullRequestEgressDescriptor).
+  // head/base are refs, not secret-bearing prose → not part of the scan.
   // Public-surface REJECT + byte-cap on the free-text fields. Request body is
   // ALLOWLIST-CONSTRUCTED — only title/head/base/body/draft reach the wire.
   const reqBody: Record<string, unknown> = {
@@ -799,39 +924,11 @@ export async function githubMergePullRequest(
   deps: GithubReadDeps = {},
 ): Promise<unknown> {
   const token = requireGithub(ctx).getAccessToken();
-  const owner = requireOwnerRepo(args, "owner");
-  const repo = requireOwnerRepo(args, "repo");
-  const number = requireNumber(args, "number");
+  const { owner, repo, number, method, sha, commitTitle, commitMessage } =
+    validateGithubMergePullRequestArgs(args);
 
-  let method = "squash";
-  if (args.merge_method !== undefined) {
-    if (typeof args.merge_method !== "string" || !MERGE_METHODS.has(args.merge_method)) {
-      throw new Error("github: 'merge_method' must be one of merge / squash / rebase");
-    }
-    method = args.merge_method;
-  }
-  let sha: string | undefined;
-  if (args.sha !== undefined) {
-    if (typeof args.sha !== "string" || !SHA_RE.test(args.sha)) {
-      throw new Error("github: 'sha' must be a 7–40 char hex commit SHA");
-    }
-    sha = args.sha;
-  }
-  const commitTitle = requireText(args, "commit_title", false);
-  const commitMessage = requireText(args, "commit_message", false);
-
-  // Egress: SEPARATE default-deny MERGE allowlist (fail fast) + F3a secret-shape on the
-  // agent-authored merge-commit text (empty when GitHub auto-generates the message).
-  const commitText = [commitTitle, commitMessage]
-    .filter((t): t is string => t !== undefined)
-    .join("\n");
-  enforceGithubMergeEgressGates(ctx, {
-    tool: "github_merge_pull_request",
-    owner,
-    repo,
-    body: commitText,
-  });
-
+  // Egress (SEPARATE default-deny MERGE allowlist + F3a secret-shape on the merge-commit
+  // text) is PIPELINE-FIRED before this handler (githubMergePullRequestEgressDescriptor).
   // ALLOWLIST-CONSTRUCTED body — only merge_method/sha/commit_title/commit_message.
   const reqBody: Record<string, unknown> = { merge_method: method };
   if (sha !== undefined) reqBody.sha = sha;
@@ -875,38 +972,10 @@ export async function githubCreatePullRequestReview(
   deps: GithubReadDeps = {},
 ): Promise<unknown> {
   const token = requireGithub(ctx).getAccessToken();
-  const owner = requireOwnerRepo(args, "owner");
-  const repo = requireOwnerRepo(args, "repo");
-  const number = requireNumber(args, "number");
+  const { owner, repo, number, event, body, commitId } = validateGithubReviewArgs(args);
 
-  if (typeof args.event !== "string" || !REVIEW_EVENTS.has(args.event)) {
-    throw new Error("github: 'event' must be one of APPROVE / REQUEST_CHANGES / COMMENT");
-  }
-  const event = args.event as GithubReviewEvent;
-  const body = requireText(args, "body", false);
-  // GitHub 422s a COMMENT / REQUEST_CHANGES review without a body; only APPROVE may omit
-  // it. Validate locally so the agent gets a clear error before the round-trip.
-  if (event !== "APPROVE" && (body === undefined || body.trim().length === 0)) {
-    throw new Error(`github: 'body' is required (non-empty) for a ${event} review`);
-  }
-  let commitId: string | undefined;
-  if (args.commit_id !== undefined) {
-    if (typeof args.commit_id !== "string" || !SHA_RE.test(args.commit_id)) {
-      throw new Error("github: 'commit_id' must be a 7–40 char hex commit SHA");
-    }
-    commitId = args.commit_id;
-  }
-
-  // Egress: EVENT-CONDITIONAL allowlist (APPROVE → approve list; else write list) + F3a
-  // secret-shape on the review body (empty for a bare APPROVE).
-  enforceGithubReviewEgressGates(ctx, {
-    tool: "github_create_pull_request_review",
-    event,
-    owner,
-    repo,
-    body: body ?? "",
-  });
-
+  // Egress (EVENT-CONDITIONAL allowlist: APPROVE → approve list, else write list; + F3a
+  // secret-shape) is PIPELINE-FIRED before this handler (githubCreatePullRequestReviewEgressDescriptor).
   // ALLOWLIST-CONSTRUCTED body — only event/body/commit_id reach the wire.
   const reqBody: Record<string, unknown> = { event };
   if (body !== undefined) {
@@ -943,32 +1012,10 @@ export async function githubSetIssueLabels(
   deps: GithubReadDeps = {},
 ): Promise<unknown> {
   const token = requireGithub(ctx).getAccessToken();
-  const owner = requireOwnerRepo(args, "owner");
-  const repo = requireOwnerRepo(args, "repo");
-  const number = requireNumber(args, "number");
-  if (!Array.isArray(args.labels)) {
-    throw new Error("github: 'labels' must be an array of strings (use [] to clear all)");
-  }
-  if (args.labels.length > MAX_LABELS) {
-    throw new Error(`github: at most ${MAX_LABELS} labels per call (got ${args.labels.length})`);
-  }
-  const rawLabels: string[] = [];
-  for (let i = 0; i < args.labels.length; i++) {
-    const l = args.labels[i];
-    if (typeof l !== "string") throw new Error(`github: labels[${i}] must be a string`);
-    if (l.trim().length === 0) throw new Error(`github: labels[${i}] must be non-empty`);
-    rawLabels.push(l);
-  }
+  const { owner, repo, number, rawLabels } = validateGithubSetIssueLabelsArgs(args);
 
-  // Egress: default-deny repo allowlist (fail fast) + F3a secret-shape on the combined
-  // label text (a label name is agent-authored text that can create a new repo label).
-  enforceGithubWriteEgressGates(ctx, {
-    tool: "github_set_issue_labels",
-    owner,
-    repo,
-    body: rawLabels.join("\n"),
-  });
-
+  // Egress (default-deny repo allowlist + F3a secret-shape on the combined label text) is
+  // PIPELINE-FIRED before this handler (githubSetIssueLabelsEgressDescriptor).
   // Per-label public-surface REJECT + byte-cap. Body is ALLOWLIST-CONSTRUCTED (only labels).
   const labels = rawLabels.map((l) =>
     outboundSanitize(l, { tool: "github_set_issue_labels", maxBytes: LABEL_MAX_BYTES }),

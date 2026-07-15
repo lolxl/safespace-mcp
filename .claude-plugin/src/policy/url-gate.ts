@@ -519,10 +519,13 @@ export async function fetchThroughGate(
   }
 }
 
-/** The web-fetch Source's error mapper (`Source.mapError`). The gate already
- *  throws MCPErrors (-32036 / -32037 / -32007); an unexpected non-MCPError is
- *  wrapped as a generic operational failure — never as a policy block, and never
- *  leaking the raw error string. */
+/** The web-fetch handler's error mapper (called directly in the handler catch —
+ *  see handlers/web-fetch.ts). The gate already throws MCPErrors (-32036 / -32037 /
+ *  -32007); an unexpected non-MCPError is wrapped as a generic operational failure —
+ *  never as a policy block, and never leaking the raw error string.
+ *  B6.1-B — a DELIBERATE handler-level exception to the client-layer error-mapping
+ *  contract (src/auth/http/connector-error-contract.ts): web_fetch's gate/fetch/map
+ *  are one inseparable SSRF pipeline over DYNAMIC hosts — no per-connector client. */
 export function mapWebFetchError(err: unknown): Error {
   if (err instanceof MCPError) return err;
   return fetchFailed("connection_failed");

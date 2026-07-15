@@ -5,6 +5,10 @@
 import type { ToolDef } from "./types";
 import * as handlers from "../handlers";
 import {
+  gmailCreateDraftEgressDescriptor,
+  gmailSendEgressDescriptor,
+} from "../egress-pipeline";
+import {
   GMAIL_READONLY,
   GMAIL_LABELS,
   GMAIL_MODIFY,
@@ -232,10 +236,14 @@ export const gmailTools: Record<string, ToolDef> = {
     handler: handlers.gmailSend,
     min_tier: "write",
     // v1.64 Phase B (B0) — outbound egress surface: sends agent-authored mail
-    // to recipients outside the user's own account. The label B3 keys the
-    // centralized recipient/secret/tainted gate off (today those gates live
-    // inline in handlers/gmail.ts).
+    // to recipients outside the user's own account. The label keys the choke
+    // point's egress tripwire + (B6.1 wave A3+D) the PIPELINE-FIRED gate.
     direction: "outbound-write",
+    // B6.1 wave A3+D — pipeline-fired TRANSFORMING egress: withToolContext runs
+    // the descriptor (extract → gate, resolving recipients via
+    // source.resolveRecipients) BEFORE the handler and stores the RESOLVED shape on
+    // ctx.egress; the handler wires that (requireEgressResult), never re-fires the gate.
+    egress: gmailSendEgressDescriptor,
   },
   gmail_create_draft: {
     name: "gmail_create_draft",
@@ -276,9 +284,13 @@ export const gmailTools: Record<string, ToolDef> = {
     handler: handlers.gmailCreateDraft,
     min_tier: "write",
     // v1.64 Phase B (B0) — outbound egress surface: a draft is a latent send
-    // (same recipient gate as gmail_send today). Labeled outbound-write so B3's
-    // centralized egress gate covers it identically.
+    // (same recipient gate as gmail_send). Labeled outbound-write so the choke
+    // point's egress tripwire + (B6.1 wave A3+D) the PIPELINE-FIRED gate cover it.
     direction: "outbound-write",
+    // B6.1 wave A3+D — pipeline-fired TRANSFORMING egress, same wrapper as gmail_send
+    // (draft is literal-only + not approval-gated; the wrapper's tool discriminant
+    // handles the difference). Handler wires the RESOLVED shape off ctx.egress.
+    egress: gmailCreateDraftEgressDescriptor,
   },
   gmail_list_drafts: {
     name: "gmail_list_drafts",

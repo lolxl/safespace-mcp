@@ -7,7 +7,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { NOOP_AUDIT } from "../test-audit";
 import type { Credential, ToolContext } from "../types";
+import { TOOL_REGISTRY } from "../registry";
 import { notionAppendBlocks, notionCreatePage, notionUpdatePage } from "./notion";
+
+// B6.1 wave A — the notion egress gate is now PIPELINE-FIRED (with-context.ts via each
+// write tool's egress descriptor), not handler-called. The gate-DENIAL / F3a cases below
+// drive the SAME registry-carried descriptor (extract → gate), the choke-point sequence.
+async function fireGate(tool: string, gctx: ToolContext, args: Record<string, unknown>): Promise<void> {
+  const d = TOOL_REGISTRY[tool]?.egress;
+  if (d === undefined) throw new Error(`no egress descriptor on ${tool}`);
+  await d.gate(gctx, d.extract(args));
+}
 
 const PARENT = "11111111-1111-1111-1111-111111111111";
 const PAGE = "22222222-2222-2222-2222-222222222222";
@@ -154,14 +164,12 @@ describe("notion write — input validation (plain Error, fail-fast, never hits 
 });
 
 describe("notion write — egress gate (model B: F3a secret-shape) + outbound REJECT", () => {
-  test("autonomous + secret-shape body → outbound_secret_rejected (never hits Notion)", async () => {
+  test("autonomous + secret-shape body → outbound_secret_rejected (pipeline gate)", async () => {
     process.env.SAFESPACE_AUTONOMOUS = "true";
-    const f = fetchStub();
     const secret = "-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----";
     await expect(
-      notionCreatePage(ctx(), { parent_page_id: PARENT, title: "T", text: secret }, { fetchImpl: f.impl }),
+      fireGate("notion_create_page", ctx(), { parent_page_id: PARENT, title: "T", text: secret }),
     ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
   });
 
   test("a zero-width char in the title → outbound_sanitize_rejected (-32027, never hits Notion)", async () => {
@@ -318,14 +326,12 @@ describe("notion properties — type allowlist + value-shape validation (v1.105)
     expect(f.calls).toHaveLength(0);
   });
 
-  test("a secret-shaped property value is caught by the egress gate (autonomous)", async () => {
+  test("a secret-shaped property value is caught by the egress gate (autonomous, pipeline gate)", async () => {
     process.env.SAFESPACE_AUTONOMOUS = "true";
-    const f = fetchStub();
     const secret = "-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----";
     await expect(
-      notionCreatePage(ctx(), mk({ Note: { type: "rich_text", value: secret } }), { fetchImpl: f.impl }),
+      fireGate("notion_create_page", ctx(), mk({ Note: { type: "rich_text", value: secret } })),
     ).rejects.toMatchObject({ errorName: "outbound_secret_rejected" });
-    expect(f.calls).toHaveLength(0);
   });
 });
 

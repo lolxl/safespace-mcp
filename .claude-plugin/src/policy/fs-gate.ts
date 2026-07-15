@@ -348,7 +348,10 @@ export async function readThroughGate(
 
 /** Per-source error mapper — MCPError passthrough (the gate throws the closed-set
  *  path_blocked_by_policy / fs_read_failed); any other thrown value → generic
- *  fs_read_failed. Mirrors mapWebFetchError. NEVER echoes the requested path. */
+ *  fs_read_failed. Mirrors mapWebFetchError. NEVER echoes the requested path.
+ *  B6.1-B — a DELIBERATE handler-level exception to the client-layer error-mapping
+ *  contract (src/auth/http/connector-error-contract.ts): fs-read has no network and
+ *  no client layer — this maps local fs errors. */
 export function mapFsReadError(err: unknown): Error {
   if (err instanceof MCPError) return err;
   return new MCPError("fs_read_failed", { reason: "read_error" });
