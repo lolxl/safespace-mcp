@@ -56,19 +56,26 @@ A read-only tool on an existing connector is just a registry fragment + a handle
    it into `FRAGMENTS`, and add each tool name to **`TOOL_ORDER`**. That's it for
    exposure: `IMPLEMENTED_TOOLS` and `TOOL_REGISTRY` are **derived from `TOOL_ORDER`**
    (single source of truth) — there is no second list to keep in sync.
-4. **Handlers** — `src/tools/handlers/<source>.ts`. Read the credential via the
+4. **Connector token** — add the new `source` id to `NON_GOOGLE_CONNECTOR_TOKENS` in
+   `src/policy/connector-toggle.ts` so operators can name it in
+   `SAFESPACE_CONNECTORS` (a new **Google sub-service** instead adds its tool-name
+   prefix to `GOOGLE_SUBSERVICE_TOKENS`). The sentinel test in
+   `connector-toggle.test.ts` fails if you skip this; at runtime an unmapped tool is
+   fail-safe (always exposed), so the omission never hides a tool — it just makes it
+   un-toggleable.
+5. **Handlers** — `src/tools/handlers/<source>.ts`. Read the credential via the
    narrowing helper (`requireGithub(ctx)`, `requireServiceToken(ctx)`, …) so a
    wrong-provider credential throws before any network call.
-5. **Class B only** — a token in `auth/service-token-store.ts` (a reserved
+6. **Class B only** — a token in `auth/service-token-store.ts` (a reserved
    `SecretBackend` key) + CLI `set-token` / `status` / `clear-token` subcommands.
-6. **Outbound / external-write tools** — see Step 2 (the non-negotiable part).
-7. **Error codes** — if the source needs new failure reasons, add to `src/errors.ts`
+7. **Outbound / external-write tools** — see Step 2 (the non-negotiable part).
+8. **Error codes** — if the source needs new failure reasons, add to `src/errors.ts`
    (`ErrorName` union + `ERROR_CODES`). Pick the next free `-320xx`; never echo a token
    or a private identifier in the recovery string.
-8. **Env vars** — every `SAFESPACE_*` name lives in `src/config.ts` (CI fails on a
+9. **Env vars** — every `SAFESPACE_*` name lives in `src/config.ts` (CI fails on a
    `SAFESPACE_` literal read outside it).
-9. **Tests** — sentinel style (see Step 3).
-10. **Version + docs** — bump the three manifests in lockstep, add a `CHANGELOG.md`
+10. **Tests** — sentinel style (see Step 3).
+11. **Version + docs** — bump the three manifests in lockstep, add a `CHANGELOG.md`
     entry, and update the tool count in the manifest descriptions.
 
 ## Step 2 — the non-negotiable: gate every outbound write
@@ -106,6 +113,7 @@ tells you exactly what's missing:
 |---|---|
 | add the tool to a registry list / wrong count | `registry.test.ts` (exhaustive key list + size) |
 | gate an external write | `egress-coverage.test.ts` (the partition fails) |
+| add the connector's `SAFESPACE_CONNECTORS` token | `connector-toggle.test.ts` (every tool must map to exactly one token) |
 | register / collide an error code | `errors.test.ts` (exhaustive code list) |
 | read an env var outside `config.ts` | `config.test.ts` |
 | desync the three manifests | `scripts/check-manifest-versions.sh` + a CI sentinel |

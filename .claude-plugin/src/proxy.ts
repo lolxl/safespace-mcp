@@ -13,6 +13,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { configDir, loadIndex } from "./auth/keychain";
 import { enforceAutonomousTokenStorage } from "./auth/select-backend";
 import { enforceEnforcedMode } from "./policy/enforced-mode";
+import { validateConnectors } from "./policy/connector-toggle";
 import { ENV_AUTH, ENV_AGENT_TOKENS_FILE } from "./config";
 import {
   type AgentTokenRecord,
@@ -59,9 +60,20 @@ import {
 // depth + the not-enforced-but-autonomous case); a no-op when enforced mode
 // already passed the token check. No-op when not autonomous, in passphrase mode,
 // on Keychain, or with the escape hatch set.
+//
+// v1.127 — `validateConnectors()` refuses to start on an unrecognized
+// SAFESPACE_CONNECTORS token (or a set that selects nothing), naming the offenders
+// and printing every valid token. It lives HERE, in the guarded startup sequence,
+// and deliberately NOT at module evaluation of policy/connector-toggle.ts: a throw
+// during `import` would reach the MCP client as a bare "server disconnected" with
+// no message at all, and would make server.ts unimportable by tests that have not
+// pre-set the env. Fail-loud (not the fs-gate's warn-and-drop) because a dropped
+// connector token is silent capability loss, the failure direction tier.ts names as
+// the dangerous one. No-op when the variable is unset (Model A, byte-identical).
 try {
   enforceEnforcedMode();
   enforceAutonomousTokenStorage();
+  validateConnectors();
 } catch (e) {
   console.error(`[safespace] ${e instanceof Error ? e.message : String(e)}`);
   process.exit(1);

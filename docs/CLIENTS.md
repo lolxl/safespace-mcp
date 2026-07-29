@@ -135,6 +135,24 @@ above (e.g. Claude Desktop's `claude_desktop_config.json`). Drop the same
   enforced at the `tools/list` boundary, so disallowed tools are invisible to the
   agent. Start at `read`; raise it only for the surface you want the agent to
   write to.
+- **Context cost, and how to cut it (v1.127).** SafeSpace exposes 130 tools; a
+  client that does not lazy-load tool schemas pays for **all** of them on every
+  session (~22k tokens at `read`, ~52k at `share`), and Google Workspace alone is
+  ~39k of that. Claude Code defers tool schemas and does not pay this — Codex,
+  Grok, Antigravity, and Cursor do. Narrow the surface with
+  **`SAFESPACE_CONNECTORS`**, a comma-separated list of connectors and/or Google
+  sub-services: `SAFESPACE_CONNECTORS=gmail,calendar,github` takes a `share`-tier
+  session from ~52k to ~15k. Valid tokens: `discord`, `fs-read`, `github`, `line`,
+  `mattermost`, `notion`, `slack`, `telegram`, `web-fetch`, `webhook`, `x`,
+  `calendar`, `contacts`, `docs`, `drive`, `forms`, `gmail`, `sheets`, `slides`,
+  `tasks`, `youtube`, plus `google-workspace` as an alias for all ten Google
+  sub-services. **Unset = every connector exposed** (the default). It *intersects*
+  with the tier — it can only narrow, never widen — and is enforced at both
+  `tools/list` and `tools/call`. An unrecognized token makes the server refuse to
+  start rather than silently drop a connector, and changing the value (like
+  changing the tier) **requires a client restart**, since clients cache
+  `tools/list`. It does **not** reduce the OAuth scope union — see
+  [`.env.example`](../.env.example) for the full note.
 - **One host owns the tokens.** Tokens live on the machine that runs the server,
   under `SAFESPACE_CONFIG_DIR`. Run consent on that same machine (or copy the
   config dir there) so the server can read and refresh them.

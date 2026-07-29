@@ -70,6 +70,47 @@ v1.35**, n/h gap shut, Devanagari formally closed).
    invariants). This was the **last *actionable* security-review carry-forward**
    — items 1–2 are design-deferred-pending-evidence, item 3 is a Model-B item.
 
+5. **OAuth scope union is NOT narrowed by `SAFESPACE_CONNECTORS`** (NEW, v1.127 —
+   raised by the pre-implementation review). `computeScopeUnion`
+   (`src/tools/registry/index.ts`) unions `requiredScopes` across the WHOLE
+   registry, so `SAFESPACE_CONNECTORS=gmail` still consents to Drive / YouTube /
+   Sheets / Slides / Forms / Tasks / Contacts / Calendar. The v1.127 axis narrows
+   the **agent's reach through SafeSpace**, not the **token's authority** — an
+   operator will plausibly assume otherwise, so the gap is documented in
+   `.env.example`, `docs/CLIENTS.md`, and the module header. Feeding the connector
+   set into the scope union would turn the axis from an exposure filter into a real
+   structural reduction (a smaller consent screen, a less powerful token at rest),
+   but it interacts with the existing consent/re-consent flow and multi-account
+   token store, so it is deliberately its own cycle. **Not a regression — a
+   pre-existing property the new axis makes newly visible.**
+
+6. **`SAFESPACE_CONNECTORS` does not stop the inbound webhook listener** (NEW,
+   v1.127 — raised HIGH by the implementation security review). `proxy.ts` starts
+   the public `node:http` listener on `webhookEnabled()` (`SAFESPACE_WEBHOOK_PORT`)
+   alone. Omitting the `webhook` token hides `inbox_read` from the agent and refuses
+   it at `tools/call`, but SafeSpace still binds the socket, still accepts signed
+   Slack/LINE callbacks, and still persists that third-party content to the durable
+   inbox. **This is the widest of the four non-coverage gaps** because it is
+   SafeSpace's only unsolicited public surface — an operator reading "the webhook
+   connector is off" would be wrong in the direction that matters most. Not an exfil
+   path (the agent cannot read the inbox), but a listening socket the operator
+   believes is closed. Mitigation today: unset `SAFESPACE_WEBHOOK_PORT`. Documented
+   in the module header + `docs/DEPLOY.md`. A future cycle should decide whether
+   `webhookEnabled()` should consult the axis, or whether the two knobs are
+   deliberately independent (the listener is a Model-B deployment property, the axis
+   is an agent-surface property — a case can be made either way).
+
+7. **`SAFESPACE_CONNECTORS` does not stop the contacts connector being exercised
+   internally** (NEW, v1.127 — raised MED by the same review). The People-API
+   name→email lookup is a Source strategy (`resolveRecipients`, `tools/source.ts`)
+   and is also called directly from `handlers/calendar.ts`; neither consults the
+   axis. With `SAFESPACE_CONNECTORS=gmail,calendar` plus the separate
+   `SAFESPACE_RECIPIENT_ALLOW_CONTACTS=true` opt-in, a name-shaped recipient still
+   queries the address book. Bounded: the 5 `contacts_*` tools ARE hidden and
+   blocked (the agent cannot browse contacts), the lookup is read-only and
+   name→email only, and the opt-in defaults off. Same class as item 6 — the axis
+   gates the agent's TOOL SURFACE, not internal helper calls between connectors.
+
 > **CLOSED in v1.34:** the recursive-AST / nested-formula bypass (v1.21 §3.3)
 > that occupied this list through v1.33 — closed via a string-literal-aware
 > linear token scanner (depth-agnostic, ReDoS-free, lower blast radius) that

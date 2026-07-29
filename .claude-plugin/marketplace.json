@@ -9,7 +9,7 @@
       "name": "safespace-mcp",
       "source": "./.claude-plugin",
       "description": "The AI safety gateway for an agent's external surface — a provider-agnostic safety envelope (sanitize, untrusted-content tagging, tier/scope/burst/recipient egress gates, autonomy hardening, audit trail) between an AI agent and any source it touches. 111 tools: Google Workspace (Gmail/Drive/Docs/Calendar/Contacts/YouTube+Analytics/Tasks/Sheets/Slides/Forms — the flagship connector), GitHub read (repos/issues/PRs/commits/file content + PR diffs) + write (the 2nd OAuth source; writes behind a default-deny repo allowlist), Notion read (search/pages/blocks/databases — every title/block/property sanitize-wrapped), a keyless SSRF-gated web_fetch + a default-deny path-gated fs_read, and LINE + Telegram + Discord push. Tier-based exposure (read|write|share); tokens behind the Keychain or an encrypted file.",
-      "version": "1.126.0",
+      "version": "1.127.0",
       "author": { "name": "lolxl" }
     }
   ]

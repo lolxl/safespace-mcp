@@ -14,6 +14,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { MCPError } from "./errors";
 import { tierSatisfies, type Tier } from "./tier";
+import { connectorSelectionKey, isConnectorEnabled } from "./policy/connector-toggle";
 import { EnvOperatorResolver, type OperatorResolver } from "./identity/operator-context";
 import { IMPLEMENTED_TOOLS, TOOL_REGISTRY } from "./tools/registry";
 import { sourceFor } from "./tools/source";
@@ -28,30 +29,49 @@ import pkg from "../package.json" with { type: "json" };
 const SERVER_NAME = "safespace-mcp";
 const SERVER_VERSION = pkg.version;
 
-// Cold-path: the tools/list projection is a PURE function of one of exactly 3
-// tier values, yet the handler re-walked all of TOOL_REGISTRY + re-allocated the
-// projected array on EVERY request (wasteful under HTTP polling). Precompute one
-// array per tier at module load — iterating Object.values in registry order so
-// the on-wire TOOL_ORDER stays byte-identical — and the handler becomes a keyed
-// lookup. The per-request operator.resolve() stays live (below), so tier
-// freshness (env re-read each request under Model A) is unchanged; only the
-// projection is memoized. Treat the per-tier arrays as read-only — the SDK
-// serializes them without mutation (same shared-reference convention as the
+// Cold-path: the tools/list projection is a PURE function of (tier, connector
+// selection), yet the handler re-walked all of TOOL_REGISTRY + re-allocated the
+// projected array on EVERY request (wasteful under HTTP polling). Memoize the
+// projection — iterating Object.values in registry order so the on-wire
+// TOOL_ORDER stays byte-identical — and the handler becomes a keyed lookup.
+//
+// v1.127: the cache is keyed on tier AND `connectorSelectionKey()` rather than
+// precomputed for the 3 tiers at module load. That is deliberate. Reading
+// SAFESPACE_CONNECTORS once at module load would be correct in production (env is
+// fixed for the process lifetime) but WRONG under test: `bun test` runs every test
+// file in one process with one module cache, so whichever file imported this module
+// first would freeze the connector selection for the whole suite. Both inputs are
+// therefore resolved per request — the same freshness contract tier already had —
+// and only the projection is memoized. Treat the cached arrays as read-only; the
+// SDK serializes them without mutation (same shared-reference convention as the
 // inputSchema objects, which were already shared via def.inputSchema).
-const TOOLS_BY_TIER = (() => {
-  const implemented = Object.values(TOOL_REGISTRY).filter((def) =>
-    IMPLEMENTED_TOOLS.has(def.name),
-  );
-  const build = (tier: Tier) =>
-    implemented
-      .filter((def) => tierSatisfies(tier, def.min_tier))
-      .map((def) => ({
-        name: def.name,
-        description: def.description,
-        inputSchema: def.inputSchema,
-      }));
-  return { read: build("read"), write: build("write"), share: build("share") };
-})();
+const IMPLEMENTED_DEFS = Object.values(TOOL_REGISTRY).filter((def) =>
+  IMPLEMENTED_TOOLS.has(def.name),
+);
+const TOOLS_CACHE = new Map<
+  string,
+  Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>
+>();
+
+function toolsFor(tier: Tier): Array<{
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}> {
+  const key = `${tier}|${connectorSelectionKey()}`;
+  let tools = TOOLS_CACHE.get(key);
+  if (tools === undefined) {
+    tools = IMPLEMENTED_DEFS.filter(
+      (def) => tierSatisfies(tier, def.min_tier) && isConnectorEnabled(def),
+    ).map((def) => ({
+      name: def.name,
+      description: def.description,
+      inputSchema: def.inputSchema,
+    }));
+    TOOLS_CACHE.set(key, tools);
+  }
+  return tools;
+}
 
 function renderMcpError(err: MCPError): {
   content: Array<{ type: "text"; text: string }>;
@@ -93,9 +113,9 @@ export function createMcpServer(
     // v1.74 PR-2a — filter by THIS operator's tier (was the process-global
     // currentTier()). Model A default re-reads env per request → byte-identical.
     // The tier resolve stays per-request; only the projection is memoized
-    // (TOOLS_BY_TIER, built once at module load), so freshness is unchanged.
+    // (keyed on tier + connector selection), so freshness is unchanged.
     const tier = operator.resolve().tier;
-    return { tools: TOOLS_BY_TIER[tier] };
+    return { tools: toolsFor(tier) };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -119,6 +139,17 @@ export function createMcpServer(
     // per call → byte-identical; PR-2b supplies a per-session resolver.
     const op = operator.resolve();
     if (!tierSatisfies(op.tier, def.min_tier)) {
+      return renderMcpError(new MCPError("tool_not_found", { name: req.params.name }));
+    }
+
+    // v1.127 — the SECOND exposure axis (policy/connector-toggle.ts), re-checked
+    // here for exactly the reason the tier re-check above exists: the tools/list
+    // filter is ADVISORY to the client. A caller holding a tool list cached from a
+    // wider configuration — or an injected agent that simply knows the tool names —
+    // can call anything. Without this the axis would be cosmetic. Collapses into the
+    // SAME `tool_not_found` as the unknown-tool and tier-blocked branches, so it
+    // adds no distinguishability (no config-state oracle).
+    if (!isConnectorEnabled(def)) {
       return renderMcpError(new MCPError("tool_not_found", { name: req.params.name }));
     }
 

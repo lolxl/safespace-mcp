@@ -1298,6 +1298,10 @@ What v2.2 does NOT defend:
 
 **Fourth-config-pattern flag**: with v2.2 the proxy has four distinct policy-config patterns (single env value for tier, comma-sep env list ×2 for recipients, JSON schema file for whitelist, plus the implicit tools/list-driven tier filter). Acceptable for v2.2; if v2.3+ adds another axis (time window, IP allowlist, payload size), consolidate to a unified `policies.json` schema. v2.2 explicitly defers consolidation.
 
+> **v1.127 — the consolidation trigger fired, and consolidation is DEFERRED again (deliberately, with a reason).** `SAFESPACE_CONNECTORS` (`src/policy/connector-toggle.ts`) is exactly the "another axis" this flag anticipated: a WHICH-CONNECTOR axis alongside WHEN (tier) × WHAT (folder) × WHO (recipient). It does not trigger consolidation because it is the same config pattern as the tier — a single comma-separated env value read per request, filtering the same `tools/list` boundary — rather than a fifth one; and because it is the axis most likely to be set **per client config** (each client's `mcpServers` entry carries its own `env` block), which a shared `policies.json` file on the host would actively fight. Consolidation is still the right move the first time an axis needs *structured* config (nesting, per-operator overrides, or time windows); `SAFESPACE_CONNECTORS` needs none of those. Revisit if a per-operator `allowedConnectors` lands in `operators.json`.
+>
+> Note the axis composition rule: connector ∩ tier, narrowing-only. The connector axis can never carry a tool past its `min_tier` — proven by a subset assertion over all three tiers in `connector-toggle.test.ts`.
+
 **Doctor verbosity**: v2.2 brings doctor's check count higher. Follow-up `safespace doctor --short` (issue-only filter) suggested as a tiny separate PR, not blocking v2.2.
 
 ### Version: 1.5.0

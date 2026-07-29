@@ -477,6 +477,230 @@ free-text `title`/`detail` (`src/auth/x/client.ts`). No token, refresh token, or
 user id is echoed. The request body is allowlist-constructed (`{text}` only — no
 reply/quote fields), so a caller cannot smuggle extra API parameters through.
 
+### 13. GitHub write egress (`github_create_issue`, `github_merge_pull_request`, …) — v1.70 / v1.71 / v1.82 / v1.90
+
+GitHub is SafeSpace's 2nd **OAuth** source (class A): consent is a loopback
+authorization-code exchange (`src/auth/github/consent.ts`; no PKCE), identity comes from
+`GET /user`, and the token is stored behind the same `SecretBackend` as every other
+credential under a reserved `github:<login>` key (`src/auth/github/store.ts`) — account
+metadata (login + granted scopes) lives in `github-account.json` (`0o600`, dir `0o700`).
+The Source is **`refreshable: false`**: SafeSpace holds no refresh path for it, so the
+choke point's Google-only 401-force-refresh retry is skipped and a rejected token is an
+operator re-consent, not an automatic recovery.
+
+Scopes are fixed at consent: **`read:user` + `repo`** (`src/auth/github/scopes.ts`).
+GitHub returns granted scopes comma-separated; SafeSpace matches them by **exact token
+membership, never substring** (so a `public_repo` grant cannot satisfy `repo`). Every
+`github_*` tool declares `requiredScopes: []` at the registry level — GitHub's scopes are
+flat, enforced at consent time and by GitHub's own 403, not by the proxy's per-call scope
+pre-check (that machinery is google-workspace-specific). 18 tools: 11 read + 7 write.
+
+**Three SEPARATE default-deny allowlists.** Each is empty-by-default **hard-deny** (the
+public-surface idiom — the opposite of `SAFESPACE_RECIPIENT_ALLOW`), two-layer
+(`…_TARGETS` persistent + `…_TARGETS_EXTRA` shell-only), takes case-insensitive
+`owner/repo` entries (each segment `^[A-Za-z0-9_.-]{1,100}$`, `..` rejected), and echoes
+**no owner/repo** on denial (`reason` ∈ `{no_allowlist, not_in_allowlist}`):
+
+1. **`SAFESPACE_GITHUB_WRITE_TARGETS`** (`policy/github-write-targets.ts`) — gates
+   `github_create_issue` / `github_create_issue_comment` / `github_update_issue` /
+   `github_create_pull_request` / `github_set_issue_labels`, plus the **COMMENT** and
+   **REQUEST_CHANGES** events of `github_create_pull_request_review`. Denial →
+   `-32042 github_write_denied_by_policy`.
+2. **`SAFESPACE_GITHUB_MERGE_TARGETS`** (v1.82, `policy/github-merge-targets.ts`) — gates
+   `github_merge_pull_request` alone. A merge is **irreversible**, so it gets its own
+   list: a repo being write-allowlisted does **not** make it merge-allowlisted. Denial →
+   `-32046 github_merge_denied_by_policy`.
+3. **`SAFESPACE_GITHUB_APPROVE_TARGETS`** (v1.90, `policy/github-approve-targets.ts`) —
+   gates the **APPROVE** event of `github_create_pull_request_review` alone. An APPROVE
+   vouches for a PR and can **unblock its merge** under branch protection — a higher bar
+   than a comment — so the review gate is **event-conditional**: APPROVE → this list,
+   COMMENT / REQUEST_CHANGES → the write list. Denial →
+   `-32048 github_approve_denied_by_policy`.
+
+Gate order is locked (`tools/egress.ts`): **target allowlist first** (fail fast, before
+any body work) → **F3a outbound secret-shape** on the combined outbound text → **per-field
+`outboundSanitize`** REJECT (`-32027`). The first two are **pipeline-fired** — each write
+ToolDef carries an `egress:` descriptor the choke point runs *before* the handler, so a
+handler cannot skip them, and `egress-callsite.test.ts` enforces the anti-double-fire
+invariant in both directions. The per-field `outboundSanitize` deliberately stays **in the
+handler**, immediately before the body is built.
+
+Every request body is **allowlist-constructed** — only the named fields reach the wire:
+`create_issue` `{title, body?}` · `create_issue_comment` `{body}` · `update_issue`
+`{title?, body?, state?}` · `create_pull_request` `{title, head, base, body?, draft?}` ·
+`merge_pull_request` `{merge_method, sha?, commit_title?, commit_message?}` ·
+`create_pull_request_review` `{event, body?, commit_id?}` · `set_issue_labels` `{labels}`.
+
+`api.github.com` is registered `enforcement: "enforced"` in the egress-destination
+registry and asserted at the client's single fetch chokepoint
+(`src/auth/github/client.ts`) — a path-injection host escape (`api.github.com@evil.com`)
+throws `-32047 egress_destination_blocked` **before any socket is opened**, echoing the
+hostname only, never the token-bearing URL. Operational failures raise
+`-32041 github_api_failed` with a **closed-set** `reason` (`no_token` / `auth_failed` /
+`rate_limited` / `not_found` / `api_error`) decided by the status code alone, never
+GitHub's free-text error body. No token is echoed.
+
+**Bounded assumptions.**
+
+- **Private-repo reads have no allowlist.** The `repo` scope (upgraded from `public_repo`
+  in v1.83) reaches every repository the authorizing user can see, and the three target
+  allowlists gate **writes only**. Reading is bounded by the OAuth consent and the tier:
+  the position is that the egress gates bound what *leaves* the agent, not what it may
+  look at.
+- **Single-account by design.** The GitHub Source is single-login in v1; Model B's
+  per-operator `allowedAccounts` confinement has no effect on it.
+- **A label name is public agent-authored text.** `github_set_issue_labels` **creates** a
+  label that does not yet exist on the repo, so label names get the same
+  `outboundSanitize` + F3a treatment as issue bodies.
+- A state-only `github_update_issue` still fires the allowlist gate (the combined body is
+  `""`, so F3a scans an empty string, but the target check is never skipped).
+
+### 14. Notion write egress (`notion_create_page`, `notion_update_page`, `notion_append_blocks`) — v1.77 / v1.78 / v1.79
+
+Notion is the 3rd **OAuth** source (class A). The v1.77 internal-integration-token path is
+**superseded** by OAuth (v1.78): consent is an HTTP-Basic `client_id:client_secret` token
+exchange (`src/auth/notion/consent.ts`; no PKCE), and the workspace identity
+(`workspace_id` / `workspace_name`) arrives **in the token-exchange response body** —
+there is no separate identity call. Tokens live behind `SecretBackend` under a reserved
+`notion:<workspaceId>` key; the workspace index is `notion-account.json`. Like GitHub, the
+Source is `refreshable: false`. **Multi-workspace** is supported (v1.79): resolution runs
+explicit `account_id` (id, or workspace name case-insensitively) → active pointer →
+per-source last-used, all confined to the operator's `allowedAccounts` under Model B.
+
+**Notion has no scopes.** Every tool declares `requiredScopes: []` and the Source's
+`authorize()` is a deliberate no-op — an integration's capabilities are configured
+**Notion-side**, not requested per call. 8 tools: 5 read + 3 write.
+
+**There is deliberately NO target allowlist** — the one connector-shaped exception to the
+public-surface deny-default idiom, and the reason is worth stating plainly:
+`enforceNotionWriteEgressGates` runs **F3a alone** (`tools/egress.ts`) because **Notion's
+own integration-sharing model is already a natural allowlist** — an integration can only
+touch pages and databases a human explicitly shared with it, enforced Notion-side. A
+SafeSpace-side page-id deny-list would be largely redundant and high-friction. The write
+surface is therefore bounded by (a) Notion's sharing scope, (b) the `write` tier, and
+(c) per-field `outboundSanitize` + byte caps.
+
+Gate order for all three writes: **F3a secret-shape (pipeline-fired, before the handler)**
+→ handler → **per-field `outboundSanitize` (`-32027`) + byte caps** →
+allowlist-constructed body. `notion_create_page` had two pre-gate call sites (page-parent
+vs database-parent); `prepareNotionCreatePage` now picks the branch internally, so a
+**single** descriptor covers both.
+
+Bodies are allowlist-constructed: `create_page` `{parent, properties, children}` ·
+`append_blocks` `{children}` · `update_page` `{properties?, archived?}`.
+`buildNotionProperties` accepts only a closed set of writable property types (`title`,
+`rich_text`, `number`, `checkbox`, `url`, `email`, `phone_number`, `select`, `status`,
+`multi_select`, `date`) and **rejects** `relation` / `people` / `formula` / `rollup` /
+`files` / `created_time` / `last_edited_time` and anything unknown — without echoing the
+agent's type string. A `url` property write is restricted to `http(s)://`, blocking
+`javascript:` / `data:` — a scheme-XSS guard for the Notion clients that render the link
+(SafeSpace itself never follows it).
+
+**Inbound sanitize.** `NOTION_SKIP_FIELDS` (`tools/source.ts`) *replaces* the global skip
+set for this source, so it must enumerate every opaque/structural key the shapers emit:
+`id`, `object`, `type`, `parent_type`, `url`, `created_time`, `last_edited_time`,
+`next_cursor`. Everything attacker-influenced — title, text, property names *and* values,
+column names, people names — stays out of it and is sanitize-wrapped. Database properties
+are returned as an **array of `{name, type, value}` rather than a keyed map**, specifically
+so an attacker-controlled column *name* is a wrapped value rather than an object key.
+
+`api.notion.com` is `enforcement: "enforced"` in the egress-destination registry and
+asserted before every fetch; the `Notion-Version` header is a pinned constant
+(`2022-06-28`). Failures raise `-32045 notion_api_failed` with a **closed-set** `reason`
+(`no_token` / `auth_failed` / `rate_limited` / `not_found` / `api_error`) — no token or id
+echoed. The consent flow narrows its error surface too: Notion's OAuth `error` field is
+echoed only if it matches `^[a-z_]{1,64}$`, else collapsed to `"unknown_error"`, so an
+`error_description` body can never surface.
+
+**Notable.** There is **no `notion_delete_page`** — deletion is modeled only as the
+reversible `archived: true` (move to Trash) via `notion_update_page`, so it is explicitly
+**not** an F4 permanent-delete. A mid-consent failure only wipes a workspace/token that
+run *newly* added; a prior successful consent is never destroyed by a later failure.
+
+### 15. The other service-token connectors — Discord / Slack / Mattermost — v1.69 / v1.95 / v1.107
+
+These three are class-B **service-token** connectors built on the same machinery as LINE
+(§11). Rather than restate §11 three times, this section states what is **identical** and
+then only what **diverges** — the divergences are the part worth reading.
+
+**Identical to the LINE baseline for all three:**
+
+- **Token storage** — one long-lived token behind `SecretBackend` under a reserved
+  non-email key (`discord:bot-token` / `slack:bot-token` / `mattermost:bot-token`), or
+  the shell-only env var (`SAFESPACE_{DISCORD,SLACK,MATTERMOST}_BOT_TOKEN`); **env takes
+  precedence** (`auth/service-token-store.ts`). The token is a getter read only when
+  building the `Authorization` header — never logged, echoed, or serialized. Each
+  `safespace <connector> set-token` reads from **stdin, never argv**, and never echoes.
+- **Recipient allowlist** — `SAFESPACE_{DISCORD,SLACK,MATTERMOST}_RECIPIENT_ALLOW`
+  (+`_EXTRA`), built by one shared factory (`policy/service-token-allowlist.ts`).
+  **Default unset = allow** (private, tier-gated surfaces — the §4 posture); **under
+  `SAFESPACE_AUTONOMOUS` an unset/empty allowlist denies all** (the §5a idiom). Denial
+  reuses `-32019`; the id is HMAC-hashed into the audit row, never echoed. Id formats
+  differ only in their regex: Discord `^\d{17,20}$` (snowflake) · Slack
+  `^[CDGUW][A-Z0-9]{6,20}$` · Mattermost `^[a-z0-9]{26}$`.
+- **Gate order** — one shared `enforceServiceTokenRecipientGate` (`tools/egress.ts`) runs
+  **F3a outbound secret-shape first, then the recipient allowlist**, for all five
+  service-token connectors alike. (Note this is the *opposite* order from the GitHub
+  write gate in §13, where the allowlist runs first to fail fast.)
+- **Pipeline-fired egress** — each write ToolDef carries an `egress:` descriptor
+  (`tools/egress-pipeline.ts`) fired by the choke point before the handler; the handler
+  must not re-fire it.
+- **Allowlist-constructed, text-only bodies** — no embeds, blocks, attachments, or any
+  field carrying a URL the remote server would fetch, so the §7 `IMAGE`-class
+  SSRF-by-proxy is structurally impossible.
+
+**Discord** (`discord_send_message` — 1 tool, `min_tier: share`). Host `discord.com`,
+hardcoded, `enforcement: "enforced"`. The body is `{content, allowed_mentions: {parse: []}}`
+— `allowed_mentions.parse: []` is **always** set by construction, so `@everyone` / `@here`
+/ role mentions are rendered **inert** (`tools/handlers/discord.ts`). Failures raise
+`-32040 discord_api_failed` with the LINE-shaped closed set (`no_token` / `auth_failed` /
+`rate_limited` / `invalid_recipient` / `api_error`). No divergence from the baseline
+beyond the mention-neutralization mechanism.
+
+**Slack** (5 tools — `slack_send_message` at `share`, plus 4 `read` tools). Host
+`slack.com`, hardcoded, `enforced`; asserted on both the send path and every read.
+Three divergences:
+
+1. **`&`/`<`/`>` escaping** — the body is `{channel, text: escapeSlackText(text)}`;
+   `escapeSlackText` replaces `&`→`&amp;` first, then `<`→`&lt;`, `>`→`&gt;`
+   (`tools/handlers/slack.ts`), so Slack's mention/link control sequences are inert. It is
+   **wire-only**: the egress gate deliberately scans the **raw, pre-escape** text, so F3a
+   sees the semantic content rather than an escaped rendering of it.
+2. **200-but-`ok:false`** — Slack signals failure in a 200 body, so it is the only
+   connector using the shared fetch helper's optional **`checkBody` seam**
+   (`tools/handlers/service-token-fetch.ts`); `checkSlackBody` reads `parsed.ok` /
+   `parsed.error` and maps them into the same closed reason set. Failures raise
+   `-32049 slack_api_failed`.
+3. **Asymmetric reason sets + PII curation** — the read client's closed set includes
+   `not_found`, which the send path's does not. Read-tool PII exposure is deliberately
+   asymmetric: `slack_users_list` (bulk) **omits** email, `slack_user_info` (single
+   lookup) includes it.
+
+**Mattermost** (4 tools — `mattermost_send_message` at `share`, plus 3 `read` tools) —
+SafeSpace's **first self-hosted connector**, and the sharpest divergence from the
+baseline:
+
+- **The host is CONFIGURED, not hardcoded.** It comes from
+  `SAFESPACE_MATTERMOST_SERVER_URL`, validated **https-only** and parsed/cached once
+  (`auth/mattermost/base-url.ts`). Private / internal / tailnet hosts are **explicitly
+  allowed** here — unlike `web_fetch` (§10) — because this URL is owner-set once at
+  deploy time, never agent-supplied. This introduces a **third** egress-destination
+  enforcement category, `"configured"` (alongside `enforced` and `declared`):
+  `assertEgressHost` special-cases the connector and compares against the live configured
+  host, so a mismatch still yields `-32047`.
+- **Fail-closed when unset.** No server URL → `mattermost_api_failed{no_server_url}` (a
+  reason unique to this connector) **and** `assertEgressHost` blocks all Mattermost
+  egress. The send path additionally asserts the host inline — **load-bearing, not
+  redundant**, because the send path uses the shared `postServiceTokenJson` helper rather
+  than the read client that carries its own pin.
+- **ACCEPTED RISK: `@channel` / `@all` / `@here` are NOT neutralized.** They are bare
+  tokens with no delimiter and no reliable API flag or escaping primitive to disable them,
+  so v1 does not auto-neutralize them — the single place the baseline's implicit
+  "mentions are handled" framing does **not** hold. It is bounded only by the recipient
+  allowlist, F3a, and the self-hosted (typically internal) deployment assumption.
+- Failures raise `-32053 mattermost_api_failed`; like Slack, the send and read paths carry
+  asymmetric closed sets (`invalid_recipient` send-only, `not_found` read-only).
+
 ---
 
 ## Secret handling

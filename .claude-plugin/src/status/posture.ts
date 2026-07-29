@@ -7,6 +7,7 @@ import { enabledWebhookProviders, webhookEnabled } from "../transport/webhook";
 import { hasWebhookSigningSecret } from "../auth/webhook-secret-store";
 import { inboxCounts, inboxPath } from "../webhook/inbox-store";
 import { evaluateEgressPosture } from "../policy/egress-posture";
+import { connectorPostureValue } from "../policy/connector-toggle";
 import { EGRESS_DESTINATIONS } from "../policy/egress-destinations";
 import {
   type CheckResult,
@@ -108,6 +109,16 @@ export async function runPosture(opts: PostureOptions, io: CliIO): Promise<Docto
       value: `on — providers: ${providers.join(", ")}; ${secretParts.join("; ")}; inbox ${counts}`,
     });
   }
+
+  // v1.127 — the connector exposure axis (SAFESPACE_CONNECTORS). Emitted as a PLAIN
+  // row here, deliberately NOT registered with `evaluateEgressPosture()` below: that
+  // module's `classifyEgress` is the single source of the restricted/deny-all/OPEN
+  // rule for EGRESS allowlists, and this axis is not one. Routed through it, an
+  // unset variable would render as `OPEN … warn` — a false security warning telling
+  // the operator to shrink their tool list for safety — and under autonomous mode as
+  // `deny-all`, which is flatly untrue (every tool is still exposed). Always `pass`:
+  // both states are legitimate, so this row informs and never votes.
+  checks.push({ name: "connectors", status: "pass", value: connectorPostureValue() });
 
   // Per-connector egress/access allowlist enumeration (v1.87) — what can actually
   // reach/leave through this deployment. Rows carry COUNTS only, never contents.

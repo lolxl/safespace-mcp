@@ -72,8 +72,31 @@ SAFESPACE_HTTP_BIND=100.101.102.103      # the host tailscale IP from Step 1 —
 SAFESPACE_HTTP_PORT=8765
 GOOGLE_CLIENT_ID=xxxxx.apps.googleusercontent.com
 # GITHUB_CLIENT_ID=Iv1.xxxx                # only if you enable the GitHub source
+# SAFESPACE_CONNECTORS=gmail,calendar,github   # optional — see the note below
 EOF
 ```
+
+> **`SAFESPACE_CONNECTORS` is PROCESS-GLOBAL under Model B.** Unlike the tier and
+> `allowedAccounts` — which are resolved per operator from `operators.json` — the
+> connector axis is one setting for the whole server: narrowing it narrows the tool
+> surface for **every** operator at once. It is intersected with each operator's own
+> tier, so it can only ever narrow, never widen anyone's access. Leave it unset
+> unless every operator on this deployment wants the same reduced surface; a
+> per-operator `allowedConnectors` would belong in `operators.json` and does not
+> exist today. Changing it requires restarting the server **and** each operator's
+> client (clients cache `tools/list`).
+>
+> **⚠️ It does NOT close the inbound webhook listener.** The listener is started by
+> `SAFESPACE_WEBHOOK_PORT` alone. Omitting the `webhook` token hides `inbox_read`
+> from every agent and refuses it at `tools/call`, but this server still **binds the
+> public port**, still accepts signed Slack/LINE callbacks, and still writes that
+> third-party content to the durable inbox on disk. On a Model B box this is your
+> only unsolicited public surface — if you mean to close it, **unset
+> `SAFESPACE_WEBHOOK_PORT`**; the connector token will not do it for you. Likewise,
+> omitting `contacts` hides the five `contacts_*` tools but does not stop the
+> internal People-API name→email lookup used by `gmail_send` / `calendar_*` when
+> `SAFESPACE_RECIPIENT_ALLOW_CONTACTS=true`. Both gaps are tracked in
+> [`docs/CARRY-FORWARD.md`](CARRY-FORWARD.md) items 6–7.
 
 ## Step 4 — consent the shared accounts into the token store
 

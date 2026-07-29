@@ -103,6 +103,12 @@ export const ENV_ENABLE_DRIVE_SHARE = "SAFESPACE_ENABLE_DRIVE_SHARE";
 // ── Family 3: set-membership ───────────────────────────────────────────────
 /** Process privilege tier ∈ {read,write,share}; invalid → "read" + stderr. */
 export const ENV_TIER = "SAFESPACE_TIER";
+/** v1.127 — the SECOND exposure axis: a comma-separated set of connector /
+ *  google-subservice tokens that narrows `tools/list` (and is re-checked at
+ *  `tools/call`). UNSET = every connector on = byte-identical to v1.126. It has
+ *  NO `_EXTRA` overlay by deliberate design — see `policy/connector-toggle.ts`
+ *  for both deviations from the family-5 convention and their rationale. */
+export const ENV_CONNECTORS = "SAFESPACE_CONNECTORS";
 
 // ── Family 4: set-vs-unset + Family 5: two-layer list allowlists ───────────
 /** Recipient allowlist base (v2.2; set-vs-unset activation). */
