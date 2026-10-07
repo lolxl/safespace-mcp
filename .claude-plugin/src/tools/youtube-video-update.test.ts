@@ -30,7 +30,6 @@ let captured: VideoMutationAuditMeta | undefined;
 
 function makeCtx(tier: "read" | "write" | "share"): ToolContext {
   return {
-    allowedAccounts: null,
     credential: oauthCred("alice@example.com", () => "fake-token"),
     tier,
     audit: recorderSink({ videoMutationMeta: (m) => { captured = m; } }),
@@ -46,7 +45,6 @@ const READ_CTX = makeCtx("read");
 // stores pre-handler); this helper supplies it for the requestBody-shape tests below.
 function ctxWithEgress(egress: YoutubeVideoUpdateEgressShape): ToolContext {
   return {
-    allowedAccounts: null,
     credential: oauthCred("alice@example.com", () => "fake-token"),
     tier: "write",
     audit: recorderSink({ videoMutationMeta: (m) => { captured = m; } }),

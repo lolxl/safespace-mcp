@@ -11,7 +11,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileBackend, __resetFileBackendStateForTests } from "./file-backend";
-import { storageKey } from "./secret-backend";
 import { MCPError } from "../errors";
 
 // File-format offsets (stable spec, mirrored from file-backend.ts).
@@ -61,27 +60,27 @@ async function expectMCPError(p: Promise<unknown>, name: string): Promise<MCPErr
 describe("FileBackend key-file mode (default)", () => {
   test("round-trips set -> get -> delete for a single account (op=null)", async () => {
     const fb = new FileBackend();
-    expect(await fb.getToken(null, "a@example.com")).toBeNull();
-    await fb.setToken(null, "a@example.com", TOKEN);
-    expect(await fb.getToken(null, "a@example.com")).toBe(TOKEN);
-    await fb.deleteToken(null, "a@example.com");
-    expect(await fb.getToken(null, "a@example.com")).toBeNull();
+    expect(await fb.getToken("a@example.com")).toBeNull();
+    await fb.setToken("a@example.com", TOKEN);
+    expect(await fb.getToken("a@example.com")).toBe(TOKEN);
+    await fb.deleteToken("a@example.com");
+    expect(await fb.getToken("a@example.com")).toBeNull();
   });
 
   test("stores multiple accounts independently", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", "TA");
-    await fb.setToken(null, "b@example.com", "TB");
-    expect(await fb.getToken(null, "a@example.com")).toBe("TA");
-    expect(await fb.getToken(null, "b@example.com")).toBe("TB");
-    await fb.deleteToken(null, "a@example.com");
-    expect(await fb.getToken(null, "a@example.com")).toBeNull();
-    expect(await fb.getToken(null, "b@example.com")).toBe("TB"); // peer untouched
+    await fb.setToken("a@example.com", "TA");
+    await fb.setToken("b@example.com", "TB");
+    expect(await fb.getToken("a@example.com")).toBe("TA");
+    expect(await fb.getToken("b@example.com")).toBe("TB");
+    await fb.deleteToken("a@example.com");
+    expect(await fb.getToken("a@example.com")).toBeNull();
+    expect(await fb.getToken("b@example.com")).toBe("TB"); // peer untouched
   });
 
   test("creates secret.enc + secret.key at 0o600, dir at 0o700", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     expect((await fs.stat(encFile())).mode & 0o777).toBe(0o600);
     expect((await fs.stat(keyFile())).mode & 0o777).toBe(0o600);
     expect((await fs.stat(tmpDir)).mode & 0o777).toBe(0o700);
@@ -91,8 +90,8 @@ describe("FileBackend key-file mode (default)", () => {
     const spy = spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const fb = new FileBackend();
-      await fb.setToken(null, "a@example.com", TOKEN);
-      await fb.setToken(null, "b@example.com", TOKEN); // second write: no new warning
+      await fb.setToken("a@example.com", TOKEN);
+      await fb.setToken("b@example.com", TOKEN); // second write: no new warning
       const warnings = spy.mock.calls.filter((c) => String(c[0]).includes("KEY-FILE mode"));
       expect(warnings.length).toBe(1);
       expect(String(warnings[0]![0])).toContain("SAFESPACE_SECRET_PASSPHRASE");
@@ -109,7 +108,7 @@ describe("FileBackend key-file mode (default)", () => {
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     const spy = spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await new FileBackend().setToken(null, "a@example.com", TOKEN);
+      await new FileBackend().setToken("a@example.com", TOKEN);
       const warnings = spy.mock.calls.filter((c) => String(c[0]).includes("KEY-FILE mode"));
       expect(warnings.length).toBe(1);
       expect(String(warnings[0]![0])).toContain("NTFS uses ACLs");
@@ -125,7 +124,7 @@ describe("FileBackend key-file mode (default)", () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     const spy = spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      await new FileBackend().setToken(null, "a@example.com", TOKEN);
+      await new FileBackend().setToken("a@example.com", TOKEN);
       const warnings = spy.mock.calls.filter((c) => String(c[0]).includes("KEY-FILE mode"));
       expect(warnings.length).toBe(1);
       expect(String(warnings[0]![0])).not.toContain("NTFS");
@@ -136,24 +135,24 @@ describe("FileBackend key-file mode (default)", () => {
   });
 
   test("getToken on a missing store returns null (no file)", async () => {
-    expect(await new FileBackend().getToken(null, "ghost@example.com")).toBeNull();
+    expect(await new FileBackend().getToken("ghost@example.com")).toBeNull();
   });
 
   test("deleteToken on a missing key is an idempotent no-op", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
-    await fb.deleteToken(null, "ghost@example.com"); // not present
-    await fb.deleteToken(null, "ghost@example.com"); // again
-    expect(await fb.getToken(null, "a@example.com")).toBe(TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
+    await fb.deleteToken("ghost@example.com"); // not present
+    await fb.deleteToken("ghost@example.com"); // again
+    expect(await fb.getToken("a@example.com")).toBe(TOKEN);
   });
 });
 
 describe("FileBackend nonce uniqueness (GCM safety)", () => {
   test("every write uses a fresh nonce and produces different ciphertext", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     const buf1 = await fs.readFile(encFile());
-    await fb.setToken(null, "b@example.com", TOKEN); // re-encrypt whole file
+    await fb.setToken("b@example.com", TOKEN); // re-encrypt whole file
     const buf2 = await fs.readFile(encFile());
     const nonce1 = buf1.subarray(OFF_NONCE, OFF_TAG);
     const nonce2 = buf2.subarray(OFF_NONCE, OFF_TAG);
@@ -171,62 +170,62 @@ describe("FileBackend tamper detection (GCM auth + header-as-AAD)", () => {
 
   test("flipping a ciphertext byte -> secret_store_corrupt", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await corruptByte(OFF_CIPHERTEXT);
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("flipping the version header byte -> secret_store_corrupt (unknown version)", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await corruptByte(OFF_VERSION);
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("flipping a salt header byte -> secret_store_corrupt (AAD binding trips GCM)", async () => {
     // salt is part of the AAD; in key-file mode salt is unused for the key, so a
     // flipped salt only fails because the header is authenticated.
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await corruptByte(OFF_SALT);
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("bad magic -> secret_store_corrupt", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await corruptByte(0);
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("truncated file (shorter than header) -> secret_store_corrupt", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await fs.writeFile(encFile(), Buffer.alloc(10));
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("invalid mode byte -> secret_store_corrupt", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     const buf = await fs.readFile(encFile());
     buf[OFF_MODE] = 9; // not 1 or 2 -- but this is part of AAD so GCM also trips
     await fs.writeFile(encFile(), buf);
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("wrong-length key file -> secret_store_corrupt", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await fs.writeFile(keyFile(), Buffer.alloc(10), { mode: 0o600 }); // truncate key
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("errors carry NO leaked data (empty errorData)", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await corruptByte(OFF_CIPHERTEXT);
-    const err = await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    const err = await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
     expect(err.errorData).toEqual({});
     // serialized data carries only the static recovery hint -- no path/key/token.
     const data = err.toJsonRpc().data;
@@ -240,8 +239,8 @@ describe("FileBackend passphrase mode", () => {
   test("round-trips with a passphrase and writes NO key file", async () => {
     process.env.SAFESPACE_SECRET_PASSPHRASE = "correct horse battery staple";
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
-    expect(await fb.getToken(null, "a@example.com")).toBe(TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
+    expect(await fb.getToken("a@example.com")).toBe(TOKEN);
     await expect(fs.stat(keyFile())).rejects.toMatchObject({ code: "ENOENT" });
     // header records passphrase mode (2).
     const buf = await fs.readFile(encFile());
@@ -250,59 +249,31 @@ describe("FileBackend passphrase mode", () => {
 
   test("wrong passphrase -> secret_store_corrupt (conflated with tamper, no oracle)", async () => {
     process.env.SAFESPACE_SECRET_PASSPHRASE = "passphrase-A";
-    await new FileBackend().setToken(null, "a@example.com", TOKEN);
+    await new FileBackend().setToken("a@example.com", TOKEN);
     process.env.SAFESPACE_SECRET_PASSPHRASE = "passphrase-B";
-    await expectMCPError(new FileBackend().getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(new FileBackend().getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("missing passphrase on a passphrase-mode file -> keychain_locked (retryable)", async () => {
     process.env.SAFESPACE_SECRET_PASSPHRASE = "passphrase-A";
-    await new FileBackend().setToken(null, "a@example.com", TOKEN);
+    await new FileBackend().setToken("a@example.com", TOKEN);
     delete process.env.SAFESPACE_SECRET_PASSPHRASE;
-    await expectMCPError(new FileBackend().getToken(null, "a@example.com"), "keychain_locked");
+    await expectMCPError(new FileBackend().getToken("a@example.com"), "keychain_locked");
   });
 });
 
-describe("FileBackend operatorId keying", () => {
-  test("null operatorId uses the bare-email legacy key (zero migration)", async () => {
+describe("FileBackend keying", () => {
+  test("a token is stored under the plain key and survives a new instance", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     const fb2 = new FileBackend();
-    expect(await fb2.getToken(null, "a@example.com")).toBe(TOKEN);
-    expect(storageKey(null, "a@example.com")).toBe("a@example.com");
+    expect(await fb2.getToken("a@example.com")).toBe(TOKEN);
   });
 
-  test("two operators with the same Google account do not collide", async () => {
+  test("a leftover operator-namespaced entry is never read", async () => {
     const fb = new FileBackend();
-    await fb.setToken("alice", "shared@example.com", "ALICE");
-    await fb.setToken("bob", "shared@example.com", "BOB");
-    expect(await fb.getToken("alice", "shared@example.com")).toBe("ALICE");
-    expect(await fb.getToken("bob", "shared@example.com")).toBe("BOB");
-    await fb.deleteToken("alice", "shared@example.com");
-    expect(await fb.getToken("alice", "shared@example.com")).toBeNull();
-    expect(await fb.getToken("bob", "shared@example.com")).toBe("BOB");
-  });
-
-  test("lazy re-key on read: legacy null-key token migrates to the namespaced key", async () => {
-    const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN); // legacy write
-    // Read as operator "alice" -> falls back, returns, and migrates.
-    expect(await fb.getToken("alice", "a@example.com")).toBe(TOKEN);
-    // The legacy null-key is gone; reading as op=null no longer finds it.
-    expect(await fb.getToken(null, "a@example.com")).toBeNull();
-    expect(await fb.getToken("alice", "a@example.com")).toBe(TOKEN);
-  });
-
-  test("lazy re-key is failure-tolerant: returns the legacy token even if the persist fails", async () => {
-    if ((process.getuid?.() ?? 1) === 0) return; // perms-based test is meaningless as root
-    const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN); // legacy write
-    await fs.chmod(tmpDir, 0o500); // read+exec only -> atomicWrite cannot create .tmp
-    try {
-      expect(await fb.getToken("alice", "a@example.com")).toBe(TOKEN);
-    } finally {
-      await fs.chmod(tmpDir, 0o700); // restore for cleanup
-    }
+    await fb.setToken(`alice${String.fromCharCode(0)}a@example.com`, "OLD");
+    expect(await fb.getToken("a@example.com")).toBeNull();
   });
 });
 
@@ -329,41 +300,41 @@ describe("FileBackend edge branches (corrupt payload / missing key / salt reuse)
 
   test("decrypts to non-JSON -> secret_store_corrupt", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN); // creates the key file
+    await fb.setToken("a@example.com", TOKEN); // creates the key file
     await writeKeyFilePayload("this is not json {{{");
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("decrypts to a JSON array (non-object) -> secret_store_corrupt", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await writeKeyFilePayload("[1,2,3]");
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("decrypts to an object with a non-string value -> secret_store_corrupt", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await writeKeyFilePayload(JSON.stringify({ "a@example.com": 42 }));
-    await expectMCPError(fb.getToken(null, "a@example.com"), "secret_store_corrupt");
+    await expectMCPError(fb.getToken("a@example.com"), "secret_store_corrupt");
   });
 
   test("key-file mode with a deleted key file -> keychain_locked (retryable)", async () => {
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", TOKEN);
+    await fb.setToken("a@example.com", TOKEN);
     await fs.rm(keyFile()); // ciphertext remains; key gone
-    await expectMCPError(fb.getToken(null, "a@example.com"), "keychain_locked");
+    await expectMCPError(fb.getToken("a@example.com"), "keychain_locked");
   });
 
   test("passphrase mode reuses the file's salt across writes (stable key)", async () => {
     process.env.SAFESPACE_SECRET_PASSPHRASE = "stable-pass";
     const fb = new FileBackend();
-    await fb.setToken(null, "a@example.com", "T1");
+    await fb.setToken("a@example.com", "T1");
     const salt1 = (await fs.readFile(encFile())).subarray(OFF_SALT, OFF_NONCE);
-    await fb.setToken(null, "b@example.com", "T2"); // second write reuses the salt
+    await fb.setToken("b@example.com", "T2"); // second write reuses the salt
     const salt2 = (await fs.readFile(encFile())).subarray(OFF_SALT, OFF_NONCE);
     expect(salt1.equals(salt2)).toBe(true);
-    expect(await fb.getToken(null, "a@example.com")).toBe("T1");
-    expect(await fb.getToken(null, "b@example.com")).toBe("T2");
+    expect(await fb.getToken("a@example.com")).toBe("T1");
+    expect(await fb.getToken("b@example.com")).toBe("T2");
   });
 });

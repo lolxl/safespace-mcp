@@ -9,7 +9,7 @@
 // (prevention) + the post-handler runtime tripwire (detection AFTER the egress
 // already happened). A1 makes the enforcement PIPELINE-OWNED: the tool's registry
 // def carries an {@link EgressDescriptor}, and the choke point (withNonOAuthContext
-// for the service-token sends; withToolContext for x_post_create since A2a) fires
+// for the service-token sends; withToolContext for the OAuth writes) fires
 // extract → gate BEFORE the handler runs, so a drifted handler can no longer skip
 // the gate — the choke point owns it.
 //
@@ -112,7 +112,7 @@ export type {
 
 /** A pipeline-fired egress descriptor. When a ToolDef carries one, the tool's
  *  choke point (with-nonoauth-context.ts for the service-token sends;
- *  with-context.ts for x_post_create) fires extract → gate BEFORE the handler
+ *  with-context.ts for the OAuth writes) fires extract → gate BEFORE the handler
  *  runs; the handler must NOT call the gate itself (the call-site sentinel
  *  enforces both directions). `S` is the tool's egress shape — descriptors are
  *  declared with their concrete shape; the registry stores the default
@@ -123,7 +123,7 @@ export interface EgressDescriptor<S extends EgressShape = EgressShape> {
   extract(args: Record<string, unknown>): S;
   /** Fire the tool's composite egress gate (sets ctx.egressGateFired; throws on
    *  denial). A TRANSFORMING gate returns the transformed shape (stored on
-   *  `ctx.egress` by the choke point — the handler wires THAT); a void return
+   *  `ctx.egress` by the OAuth choke point only — the handler wires THAT); a void return
    *  means the handler's own args are already the vetted bytes (the A1 posture).
    *
    *  B6.1 wave A3+D — OPTIONAL third arg `resolveRecipients`: the OAuth choke point
@@ -255,7 +255,7 @@ export const xPostEgressDescriptor: EgressDescriptor<XPostEgressShape> = {
   },
   async gate(ctx, shape) {
     const cred = requireX(ctx);
-    const sanitized = enforceXPostEgressGates(ctx, cred.accountId, shape.body);
+    const sanitized = await enforceXPostEgressGates(ctx, cred.accountId, shape.body);
     return { kind: "x-post", body: sanitized };
   },
 };
@@ -271,7 +271,7 @@ export const youtubeCommentPostEgressDescriptor: EgressDescriptor<YoutubeComment
     return { kind: "youtube-comment", videoId, body: text };
   },
   async gate(ctx, shape) {
-    const sanitized = enforceYoutubeCommentEgressGates(ctx, {
+    const sanitized = await enforceYoutubeCommentEgressGates(ctx, {
       tool: "youtube_video_comment_post",
       videoId: shape.videoId,
       body: shape.body,
@@ -289,7 +289,7 @@ export const youtubeCommentReplyEgressDescriptor: EgressDescriptor<YoutubeCommen
     return { kind: "youtube-comment", videoId, body: text, parentCommentId };
   },
   async gate(ctx, shape) {
-    const sanitized = enforceYoutubeCommentEgressGates(ctx, {
+    const sanitized = await enforceYoutubeCommentEgressGates(ctx, {
       tool: "youtube_comment_reply",
       videoId: shape.videoId,
       body: shape.body,
@@ -494,7 +494,7 @@ export const githubCreatePullRequestReviewEgressDescriptor: EgressDescriptor<Git
   };
 
 /** github_set_issue_labels — write allowlist + F3a on `labels.join("\n")` (a label name is
- *  agent-authored text that can create a new repo label). SOURCE: the handler calls the
+ *  agent-authored text that can create a new repo label). SOURCE: the descriptor calls the
  *  WRITE gate (not a separate labels allowlist). */
 export const githubSetIssueLabelsEgressDescriptor: EgressDescriptor<GithubWriteEgressShape> = {
   extract(args) {

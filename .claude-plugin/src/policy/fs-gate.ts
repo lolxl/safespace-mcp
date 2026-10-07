@@ -33,10 +33,12 @@
 // NO echo of the requested path (anti-PII / anti-oracle). The roots themselves are
 // operator config (process env), not attacker input.
 
-import { readFile, realpath, stat } from "node:fs/promises";
+import { constants as FS_CONSTANTS } from "node:fs";
+import { lstat, open, readdir, realpath, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
 import { ENV_FS_READ_ROOTS as ENV_ROOTS, ENV_FS_READ_ROOTS_EXTRA as ENV_ROOTS_EXTRA } from "../config";
 import { MCPError } from "../errors";
+import { buildDenyIndex, type DenyIndex, idOf, inDenyZone } from "./fs-deny-zones";
 
 export { ENV_ROOTS, ENV_ROOTS_EXTRA };
 
@@ -252,14 +254,98 @@ export interface FsReadResult {
   content: string;
 }
 
+/** The slice of an open file the gate uses (injectable for the mocked-fs tests). */
+export interface FsFileHandle {
+  stat(): Promise<{ isFile(): boolean; size: bigint; dev: bigint; ino: bigint }>;
+  read(): Promise<Buffer>;
+  close(): Promise<void>;
+}
+
+/** O_NOFOLLOW: a final component swapped for a symlink after the check is not followed.
+ *  O_NONBLOCK: a FIFO under a root returns at once instead of hanging the call. Both are
+ *  absent on win32 (the constants are undefined there). */
+const OPEN_FLAGS =
+  FS_CONSTANTS.O_RDONLY | (FS_CONSTANTS.O_NOFOLLOW ?? 0) | (FS_CONSTANTS.O_NONBLOCK ?? 0);
+
+async function openForRead(p: string): Promise<FsFileHandle> {
+  const fh = await open(p, OPEN_FLAGS);
+  return {
+    stat: () => fh.stat({ bigint: true }),
+    read: () => fh.readFile(),
+    close: () => fh.close(),
+  };
+}
+
 export interface FsGateDeps {
   realpathImpl?: (p: string) => Promise<string>;
-  statImpl?: typeof stat;
-  readFileImpl?: (p: string) => Promise<Buffer>;
+  /** Open the canonical path for reading (identity + content come from this handle). */
+  openImpl?: (p: string) => Promise<FsFileHandle>;
+  /** Identity of an ancestor directory (bind-mount / firmlink alias check). */
+  ancestorStatImpl?: (p: string) => Promise<{ dev: bigint; ino: bigint }>;
+  /** A prebuilt deny index (tests); default = built from the real filesystem per call. */
+  denyIndex?: DenyIndex;
+  /** lstat used to classify an open failure (tests). */
+  lstatImpl?: (p: string) => Promise<{ dev: bigint; ino: bigint; isFile(): boolean; isSymbolicLink(): boolean }>;
   state?: FsRootsState;
   /** Override the path platform (tests exercise win32 on a POSIX runner). Defaults to
    *  the active state's platform, else the host. */
   platform?: NodeJS.Platform;
+}
+
+let denyFailureReported = false;
+
+/** True when any ancestor directory of `real` has the identity of a zone directory (a
+ *  bind-mount or firmlink alias of a protected dir). An ancestor that cannot be stat'd
+ *  also answers true (fail closed). */
+async function ancestorIsZone(
+  real: string,
+  pp: PathFlavor,
+  deny: DenyIndex,
+  ancestorStat: (p: string) => Promise<{ dev: bigint; ino: bigint }>,
+): Promise<boolean> {
+  for (let dir = pp.dirname(real); ; dir = pp.dirname(dir)) {
+    let ast: { dev: bigint; ino: bigint };
+    try {
+      ast = await ancestorStat(dir);
+    } catch {
+      return true;
+    }
+    const aid = idOf(ast);
+    if (aid !== null && deny.dirIds.has(aid)) return true;
+    if (pp.dirname(dir) === dir) return false;
+  }
+}
+
+/** Map a failed open of an in-root, existing, non-zone path to the error the pre-descriptor
+ *  gate gave: a protected identity → refuse(); vanished / swapped-in symlink (ELOOP) →
+ *  not_found; a non-file (directory on win32, socket, …) → not_a_file; a regular file
+ *  that cannot be opened (EACCES, locked) → read_error. */
+async function classifyOpenFailure(
+  real: string,
+  openErr: unknown,
+  deny: DenyIndex,
+  refuse: () => MCPError,
+  isZoneAncestor: () => Promise<boolean>,
+  lstatImpl?: FsGateDeps["lstatImpl"],
+): Promise<MCPError> {
+  // Under a protected directory's alias, every failure answers like a zone hit, so the
+  // differentiated errors below cannot reveal what lies there.
+  if (await isZoneAncestor()) return refuse();
+  const code = (openErr as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") {
+    return new MCPError("fs_read_failed", { reason: "not_found" });
+  }
+  let st: Awaited<ReturnType<NonNullable<FsGateDeps["lstatImpl"]>>>;
+  try {
+    st = await (lstatImpl ?? ((p: string) => lstat(p, { bigint: true })))(real);
+  } catch {
+    return new MCPError("fs_read_failed", { reason: "not_found" });
+  }
+  const id = idOf(st);
+  if (id !== null && (deny.fileIds.has(id) || deny.dirIds.has(id))) return refuse();
+  if (st.isSymbolicLink()) return new MCPError("fs_read_failed", { reason: "not_found" });
+  if (!st.isFile()) return new MCPError("fs_read_failed", { reason: "not_a_file" });
+  return new MCPError("fs_read_failed", { reason: "read_error" });
 }
 
 /** Read `requestedPath` through the gate. Throws path_blocked_by_policy (gate) or
@@ -300,50 +386,95 @@ export async function readThroughGate(
   }
   const lexical = pp.resolve(requestedPath);
   const { real, existed } = await canonicalize(lexical, realpathFn, pp);
+  const inRoots = withinRoots(real, canonRoots, pp, fold);
+  // Deny zones (SafeSpace's own stores, AI-client config, /proc, /dev — see
+  // fs-deny-zones.ts) win over any root. A denial answers exactly like the gate's
+  // existing outcome for the same position: inside the roots → the not_found a missing
+  // file gets; outside → the ordinary not_in_allowlist. It never says "deny zone".
+  const refuse = (): MCPError =>
+    inRoots
+      ? new MCPError("fs_read_failed", { reason: "not_found" })
+      : new MCPError("path_blocked_by_policy", { reason: "not_in_allowlist" });
+  const deny =
+    deps.denyIndex ??
+    (await buildDenyIndex(platform, {
+      realpath,
+      lstat: (p) => lstat(p, { bigint: true }),
+      stat: (p) => stat(p, { bigint: true }),
+      readdir: (p) => readdir(p),
+    }));
+  if (deny.failed && !denyFailureReported) {
+    // Once per process, no path: otherwise an operator only ever sees not_found.
+    denyFailureReported = true;
+    console.error(
+      "[safespace] fs_read: the protected-path index could not be built (unreadable home " +
+        "or SafeSpace dir, or too many entries) — refusing all fs_read calls.",
+    );
+  }
+  if (deny.failed || inDenyZone(lexical, deny, platform) || inDenyZone(real, deny, platform)) {
+    throw refuse();
+  }
   // Authoritative containment on the canonical path: a symlink inside a root pointing
   // OUTSIDE resolves out and is blocked; a path outside the roots (present OR missing)
   // → the SAME generic block (no existence oracle for outside paths).
-  if (!withinRoots(real, canonRoots, pp, fold)) {
+  if (!inRoots) {
     throw new MCPError("path_blocked_by_policy", { reason: "not_in_allowlist" });
   }
   if (!existed) {
     throw new MCPError("fs_read_failed", { reason: "not_found" });
   }
-  // Must be a regular file.
-  let st: Awaited<ReturnType<typeof stat>>;
+  // Open once and take identity, type, size and content from the same descriptor, so the
+  // checked file is the file that is read.
+  const ancestorStat = deps.ancestorStatImpl ?? ((p: string) => stat(p, { bigint: true }));
+  const isZoneAncestor = () => ancestorIsZone(real, pp, deny, ancestorStat);
+  let fh: FsFileHandle;
   try {
-    st = await (deps.statImpl ?? stat)(real);
-  } catch {
-    throw new MCPError("fs_read_failed", { reason: "not_found" });
+    fh = await (deps.openImpl ?? openForRead)(real);
+  } catch (openErr) {
+    throw await classifyOpenFailure(real, openErr, deny, refuse, isZoneAncestor, deps.lstatImpl);
   }
-  if (!st.isFile()) {
-    throw new MCPError("fs_read_failed", { reason: "not_a_file" });
-  }
-  if (st.size > MAX_BYTES) {
-    throw new MCPError("fs_read_failed", { reason: "too_large" });
-  }
-  // Read + UTF-8 / binary guard.
-  let buf: Buffer;
   try {
-    buf = await (deps.readFileImpl ?? readFile)(real);
-  } catch {
-    throw new MCPError("fs_read_failed", { reason: "read_error" });
+    let st: Awaited<ReturnType<FsFileHandle["stat"]>>;
+    try {
+      st = await fh.stat();
+    } catch {
+      throw new MCPError("fs_read_failed", { reason: "not_found" });
+    }
+    // Identity before type/size, so an alias of a protected file or directory (hard
+    // link, bind mount, firmlink) answers not_found rather than not_a_file / too_large.
+    const id = idOf(st);
+    if (id === null || deny.fileIds.has(id) || deny.dirIds.has(id)) throw refuse();
+    if (await isZoneAncestor()) throw refuse();
+    if (!st.isFile()) {
+      throw new MCPError("fs_read_failed", { reason: "not_a_file" });
+    }
+    if (st.size > BigInt(MAX_BYTES)) {
+      throw new MCPError("fs_read_failed", { reason: "too_large" });
+    }
+    let buf: Buffer;
+    try {
+      buf = await fh.read();
+    } catch {
+      throw new MCPError("fs_read_failed", { reason: "read_error" });
+    }
+    if (buf.byteLength > MAX_BYTES) {
+      // Defensive: the file grew between fstat and read.
+      throw new MCPError("fs_read_failed", { reason: "too_large" });
+    }
+    if (buf.includes(0)) {
+      // A NUL byte → binary; reject rather than feed garbage to the model.
+      throw new MCPError("fs_read_failed", { reason: "not_text" });
+    }
+    const content = buf.toString("utf8");
+    // toString("utf8") replaces invalid sequences with U+FFFD; reject if that lost
+    // information (round-trip mismatch ⇒ the file was not valid UTF-8).
+    if (Buffer.byteLength(content, "utf8") !== buf.byteLength) {
+      throw new MCPError("fs_read_failed", { reason: "not_text" });
+    }
+    return { path: real, bytes: buf.byteLength, content };
+  } finally {
+    await fh.close().catch(() => {});
   }
-  if (buf.byteLength > MAX_BYTES) {
-    // Defensive: the file grew between stat and read.
-    throw new MCPError("fs_read_failed", { reason: "too_large" });
-  }
-  if (buf.includes(0)) {
-    // A NUL byte → binary; reject rather than feed garbage to the model.
-    throw new MCPError("fs_read_failed", { reason: "not_text" });
-  }
-  const content = buf.toString("utf8");
-  // toString("utf8") replaces invalid sequences with U+FFFD; reject if that lost
-  // information (round-trip mismatch ⇒ the file was not valid UTF-8).
-  if (Buffer.byteLength(content, "utf8") !== buf.byteLength) {
-    throw new MCPError("fs_read_failed", { reason: "not_text" });
-  }
-  return { path: real, bytes: buf.byteLength, content };
 }
 
 /** Per-source error mapper — MCPError passthrough (the gate throws the closed-set
@@ -360,10 +491,12 @@ export function mapFsReadError(err: unknown): Error {
 /** Test-only. */
 export const __internal = {
   MAX_BYTES,
+  OPEN_FLAGS,
   withinRoots,
   isForbiddenWin32Form,
   resetSingletons: (): void => {
     cachedState = undefined;
     warnEmitted = false;
+    denyFailureReported = false;
   },
 };

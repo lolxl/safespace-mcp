@@ -28,7 +28,7 @@ function notionCred(token = "ntn_SECRET"): Credential {
   return { kind: "oauth", provider: "notion", accountId: WS_ID, getAccessToken: () => token };
 }
 function ctx(token = "ntn_SECRET"): ToolContext {
-  return { allowedAccounts: null, credential: notionCred(token), tier: "read", audit: NOOP_AUDIT };
+  return { credential: notionCred(token), tier: "read", audit: NOOP_AUDIT };
 }
 
 /** A fetch stub returning `body` (JSON-serialized) with `status`; records url + init. */
@@ -160,7 +160,7 @@ describe("notion read handlers — cross-provider backstop (requireNotion, R6)",
     const f = fetchStub(RAW_PAGE);
     // oauthCred builds a provider:"google" credential → requireNotion must reject it
     // (a Google bearer can never reach api.notion.com).
-    const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g-tok"), tier: "read", audit: NOOP_AUDIT };
+    const googleCtx: ToolContext = { credential: oauthCred("a@b.com", () => "g-tok"), tier: "read", audit: NOOP_AUDIT };
     for (const call of [
       () => notionGetPage(googleCtx, { page_id: PAGE_ID }, { fetchImpl: f.impl }),
       () => notionSearch(googleCtx, {}, { fetchImpl: f.impl }),

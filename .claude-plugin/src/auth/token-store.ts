@@ -2,18 +2,13 @@
 //
 // The smallest-blast-radius seam: exposes the SAME email-only API the old
 // keychain.ts get/setToken had, so the 5 call sites (refresh.ts, consent.ts,
-// cli.ts, status.ts, with-context.ts) change only their import. Internally it
-// resolves the backend (once, cached -- per Model A the backend is constant per
-// process) and the operatorId (per call; a cheap env read, matching how
-// with-context.ts already calls resolveOperatorId per tool call), then keys on
-// (operatorId, googleAccount). operatorId === null (the single-user default)
-// maps to the legacy email-only key -> zero migration for existing Mac users.
+// cli.ts, status.ts, with-context.ts) change only their import. The backend is
+// resolved once and cached; the Google email is the store key.
 //
 // MCPErrors thrown by the backend (keychain_locked / secret_store_corrupt) are
 // re-thrown UNCHANGED so the cli.ts account-revoke unlock-and-retry UX survives
 // identically across backends.
 
-import { resolveOperatorId } from "../identity/operator-id";
 import { type SecretBackend } from "./secret-backend";
 import { selectBackend } from "./select-backend";
 
@@ -24,15 +19,15 @@ function backend(): SecretBackend {
 }
 
 export async function getToken(email: string): Promise<string | null> {
-  return backend().getToken(resolveOperatorId(), email);
+  return backend().getToken(email);
 }
 
 export async function setToken(email: string, tokenJson: string): Promise<void> {
-  return backend().setToken(resolveOperatorId(), email, tokenJson);
+  return backend().setToken(email, tokenJson);
 }
 
 export async function deleteToken(email: string): Promise<void> {
-  return backend().deleteToken(resolveOperatorId(), email);
+  return backend().deleteToken(email);
 }
 
 /** Test-only: drop the cached backend so a test can flip

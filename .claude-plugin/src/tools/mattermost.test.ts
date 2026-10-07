@@ -24,7 +24,6 @@ let saved: Record<string, string | undefined>;
 
 function ctx(tier: "read" | "write" | "share" = "share"): ToolContext {
   return {
-    allowedAccounts: null,
     credential: serviceTokenCred(() => "bot-tok"),
     tier,
     audit: recorderSink({}),

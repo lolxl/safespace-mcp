@@ -32,7 +32,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ENV_X_CLIENT_ID, ENV_X_CLIENT_SECRET } from "../../config";
 import { MCPError } from "../../errors";
-import { resolveOperatorId } from "../../identity/operator-id";
 import { configDir } from "../keychain";
 import type { SecretBackend } from "../secret-backend";
 import { selectBackend } from "../select-backend";
@@ -266,7 +265,7 @@ function parseTokenPayload(raw: string | null): XTokenPayload | null {
 
 /** Read the stored X token payload for `userId`, or null if none/corrupt. */
 export async function readXToken(userId: string): Promise<XTokenPayload | null> {
-  return parseTokenPayload(await backend().getToken(resolveOperatorId(), reservedKey(userId)));
+  return parseTokenPayload(await backend().getToken(reservedKey(userId)));
 }
 
 /** Persist the X token payload (the consent / refresh writer). Opaque to the backend. */
@@ -289,12 +288,12 @@ export async function writeXToken(userId: string, payload: XTokenPayload): Promi
     expires_at: payload.expires_at,
     scope: typeof payload.scope === "string" ? payload.scope : "",
   };
-  await backend().setToken(resolveOperatorId(), reservedKey(userId), JSON.stringify(stored));
+  await backend().setToken(reservedKey(userId), JSON.stringify(stored));
 }
 
 /** Remove the stored X token (account-revoke; idempotent at the backend). */
 export async function clearXToken(userId: string): Promise<void> {
-  await backend().deleteToken(resolveOperatorId(), reservedKey(userId));
+  await backend().deleteToken(reservedKey(userId));
 }
 
 /* ── proactive refresh (rotation-safe + single-flight) ────────────────────── */

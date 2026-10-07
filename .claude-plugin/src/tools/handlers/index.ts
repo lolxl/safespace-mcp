@@ -21,6 +21,5 @@ export * from "./slides";
 export * from "./tasks";
 export * from "./web-fetch";
 export * from "./fs-read";
-export * from "./inbox";
 export * from "./x";
 export * from "./youtube";

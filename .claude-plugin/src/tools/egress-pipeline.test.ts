@@ -67,6 +67,7 @@ import { xPostCreate } from "./handlers/x";
 import { youtubeVideoCommentPost, youtubeVideoUpdate } from "./handlers/youtube";
 import { withNonOAuthContext } from "./with-nonoauth-context";
 import { withToolContext, type WithContextDeps } from "./with-context";
+import { loadPendingSends, pendingSendsPath } from "../auth/send-approval-store";
 
 // ── recipient fixtures (all syntactically valid for their connector) ───────────
 const LINE_TO = "U" + "0".repeat(32);
@@ -83,7 +84,6 @@ const SECRET_BODY = "-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY
 
 function gateCtx(): ToolContext {
   return {
-    allowedAccounts: null,
     credential: serviceTokenCred(() => "tok"),
     tier: "share",
     audit: NOOP_AUDIT,
@@ -362,7 +362,6 @@ const X_NFC_PRECOMPOSED = "caf\u00e9"; // precomposed e-acute (NFC)
 
 function xGateCtx(): ToolContext {
   return {
-    allowedAccounts: null,
     credential: {
       kind: "oauth",
       provider: "x",
@@ -608,6 +607,58 @@ describe("401-retry ctx rebuild carries the pipeline egress fields (B6.1 wave A2
     expect(carriedFired).toBe(true);
     expect(carriedEgress).toEqual({ kind: "x-post", body: "vetted" });
   });
+
+  test("sendApprovalConsumedFingerprint survives the 401-retry ctx rebuild", async () => {
+    process.env.GOOGLE_CLIENT_ID = "fake";
+    process.env.GOOGLE_CLIENT_SECRET = "fake";
+    const email = "b61a2a-appr-carry@example.com";
+    const tokenSet = {
+      refresh_token: "rt",
+      access_token: "old-access-token",
+      expires_at: Date.now() + 60 * 60_000,
+      scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      obtained_at: Date.now(),
+    };
+    const store = new Map<string, string>([[email, JSON.stringify(tokenSet)]]);
+    const deps: WithContextDeps = {
+      async getToken(e: string) {
+        return store.get(e) ?? null;
+      },
+      async setToken(e: string, json: string) {
+        store.set(e, json);
+      },
+      async deleteToken(e: string) {
+        store.delete(e);
+      },
+      async removeAccount() {},
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({ access_token: "new-access-token", expires_in: 3600 }),
+          { status: 200 },
+        )) as unknown as typeof fetch,
+      loadIndexImpl: async () => ({ accounts: [{ email }] }),
+    };
+    let attempt = 0;
+    let carried: string | undefined;
+    await withToolContext(
+      "gmail_search",
+      { query: "x", account_id: email },
+      async (hctx) => {
+        attempt++;
+        if (attempt === 1) {
+          hctx.sendApprovalConsumedFingerprint = "ab".repeat(32);
+          const e: UpstreamError = new Error("upstream_401");
+          e.httpStatus = 401;
+          throw e;
+        }
+        carried = hctx.sendApprovalConsumedFingerprint;
+        return "ok";
+      },
+      deps,
+    );
+    expect(attempt).toBe(2);
+    expect(carried).toBe("ab".repeat(32));
+  });
 });
 
 // ── 4. B6.1 wave A2b — YouTube comment + video writes (TRANSFORMING, OAuth-routed) ──
@@ -631,7 +682,7 @@ const YT_NFC_PRECOMPOSED = "café";
 function ytCtx(): { ctx: ToolContext; cap: CapturingAudit } {
   const cap = capturingAudit();
   return {
-    ctx: { allowedAccounts: null, credential: oauthCred(), tier: "write", audit: cap.sink },
+    ctx: { credential: oauthCred(), tier: "write", audit: cap.sink },
     cap,
   };
 }
@@ -759,6 +810,60 @@ describe("youtube_comment_reply — egress gates (moved from handlers.test.ts)",
     const meta = cap.last("commentPostMeta");
     expect(meta?.policy_decision).toBe("denied_outbound_sanitize_rejected");
     expect(meta?.parent_comment_id_hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("v1.128 Q3-B — public-write send-approval fires through the gate", () => {
+  test("x_post flag on + allowlisted → send_approval_required; pending target is the posting account id", async () => {
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
+    process.env[ENV_X_POST_ACCOUNTS] = X_USER;
+    xPostAllowlist.resetSingletons();
+    await expect(fire("x_post_create", xGateCtx(), { text: "hello public" })).rejects.toMatchObject({
+      errorName: "send_approval_required",
+      errorData: { reason: "awaiting_approval" },
+    });
+    const recs = await loadPendingSends(pendingSendsPath(), Date.now());
+    expect(recs).toHaveLength(1);
+    expect(recs[0]!.target).toEqual({ kind: "x_post", account_id: X_USER });
+    expect(recs[0]!.body).toBe("hello public");
+  });
+
+  test("x_post flag on + allowlist miss → no pending", async () => {
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
+    await fire("x_post_create", xGateCtx(), { text: "should never post" }).catch(() => undefined);
+    expect(await loadPendingSends(pendingSendsPath(), Date.now())).toEqual([]);
+  });
+
+  test("youtube_video_comment_post flag on + allowlisted → pending target is the video id", async () => {
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
+    process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = `video:${YT_VID}`;
+    commentTargets.resetSingletons();
+    await expect(
+      fire("youtube_video_comment_post", ytCtx().ctx, { video_id: YT_VID, text: "hi" }),
+    ).rejects.toMatchObject({ errorName: "send_approval_required" });
+    const recs = await loadPendingSends(pendingSendsPath(), Date.now());
+    expect(recs[0]!.target).toEqual({ kind: "youtube_video", video_id: YT_VID });
+  });
+
+  test("youtube_comment_reply flag on + allowlisted → pending target is the parent comment id", async () => {
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
+    process.env.SAFESPACE_YOUTUBE_COMMENT_TARGETS = `video:${YT_VID}`;
+    commentTargets.resetSingletons();
+    await expect(
+      fire("youtube_comment_reply", ytCtx().ctx, {
+        parent_comment_id: YT_PARENT,
+        video_id: YT_VID,
+        text: "hi",
+      }),
+    ).rejects.toMatchObject({ errorName: "send_approval_required" });
+    const recs = await loadPendingSends(pendingSendsPath(), Date.now());
+    expect(recs[0]!.target).toEqual({ kind: "youtube_comment", parent_comment_id: YT_PARENT });
+  });
+
+  test("youtube comment flag on + allowlist miss → no pending", async () => {
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
+    await fire("youtube_video_comment_post", ytCtx().ctx, { video_id: YT_VID, text: "x" }).catch(() => undefined);
+    expect(await loadPendingSends(pendingSendsPath(), Date.now())).toEqual([]);
   });
 });
 
@@ -1005,7 +1110,7 @@ const GMAIL_SENDER = "sender@example.com";
 function gmailCtx(): { ctx: ToolContext; cap: CapturingAudit } {
   const cap = capturingAudit();
   return {
-    ctx: { allowedAccounts: null, credential: oauthCred(GMAIL_SENDER, () => "tok"), tier: "write", audit: cap.sink },
+    ctx: { credential: oauthCred(GMAIL_SENDER, () => "tok"), tier: "write", audit: cap.sink },
     cap,
   };
 }

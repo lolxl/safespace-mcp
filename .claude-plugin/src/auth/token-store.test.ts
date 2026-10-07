@@ -7,7 +7,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { __resetBackendForTests, deleteToken, getToken, setToken } from "./token-store";
-import { storageKey } from "./secret-backend";
 import { MCPError } from "../errors";
 
 let tmpDir: string;
@@ -45,18 +44,12 @@ describe("token-store facade", () => {
     expect(await getToken("a@example.com")).toBeNull();
   });
 
-  test("threads the resolved operatorId into the storage key", async () => {
+  test("ignores SAFESPACE_OPERATOR_ID: the email is the key either way", async () => {
     process.env.SAFESPACE_OPERATOR_ID = "alice";
     await setToken("a@example.com", "T");
-    expect(await getToken("a@example.com")).toBe("T");
-
-    // With NO operator, the same email resolves to the legacy key -> the
-    // operator's token is NOT found (distinct keys). Lazy re-key only goes
-    // legacy -> namespaced, never the reverse.
     delete process.env.SAFESPACE_OPERATOR_ID;
     __resetBackendForTests();
-    expect(await getToken("a@example.com")).toBeNull();
-    expect(storageKey("alice", "a@example.com")).not.toBe(storageKey(null, "a@example.com"));
+    expect(await getToken("a@example.com")).toBe("T");
   });
 
   test("caches the backend; __resetBackendForTests re-selects after an env change", async () => {

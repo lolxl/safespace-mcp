@@ -55,7 +55,7 @@ test("default factory builds no native Entry until a token op runs, and masks a 
   // First token op constructs an Entry and (here) hits the native throw → masked
   // keychain_locked, with no native path forwarded.
   try {
-    await kb.getToken(null, "a@example.com");
+    await kb.getToken("a@example.com");
     throw new Error("expected MCPError(keychain_locked)");
   } catch (e) {
     expect(e).toBeInstanceOf(MCPError);

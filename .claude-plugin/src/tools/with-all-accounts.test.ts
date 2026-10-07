@@ -273,8 +273,13 @@ describe("withAllAccounts — fan-out + aggregation", () => {
       ),
     ).rejects.toThrow(/'accounts' entries must each match/);
     expect(fanOutTouched).toBe(false);
-    // Pre-fan-out rejection MUST emit no audit row.
-    expect(fx.innerAuditCalls).toHaveLength(0);
+    // Each pre-fan-out rejection emits exactly one terminal error row (no account,
+    // no per-account rows) and no aggregate row.
+    expect(fx.innerAuditCalls).toHaveLength(2);
+    for (const row of fx.innerAuditCalls) {
+      expect(row.status).toBe("error");
+      expect(row.email).toBeNull();
+    }
     expect(fx.outerAuditCalls).toHaveLength(0);
   });
 
@@ -571,41 +576,11 @@ describe("withAllAccounts — failure-mapping gap tests (T1-T4)", () => {
   });
 });
 
-describe("withAllAccounts — v1.64 B6 R10 closure (gates + operator)", () => {
-  const OP_BACKUP = process.env.SAFESPACE_OPERATOR_ID;
+describe("withAllAccounts — v1.64 B6 R10 closure (gates)", () => {
   const AUTO_BACKUP = process.env.SAFESPACE_AUTONOMOUS;
   afterEach(() => {
-    if (OP_BACKUP === undefined) delete process.env.SAFESPACE_OPERATOR_ID;
-    else process.env.SAFESPACE_OPERATOR_ID = OP_BACKUP;
     if (AUTO_BACKUP === undefined) delete process.env.SAFESPACE_AUTONOMOUS;
     else process.env.SAFESPACE_AUTONOMOUS = AUTO_BACKUP;
-  });
-
-  test("R10 audit upgrade: inner rows stamp the resolved operator (co-management forensics)", async () => {
-    process.env.SAFESPACE_OPERATOR_ID = "alice-op";
-    const fx = makeFixture({ emails: ["a@x.com", "b@x.com"] });
-    await withAllAccounts<{ messages: string[] }>(
-      "gmail_search_all",
-      { query: "x" },
-      async (ctx) => ({ messages: [requireOAuth(ctx).accountId] }),
-      {},
-      fx.deps,
-    );
-    expect(fx.innerAuditCalls).toHaveLength(2);
-    for (const row of fx.innerAuditCalls) expect(row.operator).toBe("alice-op");
-  });
-
-  test("operator is null on inner rows when $SAFESPACE_OPERATOR_ID is unset (byte-stable single-user)", async () => {
-    delete process.env.SAFESPACE_OPERATOR_ID;
-    const fx = makeFixture({ emails: ["a@x.com"] });
-    await withAllAccounts<{ messages: string[] }>(
-      "gmail_search_all",
-      { query: "x" },
-      async (ctx) => ({ messages: [requireOAuth(ctx).accountId] }),
-      {},
-      fx.deps,
-    );
-    expect(fx.innerAuditCalls[0]?.operator).toBeNull();
   });
 
   test("read-only `_all` tools are NOT burst/autonomy gated even in autonomous mode (gates are no-ops → byte-identical)", async () => {
@@ -640,68 +615,29 @@ describe("withAllAccounts — v1.64 B6 R10 closure (gates + operator)", () => {
         fx.deps,
       ),
     ).rejects.toThrow(MCPError);
-    // Gate fired BEFORE fan-out → zero per-account audit rows.
-    expect(fx.innerAuditCalls).toHaveLength(0);
+    // Gate fired BEFORE fan-out → no per-account rows; one terminal error row
+    // carrying the F4 code, no account.
+    expect(fx.innerAuditCalls).toHaveLength(1);
+    expect(fx.innerAuditCalls[0]!.email).toBeNull();
+    expect(fx.innerAuditCalls[0]!.errorCode).toBe(new MCPError("destructive_denied_in_autonomous_mode").code);
+    expect(fx.outerAuditCalls).toHaveLength(0);
   });
 });
 
-describe("withAllAccounts — v1.74 PR-2c per-operator confinement (the isolation proof)", () => {
-  test("confineToAccounts restricts the fan-out to the operator's set — B's account is unreachable", async () => {
+describe("withAllAccounts — fan-out set", () => {
+  test("fan-out reaches every consented account", async () => {
     const fx = makeFixture({ emails: ["alice@example.com", "bob@example.com"] });
     const out = await withAllAccounts<{ ok: boolean }>(
       "gmail_search_all",
       { query: "x" },
       async () => ({ ok: true }),
       {},
-      { ...fx.deps, confineToAccounts: ["alice@example.com"] }, // operator A
-    );
-    // Only alice fanned out — bob (present in the global index) is NOT reachable
-    // by operator A. THIS is the cross-account hole the arc set out to close.
-    expect(out.successes.map((s) => s.account_email)).toEqual(["alice@example.com"]);
-    expect(out.failures).toHaveLength(0);
-  });
-
-  test("a B-named account in opts.accounts → account_not_found (intersect, never widen)", async () => {
-    const fx = makeFixture({ emails: ["alice@example.com", "bob@example.com"] });
-    const out = await withAllAccounts<{ ok: boolean }>(
-      "gmail_search_all",
-      { query: "x" },
-      async () => ({ ok: true }),
-      { accounts: ["bob@example.com"] }, // A explicitly names B
-      { ...fx.deps, confineToAccounts: ["alice@example.com"] },
-    );
-    expect(out.successes).toHaveLength(0);
-    expect(out.failures).toHaveLength(1);
-    expect(out.failures[0]?.account_email).toBe("bob@example.com");
-    expect(out.failures[0]?.error.code).toBe("account_not_found"); // no oracle
-  });
-
-  test("confineToAccounts null → all-consented fan-out (Model A byte-identical)", async () => {
-    const fx = makeFixture({ emails: ["alice@example.com", "bob@example.com"] });
-    const out = await withAllAccounts<{ ok: boolean }>(
-      "gmail_search_all",
-      { query: "x" },
-      async () => ({ ok: true }),
-      {},
-      { ...fx.deps, confineToAccounts: null },
+      fx.deps,
     );
     expect(out.successes.map((s) => s.account_email).sort()).toEqual([
       "alice@example.com",
       "bob@example.com",
     ]);
-  });
-
-  test("deps.operator stamps the inner audit rows (the connection operator, not env)", async () => {
-    const fx = makeFixture({ emails: ["alice@example.com"] });
-    await withAllAccounts<{ ok: boolean }>(
-      "gmail_search_all",
-      { query: "x" },
-      async () => ({ ok: true }),
-      {},
-      { ...fx.deps, operator: "alice" },
-    );
-    expect(fx.innerAuditCalls).toHaveLength(1);
-    expect(fx.innerAuditCalls[0]?.operator).toBe("alice");
   });
 });
 

@@ -32,6 +32,16 @@ describe("computeFingerprint", () => {
     expect(computeFingerprint("gmail_send", ["x@a.com", "z@c.com"], "hi", "")).not.toBe(base); // recipient set
     expect(computeFingerprint("gmail_send", ["x@a.com"], "hi", "op@a")).not.toBe(base); // operator
   });
+
+  test("omitting target keeps the 4-tuple (human-send byte-identical); a target is a 5th bound element", () => {
+    const human = computeFingerprint("gmail_send", ["x@example.com"], "hi", "");
+    expect(computeFingerprint("gmail_send", ["x@example.com"], "hi", "", undefined)).toBe(human);
+    const withTarget = computeFingerprint("x_post_create", [], "hi", "", { kind: "x_post", account_id: "1" });
+    expect(withTarget).not.toBe(computeFingerprint("x_post_create", [], "hi", ""));
+    expect(withTarget).not.toBe(
+      computeFingerprint("x_post_create", [], "hi", "", { kind: "x_post", account_id: "2" }),
+    );
+  });
 });
 
 describe("parsePendingSends — fail-loud", () => {
@@ -56,6 +66,64 @@ describe("parsePendingSends — fail-loud", () => {
     );
     expect(recs).toHaveLength(1);
     expect(recs[0]!.status).toBe("approved");
+    expect(recs[0]!.target).toBeUndefined();
+  });
+
+  test("accepts a closed public-write target; rejects unknown keys / bad kind", () => {
+    const base = {
+      pending_id: "a".repeat(32),
+      fingerprint: "f".repeat(64),
+      tool: "x_post_create",
+      recipients: [],
+      body: "b",
+      operator: "",
+      created_at: "2026-01-01T00:00:00Z",
+      expires_at: "2026-01-02T00:00:00Z",
+      status: "pending",
+      target: { kind: "x_post", account_id: "99" },
+    };
+    const recs = parsePendingSends(JSON.stringify({ pending: [base] }));
+    expect(recs[0]!.target).toEqual({ kind: "x_post", account_id: "99" });
+    expect(() =>
+      parsePendingSends(JSON.stringify({ pending: [{ ...base, target: { kind: "x_post", account_id: "99", extra: "no" } }] })),
+    ).toThrow(/unknown key/);
+    expect(() => parsePendingSends(JSON.stringify({ pending: [{ ...base, target: { kind: "nope" } }] }))).toThrow(/closed kind/);
+  });
+});
+
+describe("createPending validates target (write path = read path)", () => {
+  const ENV = ["SAFESPACE_CONFIG_DIR"];
+  const saved: Record<string, string | undefined> = {};
+  let tmpDir: string;
+  beforeEach(async () => {
+    for (const k of ENV) saved[k] = process.env[k];
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "safespace-sastore-tgt-"));
+    process.env.SAFESPACE_CONFIG_DIR = tmpDir;
+  });
+  afterEach(async () => {
+    for (const k of ENV) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k]!;
+    }
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("empty account_id is rejected at create (would fail-loud every later load)", async () => {
+    await expect(
+      createPending(
+        pendingSendsPath(),
+        {
+          fingerprint: "f".repeat(64),
+          tool: "x_post_create",
+          recipients: [],
+          body: "b",
+          operator: "",
+          target: { kind: "x_post", account_id: "" },
+        },
+        1_000_000,
+        60_000,
+      ),
+    ).rejects.toThrow(/non-empty string/);
   });
 });
 

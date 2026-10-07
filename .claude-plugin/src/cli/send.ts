@@ -9,6 +9,7 @@ import { auditSendApprovalEvent } from "../audit";
 import {
   approvePending,
   findAndRemovePending,
+  formatApprovalTarget,
   listPending,
   pendingSendsPath,
   type PendingSend,
@@ -57,6 +58,7 @@ async function list(args: string[], io: CliIO): Promise<void> {
   }
   for (const r of rows) {
     io.out(`${r.pending_id}  ${r.status.padEnd(8)} ${r.tool}`);
+    if (r.target !== undefined) io.out(`  target: ${formatApprovalTarget(r.target)}`);
     io.out(`  to: ${r.recipients.join(", ")}`);
     io.out(`  body: ${preview(r.body)}`);
     io.out(`  expires ${r.expires_at}`);
@@ -83,10 +85,12 @@ async function approve(args: string[], io: CliIO): Promise<void> {
     fingerprint: rec.fingerprint,
     recipients: rec.recipients,
     operator: rec.operator,
+    ...(rec.target !== undefined ? { target: rec.target } : {}),
   });
-  // NOTE: `recipients` is the contact-RESOLVED final list — shown in the owner's LOCAL terminal
-  // (intentional: the owner confirms exactly who the approved send goes to). Never sent anywhere.
-  io.out(`approved ${id} (${rec.tool} → ${rec.recipients.join(", ")}). The agent's identical retry will send ONCE.`);
+  // NOTE: `recipients` is the contact-RESOLVED final list; `target` is the typed public-surface
+  // identity — shown in the owner's LOCAL terminal. Never sent anywhere.
+  const dest = rec.target !== undefined ? formatApprovalTarget(rec.target) : rec.recipients.join(", ");
+  io.out(`approved ${id} (${rec.tool} → ${dest}). The agent's identical retry will send ONCE.`);
 }
 
 async function deny(args: string[], io: CliIO): Promise<void> {
@@ -110,6 +114,7 @@ async function deny(args: string[], io: CliIO): Promise<void> {
     fingerprint: rec.fingerprint,
     recipients: rec.recipients,
     operator: rec.operator,
+    ...(rec.target !== undefined ? { target: rec.target } : {}),
   });
   io.out(`denied ${id} — dropped from the pending store.`);
 }

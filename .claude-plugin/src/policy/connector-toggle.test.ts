@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer } from "../server";
@@ -39,7 +41,7 @@ afterEach(() => {
 const implementedDefs = Object.values(TOOL_REGISTRY).filter((d) => IMPLEMENTED_TOOLS.has(d.name));
 
 function fixedResolver(tier: Tier): OperatorResolver {
-  const op: OperatorContext = { operatorId: "test-op", tier, allowedAccounts: null };
+  const op: OperatorContext = { tier };
   return { resolve: () => op };
 }
 
@@ -111,9 +113,9 @@ describe("v1.127 sentinels — the token map is bound to the live registry", () 
     expect([...prefixes].sort()).toEqual([...GOOGLE_SUBSERVICE_TOKENS].sort());
   });
 
-  test("all 22 tokens are pairwise distinct and sorted", () => {
+  test("all 21 tokens are pairwise distinct and sorted", () => {
     expect(new Set(CONNECTOR_TOKENS).size).toBe(CONNECTOR_TOKENS.length);
-    expect(CONNECTOR_TOKENS.length).toBe(22);
+    expect(CONNECTOR_TOKENS.length).toBe(21);
     expect([...CONNECTOR_TOKENS]).toEqual([...CONNECTOR_TOKENS].sort());
   });
 });
@@ -148,6 +150,15 @@ describe("v1.127 parsing", () => {
 });
 
 describe("v1.127 bootstrap guard (fail-loud)", () => {
+  test("proxy.ts calls validateConnectors before the F6 token check (unknown-token diagnosis first)", () => {
+    const src = readFileSync(join(import.meta.dir, "../proxy.ts"), "utf8");
+    const iValidate = src.indexOf("validateConnectors()");
+    const iF6 = src.indexOf("enforceAutonomousTokenStorage()");
+    expect(iValidate).toBeGreaterThan(-1);
+    expect(iF6).toBeGreaterThan(-1);
+    expect(iValidate).toBeLessThan(iF6);
+  });
+
   test("unset → no-op", () => {
     expect(() => validateConnectors()).not.toThrow();
     process.env[ENV] = "   ";
@@ -241,17 +252,22 @@ describe("v1.127 resolution + fail-safe", () => {
     process.env[ENV] = "gmail";
     expect(connectorPostureValue()).toContain("gmail");
   });
+
+  test("the retired webhook token is now an unknown connector", () => {
+    process.env[ENV] = "gmail,WEBHOOK";
+    expect(() => validateConnectors()).toThrow(/"webhook" is retired: the inbound webhook listener/);
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
 // BEHAVIORAL — through a real in-memory MCP client.
 // ───────────────────────────────────────────────────────────────────────────────
 describe("v1.127 tools/list", () => {
-  test("UNSET is byte-identical to v1.126 — 69 / 125 / 130 tools, registry order", async () => {
-    expect((await listToolNames("read")).length).toBe(69);
-    expect((await listToolNames("write")).length).toBe(125);
+  test("UNSET exposes every connector — 68 / 124 / 129 tools, registry order", async () => {
+    expect((await listToolNames("read")).length).toBe(68);
+    expect((await listToolNames("write")).length).toBe(124);
     const share = await listToolNames("share");
-    expect(share.length).toBe(130);
+    expect(share.length).toBe(129);
     expect(share).toEqual(
       implementedDefs.map((d) => d.name), // registry order preserved on the wire
     );
@@ -304,7 +320,7 @@ describe("v1.127 tools/list", () => {
 
     expect(a.every((n) => n.startsWith("github_"))).toBe(true);
     expect(b.every((n) => n.startsWith("notion_"))).toBe(true);
-    expect(c.length).toBe(130);
+    expect(c.length).toBe(129);
     expect(d).toEqual(a); // re-selecting the first set returns the same projection
   });
 });

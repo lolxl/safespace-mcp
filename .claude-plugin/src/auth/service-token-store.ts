@@ -17,7 +17,6 @@
 // the `service-token` Credential's getter (tools/types.ts), inline when building the
 // Authorization header — never as a stored field.
 
-import { resolveOperatorId } from "../identity/operator-id";
 import type { SecretBackend } from "./secret-backend";
 import { selectBackend } from "./select-backend";
 import {
@@ -80,19 +79,19 @@ function envToken(svc: ServiceName): string | null {
 export async function readServiceToken(svc: ServiceName): Promise<string | null> {
   const env = envToken(svc);
   if (env !== null) return env;
-  return backend().getToken(resolveOperatorId(), RESERVED_KEY[svc]);
+  return backend().getToken(RESERVED_KEY[svc]);
 }
 
 /** Persist the service token to the SecretBackend (the CLI `safespace line
  *  set-token` writer). The value is stored as an opaque string (the backend does
  *  not parse it). */
 export async function setServiceToken(svc: ServiceName, token: string): Promise<void> {
-  await backend().setToken(resolveOperatorId(), RESERVED_KEY[svc], token);
+  await backend().setToken(RESERVED_KEY[svc], token);
 }
 
 /** Remove the persisted service token. (The env override, if set, still resolves.) */
 export async function deleteServiceToken(svc: ServiceName): Promise<void> {
-  await backend().deleteToken(resolveOperatorId(), RESERVED_KEY[svc]);
+  await backend().deleteToken(RESERVED_KEY[svc]);
 }
 
 /** Presence probe for CLI `status` / `doctor` (configured: yes|no). True when EITHER

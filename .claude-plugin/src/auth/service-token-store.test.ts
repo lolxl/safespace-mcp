@@ -7,7 +7,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { MCPError } from "../errors";
-import { storageKey } from "./secret-backend";
 import {
   __resetServiceTokenBackendForTests,
   deleteServiceToken,
@@ -90,9 +89,9 @@ describe("service-token store", () => {
   });
 
   test("the reserved storage key contains ':' and no '@' — cannot collide with an email", () => {
-    // The LINE token is stored under operatorId=null → the bare reserved account
+    // The LINE token is stored under the bare reserved account
     // string. It must be unspoofable as a Google email key.
-    const key = storageKey(null, "line:channel-access-token");
+    const key = "line:channel-access-token";
     expect(key).toBe("line:channel-access-token");
     expect(key).toContain(":");
     expect(key).not.toContain("@");
@@ -121,7 +120,7 @@ describe("service-token store — telegram (v1.68)", () => {
     await setServiceToken("telegram", "tg-tok");
     expect(await readServiceToken("line")).toBe("line-tok");
     expect(await readServiceToken("telegram")).toBe("tg-tok");
-    const key = storageKey(null, "telegram:bot-token");
+    const key = "telegram:bot-token";
     expect(key).toBe("telegram:bot-token");
     expect(key).toContain(":");
     expect(key).not.toContain("@");
@@ -152,7 +151,7 @@ describe("service-token store — discord (v1.69)", () => {
     expect(await readServiceToken("line")).toBe("line-tok");
     expect(await readServiceToken("telegram")).toBe("tg-tok");
     expect(await readServiceToken("discord")).toBe("dc-tok");
-    const key = storageKey(null, "discord:bot-token");
+    const key = "discord:bot-token";
     expect(key).toBe("discord:bot-token");
     expect(key).toContain(":");
     expect(key).not.toContain("@");

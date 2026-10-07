@@ -1,5 +1,5 @@
 // v1.113 — the X multi-account store + rotation-safe proactive refresh + the x
-// Source's resolveAccount resolution + Model-B confinement. File backend + temp dir.
+// Source's resolveAccount resolution. File backend + temp dir.
 // Network is NEVER hit: refresh uses an injected fetchImpl.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -418,7 +418,7 @@ describe("clampExpiresIn / tokenPayloadFromGrant — expires_in clamp", () => {
   });
 });
 
-describe("x.resolveAccount — resolution + Model-B confinement (over the real store)", () => {
+describe("x.resolveAccount — resolution (over the real store)", () => {
   async function seed(): Promise<void> {
     await addXAccount({ id: USER_A, username: "alice" });
     await addXAccount({ id: USER_B, username: "bob" }); // active = B
@@ -464,24 +464,6 @@ describe("x.resolveAccount — resolution + Model-B confinement (over the real s
     await expect(resolve({ explicitAccountId: "ghost" })).rejects.toMatchObject({
       errorName: "account_not_found",
       errorData: { email: "ghost" },
-    });
-  });
-
-  test("Model B confinement: a default active outside the set is skipped", async () => {
-    await seed(); // active = B
-    // Operator only allowed A; active B is skipped → fall through to lastUsed A.
-    expect(
-      (await resolve({ allowedAccounts: [USER_A], lastUsed: USER_A })).accountId,
-    ).toBe(USER_A);
-  });
-
-  test("Model B confinement: an explicit out-of-set id → account_not_found (no oracle)", async () => {
-    await seed();
-    await expect(
-      resolve({ explicitAccountId: USER_B, allowedAccounts: [USER_A] }),
-    ).rejects.toMatchObject({
-      errorName: "account_not_found",
-      errorData: { email: USER_B },
     });
   });
 });

@@ -17,7 +17,7 @@
 //
 // v1.121 (B6.1 wave C) — the per-account sub-context IS now the real `ToolContext`
 // (the former per-account sub-context shim is deleted); `fn` receives a `{credential, tier,
-// audit, allowedAccounts}` literal built per EXECUTED sub-call, so handlers narrow
+// audit}` literal built per EXECUTED sub-call, so handlers narrow
 // via `requireOAuth(ctx)` exactly like the single-account choke point. Two parity
 // gaps the v1.120 header left open are now CLOSED: (1) a per-sub-call egress
 // tripwire mirrors with-context.ts's direction:"outbound-write" post-handler
@@ -28,6 +28,7 @@ import {
   AUDIT_META_CHANNELS,
   auditCrossAccountAggregate,
   auditEnd,
+  markErrorAudited,
   pickAuditErrorForensics,
 } from "../audit";
 import { loadIndex } from "../auth/keychain";
@@ -42,10 +43,9 @@ import { currentTier, type Tier } from "../tier";
 import type { ToolContext } from "./types";
 // v1.64 Phase B (B6 — R10 closure). The cross-account fan-out used to run NEITHER
 // the F1 write-burst nor the F4 autonomous-delete gate (and stamped a stripped
-// audit row without the operator). These imports wire the SAME gates the
-// single-account choke point (with-context.ts) runs + the operator resolver +
-// the per-source skipFields, so a future `*_all` WRITE is gated by construction.
-import { resolveOperatorId } from "../identity/operator-id";
+// audit row). These imports wire the SAME gates the single-account choke point
+// (with-context.ts) runs + the per-source skipFields, so a future `*_all` WRITE is
+// gated by construction.
 import { enforceAutonomousDeleteDeny } from "../policy/autonomous-mode";
 import { classifyWriteTool, enforceWriteBurst } from "../policy/write-burst";
 import { sanitize } from "../sanitize";
@@ -84,8 +84,8 @@ export interface WithAllAccountsOptions {
   // source of truth, no longer duplicated in the opts.
 }
 
-/** Injection seams for tests + (v1.74 PR-2c) the per-operator inputs threaded from
- *  the cross-account dispatch sentinel (the registry `_all` shims fill them). */
+/** Injection seams for tests + the tier threaded from the cross-account dispatch
+ *  sentinel (the registry `_all` shims fill it). */
 export interface WithAllAccountsDeps extends RefreshDeps {
   loadIndexImpl?: () => Promise<{
     accounts: Array<{ email: string; scopes?: string[] }>;
@@ -93,26 +93,13 @@ export interface WithAllAccountsDeps extends RefreshDeps {
   auditEndImpl?: typeof auditEnd;
   auditAggregateImpl?: typeof auditCrossAccountAggregate;
   sanitizeImpl?: typeof sanitize;
-  /** v1.74 PR-2c — the operator this fan-out runs as (for the inner audit rows).
-   *  Threaded from the connection (Model B) via the sentinel; falls back to
-   *  `resolveOperatorId()` when absent (direct callers / Model A) → byte-identical. */
-  operator?: string | null;
   /** v1.120 (F6 step 2) — the privilege tier for this fan-out, threaded from the
-   *  cross-account sentinel via the registry shim (the per-operator tier under Model
-   *  B — CrossAccountSentinel extends ToolContext, which carries `tier`). Absent for
-   *  direct callers (tests) / Model A → falls back to `currentTier()`, the SAME
-   *  Model-A source the single-account path resolves its tier from. Rides onto each
+   *  cross-account sentinel (a ToolContext, which carries `tier`) via the registry
+   *  shim. Absent for direct callers (tests) → falls
+   *  back to `currentTier()`, the SAME source the single-account path resolves its
+   *  tier from. Rides onto each
    *  per-account `ToolContext.tier`. */
   tier?: Tier;
-  /** v1.74 PR-2c — the operator's account-confinement set. When non-null, the
-   *  consented-account map is INTERSECTED with it BEFORE fan-out, so an account in
-   *  the global index but outside this operator's set is dropped exactly as a
-   *  non-consented account is (it never enters the fan-out; a caller naming it in
-   *  `opts.accounts` gets the ordinary `account_not_found`). `null`/absent = no
-   *  confinement (Model A — the all-consented fan-out is byte-identical). This is
-   *  the cross-account half of the in-process isolation (design §6.1) — the path
-   *  that bypasses `withToolContext`, so it MUST be confined here separately. */
-  confineToAccounts?: readonly string[] | null;
 }
 
 /** Construct the synthetic per-sub-call args object whose SHA256 is the
@@ -334,74 +321,76 @@ export async function withAllAccounts<T>(
   // per-account failure — so it propagates out of the cross-account handler to
   // proxy.ts (which renders the MCPError), and is correctly exempt from the
   // best-effort "never throws per-account" contract.
-  // Resolve the operator once: it attributes the per-account inner audit rows to
-  // the human actor (co-management forensics) AND (v1.92) keys the F1 burst window
-  // per-operator. Byte-stable when $SAFESPACE_OPERATOR_ID is unset
-  // (resolveOperatorId() → null → the shared sentinel bucket + `operator: null`
-  // rows, exactly as before). v1.74 PR-2c — the operator from the connection
-  // (Model B, via the sentinel) falls back to env for direct callers / Model A.
-  const operator = deps.operator ?? resolveOperatorId();
-  // v1.120 (F6 step 2) — resolve the privilege tier ONCE here, beside the operator, so
-  // each per-account sub-context carries it (ToolContext-parity). Model B threads the
-  // per-operator tier via the sentinel/shim; a direct caller / Model A leaves it unset
-  // → `currentTier()`, the SAME source the single-account choke point reads.
+  // v1.120 (F6 step 2) — resolve the privilege tier ONCE here, so
+  // each per-account sub-context carries it (ToolContext-parity). The sentinel/shim
+  // threads it; a direct caller leaves it unset → `currentTier()`, the SAME source
+  // the single-account choke point reads.
   const tier = deps.tier ?? currentTier();
-  enforceAutonomousDeleteDeny(tool);
-  // v1.92 — per-operator burst window. Only the operatorId is available on the
-  // cross-account path (no full OperatorContext here), so per-operator registry
-  // CAP OVERRIDES are not threaded → this path uses the global env default. Moot
-  // today (every `_all` tool is read-only → "exempt" → no-op); a future `*_all`
-  // WRITE is still rate-capped, just at the global default until the override is
-  // plumbed here.
-  enforceWriteBurst(classifyWriteTool(tool, toolDef?.min_tier), { operatorId: operator });
+  // Everything from the policy gates through the index load runs before any per-
+  // account row exists; a throw here (F4/F1 denial, bad `accounts` input, index
+  // read failure) writes one terminal row for the call instead of leaving none.
+  const callStart = Date.now();
+  const { requestedSubset, idx } = await (async () => {
+    enforceAutonomousDeleteDeny(tool);
+    // The same process-wide burst window as the single-account paths. Moot today
+    // (every `_all` tool is read-only → "exempt" → no-op); a future `*_all` WRITE is
+    // rate-capped here.
+    enforceWriteBurst(classifyWriteTool(tool, toolDef?.min_tier));
 
-  // ── Phase 1: input validation BEFORE any I/O (sec-rev hook 5) ──
-  // Empty accounts[] → "all accounts" (same as undefined). Duplicates deduped.
-  // Each entry MUST match EMAIL_RECIPIENT_RE (anchored, rejects CRLF / path /
-  // control chars).
-  let requestedSubset: string[] | undefined;
-  if (Array.isArray(opts.accounts) && opts.accounts.length > 0) {
-    const seen = new Set<string>();
-    for (const entry of opts.accounts) {
-      if (typeof entry !== "string" || !EMAIL_RECIPIENT_RE.test(entry)) {
-        throw new Error(
-          `${tool}: 'accounts' entries must each match the recipient email format`,
-        );
+    // ── Phase 1: input validation BEFORE any I/O (sec-rev hook 5) ──
+    // Empty accounts[] → "all accounts" (same as undefined). Duplicates deduped.
+    // Each entry MUST match EMAIL_RECIPIENT_RE (anchored, rejects CRLF / path /
+    // control chars).
+    let requestedSubset: string[] | undefined;
+    if (Array.isArray(opts.accounts) && opts.accounts.length > 0) {
+      const seen = new Set<string>();
+      for (const entry of opts.accounts) {
+        if (typeof entry !== "string" || !EMAIL_RECIPIENT_RE.test(entry)) {
+          throw new Error(
+            `${tool}: 'accounts' entries must each match the recipient email format`,
+          );
+        }
+        seen.add(entry);
       }
-      seen.add(entry);
+      requestedSubset = Array.from(seen);
     }
-    requestedSubset = Array.from(seen);
-  }
 
-  // ── Phase 2: resolve target accounts against accounts.json ──
-  // v1.119 (F6 step 1) — this fan-out ENUMERATION (loadIndex → EMAIL_RECIPIENT_RE
-  // validate → per-operator confinement intersect) stays hand-rolled here: it is
-  // cross-account ORCHESTRATION (WHICH accounts to touch), deliberately NOT
-  // `source.resolveAccount` (which resolves the ONE active account for a single-
-  // account call). Only the per-account scope check + credential resolve route
-  // through the Source strategies; collapsing this whole literal pipeline into the
-  // Source is B6.1.
-  const idx = await idxLoader();
+    // ── Phase 2: resolve target accounts against accounts.json ──
+    // v1.119 (F6 step 1) — this fan-out ENUMERATION (loadIndex → EMAIL_RECIPIENT_RE
+    // validate → consented-account intersect) stays hand-rolled here: it is
+    // cross-account ORCHESTRATION (WHICH accounts to touch), deliberately NOT
+    // `source.resolveAccount` (which resolves the ONE active account for a single-
+    // account call). Only the per-account scope check + credential resolve route
+    // through the Source strategies; collapsing this whole literal pipeline into the
+    // Source is B6.1.
+    const idx = await idxLoader();
+    return { requestedSubset, idx };
+  })().catch(async (err: unknown) => {
+    // Awaited before the rethrow: a CLI caller may exit as soon as this rejects.
+    await auditInnerImpl({
+      tool,
+      source: source.id,
+      email: null,
+      argsHash: outerArgsHash,
+      status: "error",
+      durationMs: Date.now() - callStart,
+      errorCode: err instanceof MCPError ? err.code : undefined,
+      errorForensics: err instanceof MCPError ? pickAuditErrorForensics(err.errorData) : undefined,
+    });
+    markErrorAudited(err);
+    throw err;
+  });
   // sec-H1: validate each persisted account.email against EMAIL_RECIPIENT_RE.
   // A restored/edited accounts.json could inject adversarial text; mismatched
   // entries are treated as if the account doesn't exist (drop from `consented`
   // map; subset-path lookups surface `account_not_found`; all-consented path
   // skips them entirely). Malformed email NEVER propagates to `account_email`
   // output fields.
-  // v1.74 PR-2c — per-operator account confinement (design §6.1, the in-process
-  // isolation proof). When the operator has a confinement set, an account in the
-  // global index but OUTSIDE it is dropped here, exactly as a non-consented account
-  // is — so operator A's `*_all` fan-out can NEVER reach operator B's accounts, and
-  // a B-named entry in `opts.accounts` surfaces the ordinary `account_not_found`
-  // (the subset path's `consented.get(email)` is undefined). `null` = no confinement
-  // (Model A) → byte-identical.
-  const confine = deps.confineToAccounts ?? null;
   const consented = new Map<string, { email: string; scopes?: string[] }>();
   for (const a of idx.accounts) {
     if (
       typeof a.email === "string" &&
-      EMAIL_RECIPIENT_RE.test(a.email) &&
-      (confine == null || confine.includes(a.email))
+      EMAIL_RECIPIENT_RE.test(a.email)
     ) {
       consented.set(a.email, a);
     }
@@ -453,19 +442,16 @@ export async function withAllAccounts<T>(
         throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
       }
       // v1.121 (B6.1 wave C) — build a REAL ToolContext for this EXECUTED sub-call
-      // (replacing the former per-account sub-context shim). `confine` (= deps.confineToAccounts ?? null,
-      // resolved once in Phase 2) is the SAME account-confinement set the single-
-      // account ctx carries as op.allowedAccounts (with-context.ts:252-257). `const`
-      // is fine even though the egress tripwire below READS ctx.egressGateFired and a
-      // future `*_all` write's egress gate would SET it — that optional field is
+      // (replacing the former per-account sub-context shim). `const` is fine even
+      // though the egress tripwire below READS ctx.egressGateFired and a future
+      // `*_all` write's egress gate would SET it — that optional field is
       // non-readonly on ToolContext, so mutating the property (not the binding) is
-      // allowed. No current `_all` handler reads tier / audit / allowedAccounts
-      // (reads that record nothing) → byte-identical today.
+      // allowed. No current `_all` handler reads tier / audit (reads that record
+      // nothing) → byte-identical today.
       const ctx: ToolContext = {
         credential: cred,
         tier,
         audit: acc.sink,
-        allowedAccounts: confine,
       };
       const raw = await fn(ctx);
       // v1.121 (B6.1 wave C) — per-sub-call egress tripwire, mirroring with-context.ts's
@@ -579,9 +565,6 @@ export async function withAllAccounts<T>(
         // correct the moment a non-Google `_all` tool exists.
         source: source.id,
         email: r.plan.email,
-        // v1.64 Phase B (B6 — R10 audit upgrade) — attribute the operator on the
-        // inner row (byte-stable null when $SAFESPACE_OPERATOR_ID is unset).
-        operator,
         argsHash: innerHash,
         status: "ok",
         durationMs: r.durationMs,
@@ -610,9 +593,6 @@ export async function withAllAccounts<T>(
         // v1.111 (#2) — source parity with the ok branch / single-account path.
         source: source.id,
         email: r.plan.email,
-        // v1.64 Phase B (B6 — R10 audit upgrade) — operator on the inner row too
-        // (byte-stable null when $SAFESPACE_OPERATOR_ID is unset).
-        operator,
         argsHash: innerHash,
         status: "error",
         durationMs: r.durationMs,

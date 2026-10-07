@@ -5,11 +5,14 @@
 // `pending-sends.json` (configDir, 0o600).
 //
 // FINGERPRINT (anti bait-and-switch): each record is keyed by
-// sha256(tool ‖ sorted+deduped recipients ‖ on-wire body ‖ operator) — so an approval binds to
-// the EXACT tool+recipients+content the owner reviewed; changing any of them needs a fresh
-// approval. One-time CONSUME on send prevents replay.
+// sha256(tool ‖ [canonical target] ‖ sorted+deduped recipients ‖ on-wire body ‖ operator) —
+// so an approval binds to the EXACT tool+target+recipients+content the owner reviewed;
+// changing any of them needs a fresh approval. The target element is PRESENT only when the
+// send carries a typed public-surface target (v1.128 Q3-B); human-sends omit it so their
+// fingerprint stays the 4-tuple (byte-identical store format). One-time CONSUME on send
+// prevents replay.
 //
-// AT REST: unlike agent-tokens.json (hashes only), this store holds the outgoing BODY in
+// AT REST: unlike a hashes-only store, this one holds the outgoing BODY in
 // plaintext — the owner must SEE what they approve. It is the owner's own outgoing message
 // (0o600 + configDir 0o700) and is NEVER echoed in an MCPError / doctor / audit (the audit
 // records a recipient HASH + the fingerprint, never the body).
@@ -28,14 +31,32 @@ const MAX_RECORDS = 1000; // blast-radius cap — a runaway agent can't fill the
 
 export type SendStatus = "pending" | "approved";
 
+/** Closed typed target for irretractable public writes (v1.128 Q3-B). Unknown
+ *  keys are rejected at parse. Human-sends omit this field. */
+export type ApprovalTarget =
+  | { readonly kind: "youtube_video"; readonly video_id: string }
+  | { readonly kind: "youtube_comment"; readonly parent_comment_id: string }
+  | { readonly kind: "x_post"; readonly account_id: string }
+  | { readonly kind: "drive_share"; readonly file_id: string; readonly share_type: "anyone"; readonly role: string };
+
+const TARGET_KEYS: Record<ApprovalTarget["kind"], readonly string[]> = {
+  youtube_video: ["kind", "video_id"],
+  youtube_comment: ["kind", "parent_comment_id"],
+  x_post: ["kind", "account_id"],
+  drive_share: ["kind", "file_id", "share_type", "role"],
+};
+
 export interface PendingSend {
   readonly pending_id: string;
   readonly fingerprint: string;
   readonly tool: string;
   readonly recipients: string[];
   readonly body: string;
-  /** Model B operator binding ("" = Model A → byte-identical). */
+  /** Operator binding. Always "" since the multi-operator transport was removed;
+   *  kept in the fingerprint so existing pending records stay valid. */
   readonly operator: string;
+  /** Present only for public-surface gated writes; absent on human-sends. */
+  readonly target?: ApprovalTarget;
   readonly created_at: string;
   readonly expires_at: string;
   status: SendStatus;
@@ -50,18 +71,51 @@ export function generatePendingId(): string {
   return crypto.randomBytes(16).toString("hex");
 }
 
+/** Stable JSON object for a typed target (locked key order per kind). */
+export function canonicalizeTarget(target: ApprovalTarget): ApprovalTarget {
+  switch (target.kind) {
+    case "youtube_video":
+      return { kind: "youtube_video", video_id: target.video_id };
+    case "youtube_comment":
+      return { kind: "youtube_comment", parent_comment_id: target.parent_comment_id };
+    case "x_post":
+      return { kind: "x_post", account_id: target.account_id };
+    case "drive_share":
+      return { kind: "drive_share", file_id: target.file_id, share_type: "anyone", role: target.role };
+  }
+}
+
+/** One-line owner-visible target for `safespace send list` / approve. */
+export function formatApprovalTarget(target: ApprovalTarget): string {
+  switch (target.kind) {
+    case "youtube_video":
+      return `video_id=${target.video_id}`;
+    case "youtube_comment":
+      return `parent_comment_id=${target.parent_comment_id}`;
+    case "x_post":
+      return `account_id=${target.account_id}`;
+    case "drive_share":
+      return `file_id=${target.file_id} share_type=anyone role=${target.role}`;
+  }
+}
+
 /** The stable per-send fingerprint. Recipients are deduped + sorted (order/dupes don't change
  *  the send); the body is hashed AS-IS (the on-wire bytes — NO normalization, so two distinct
- *  bodies can never collide). `operator` binds the approval to the calling operator (Model B;
- *  "" = Model A). */
+ *  bodies can never collide). `operator` is always "" (kept so pending
+ *  records stay valid). `target` is the 5th element ONLY when present — omitted human-sends keep
+ *  the 4-tuple so existing pending records stay valid. */
 export function computeFingerprint(
   tool: string,
   recipients: string[],
   body: string,
   operator: string,
+  target?: ApprovalTarget,
 ): string {
   const recips = Array.from(new Set(recipients)).sort();
-  const canonical = JSON.stringify([tool, recips, body, operator]);
+  const canonical =
+    target === undefined
+      ? JSON.stringify([tool, recips, body, operator])
+      : JSON.stringify([tool, canonicalizeTarget(target), recips, body, operator]);
   return crypto.createHash("sha256").update(canonical).digest("hex");
 }
 
@@ -115,6 +169,7 @@ export function parsePendingSends(raw: string): PendingSend[] {
     if (e.status !== "pending" && e.status !== "approved") {
       fail(`entry #${i}: \`status\` must be "pending" or "approved"`);
     }
+    const target = e.target === undefined ? undefined : parseApprovalTarget(e.target, `entry #${i}: \`target\``);
     if (seen.has(e.pending_id)) fail(`entry #${i}: duplicate pending_id`);
     seen.add(e.pending_id);
     return {
@@ -124,11 +179,38 @@ export function parsePendingSends(raw: string): PendingSend[] {
       recipients: e.recipients,
       body: e.body,
       operator: e.operator,
+      ...(target !== undefined ? { target } : {}),
       created_at: e.created_at,
       expires_at: e.expires_at,
       status: e.status,
     };
   });
+}
+
+function parseApprovalTarget(raw: unknown, where: string): ApprovalTarget {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    fail(`${where} must be an object`);
+  }
+  const e = raw as Record<string, unknown>;
+  const kind = e.kind;
+  if (kind !== "youtube_video" && kind !== "youtube_comment" && kind !== "x_post" && kind !== "drive_share") {
+    fail(`${where}.kind is not a closed kind`);
+  }
+  for (const k of Object.keys(e)) {
+    if (!TARGET_KEYS[kind].includes(k)) fail(`${where} has unknown key`);
+  }
+  const need = (field: string): string => {
+    const v = e[field];
+    if (typeof v !== "string" || v.length === 0) fail(`${where}.${field} must be a non-empty string`);
+    return v;
+  };
+  if (kind === "youtube_video") return { kind, video_id: need("video_id") };
+  if (kind === "youtube_comment") return { kind, parent_comment_id: need("parent_comment_id") };
+  if (kind === "x_post") return { kind, account_id: need("account_id") };
+  if (e.share_type !== "anyone") fail(`${where}.share_type must be "anyone"`);
+  const role = need("role");
+  if (role !== "reader" && role !== "commenter") fail(`${where}.role must be reader or commenter`);
+  return { kind: "drive_share", file_id: need("file_id"), share_type: "anyone", role };
 }
 
 /** Read + parse the store, PRUNING records whose `expires_at` has passed (so stale plaintext
@@ -164,7 +246,14 @@ export function findApprovedByFingerprint(records: PendingSend[], fingerprint: s
  *  its id. Pruning happens at load; a fresh-load count cap bounds the blast radius. */
 export async function createPending(
   filePath: string,
-  rec: { fingerprint: string; tool: string; recipients: string[]; body: string; operator: string },
+  rec: {
+    fingerprint: string;
+    tool: string;
+    recipients: string[];
+    body: string;
+    operator: string;
+    target?: ApprovalTarget;
+  },
   now: number,
   ttlMs: number,
 ): Promise<string> {
@@ -173,6 +262,7 @@ export async function createPending(
     throw new Error(`pending-sends store is full (${MAX_RECORDS}) — approve/deny or wait for expiry`);
   }
   const pending_id = generatePendingId();
+  const target = rec.target === undefined ? undefined : parseApprovalTarget(rec.target, "`target`");
   records.push({
     pending_id,
     fingerprint: rec.fingerprint,
@@ -180,6 +270,7 @@ export async function createPending(
     recipients: rec.recipients,
     body: rec.body,
     operator: rec.operator,
+    ...(target !== undefined ? { target } : {}),
     created_at: new Date(now).toISOString(),
     expires_at: new Date(now + ttlMs).toISOString(),
     status: "pending",

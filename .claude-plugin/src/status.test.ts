@@ -87,7 +87,19 @@ async function setup(opts: {
 const STUB_PROBE = async (_cmd: string): Promise<string | null> => "1.0.0-test";
 const ALL_MISSING_PROBE = async (_cmd: string): Promise<string | null> => null;
 
+// Removed-feature variables a developer's shell may still export: cleared per test so
+// doctor's retired_settings row reflects only what a test sets.
+const RETIRED_VARS = [
+  "SAFESPACE_WEBHOOK_PORT", "SAFESPACE_WEBHOOK_BIND", "SAFESPACE_WEBHOOK_LISTEN_WITHOUT_AGENT",
+  "SAFESPACE_TRANSPORT", "SAFESPACE_HTTP_PORT", "SAFESPACE_HTTP_BIND", "SAFESPACE_AUTH",
+  "SAFESPACE_AGENT_TOKENS_FILE", "SAFESPACE_OPERATORS_FILE", "SAFESPACE_TAILSCALE_SOCKET",
+  "SAFESPACE_TLS_TERMINATED",
+] as const;
+let prevRetired: Record<string, string | undefined> = {};
+
 beforeEach(async () => {
+  prevRetired = Object.fromEntries(RETIRED_VARS.map((k) => [k, process.env[k]]));
+  for (const k of RETIRED_VARS) delete process.env[k];
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "safespace-status-"));
   await fs.chmod(tmpDir, 0o700);
   prevConfigDir = process.env.SAFESPACE_CONFIG_DIR;
@@ -97,6 +109,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const k of RETIRED_VARS) {
+    if (prevRetired[k] === undefined) delete process.env[k];
+    else process.env[k] = prevRetired[k];
+  }
   if (prevConfigDir === undefined) delete process.env.SAFESPACE_CONFIG_DIR;
   else process.env.SAFESPACE_CONFIG_DIR = prevConfigDir;
   if (prevTier === undefined) delete process.env.SAFESPACE_TIER;
@@ -225,6 +241,29 @@ describe("runDoctor — shallow happy path", () => {
     expect(report.status).toBe("ok");
     const failures = report.checks.filter((c) => c.status === "fail");
     expect(failures).toEqual([]);
+  });
+});
+
+describe("runDoctor — retired settings", () => {
+  test("a removed-feature setting fails the check, naming the variable only", async () => {
+    await setup({
+      accounts: { version: 2, accounts: [ENTRY_ALICE] },
+      env: "GOOGLE_CLIENT_ID=test\nGOOGLE_CLIENT_SECRET=synthetic\n",
+      envMode: 0o600,
+      salt: crypto.randomBytes(32),
+      active: "alice@example.com\n",
+    });
+    process.env.SAFESPACE_TIER = "read";
+    process.env.SAFESPACE_TRANSPORT = "stdio"; // the still-valid value: must not count
+    const okReport = await runDoctor({ versionProbe: STUB_PROBE }, captureIO().io);
+    expect(okReport.checks.find((c) => c.name === "retired_settings")!.status).toBe("pass");
+
+    process.env.SAFESPACE_AGENT_TOKENS_FILE = "/srv/secret-path/tokens.json";
+    const report = await runDoctor({ versionProbe: STUB_PROBE }, captureIO().io);
+    const row = report.checks.find((c) => c.name === "retired_settings")!;
+    expect(row.status).toBe("fail");
+    expect(row.value).toContain("SAFESPACE_AGENT_TOKENS_FILE");
+    expect(row.value).not.toContain("secret-path");
   });
 });
 
@@ -756,18 +795,16 @@ describe("runDoctor — v1.18 env-var surfacing", () => {
   });
 });
 
-// ----- runPosture (v1.86 enforced-mode hardening posture) -----
+// ----- runPosture (hardening posture) -----
 
 describe("runPosture", () => {
   const POSTURE_VARS = [
-    "SAFESPACE_ENFORCED",
     "SAFESPACE_AUTONOMOUS",
     "SAFESPACE_SECRET_BACKEND",
     "SAFESPACE_SECRET_PASSPHRASE",
-    "SAFESPACE_TRANSPORT",
-    "SAFESPACE_HTTP_BIND",
     "SAFESPACE_REQUIRE_SEND_APPROVAL",
     "SAFESPACE_CONFIG_DIR",
+    "SAFESPACE_CONNECTORS",
   ];
   afterEach(() => {
     for (const v of POSTURE_VARS) delete process.env[v];
@@ -776,45 +813,65 @@ describe("runPosture", () => {
     resetEgressCaches();
   });
 
-  // The all-pass deployment: enforced + autonomous + keychain + stdio.
+  // Every hardening setting on: autonomous + keychain + send-approval.
   function hardened(): void {
-    process.env.SAFESPACE_ENFORCED = "true";
     process.env.SAFESPACE_AUTONOMOUS = "true";
     process.env.SAFESPACE_SECRET_BACKEND = "keychain";
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
   }
   const checkOf = (report: { checks: { name: string; status: string; value?: string }[] }, name: string) =>
     report.checks.find((c) => c.name === name)!;
 
-  test("enforced on + fully hardened → summary ok, all gates pass", async () => {
+  test("fully hardened → summary ok, each setting reported on", async () => {
     hardened();
     const cap = captureIO();
     const report = await runPosture({}, cap.io);
     expect(report.status).toBe("ok");
-    expect(checkOf(report, "enforced_mode").status).toBe("pass");
-    expect(checkOf(report, "autonomous_mode").status).toBe("pass");
-    expect(checkOf(report, "token_at_rest").status).toBe("pass");
-    expect(checkOf(report, "http_bind").status).toBe("pass"); // n/a (stdio) → pass
+    expect(checkOf(report, "autonomous_mode")).toMatchObject({ status: "pass" });
+    expect(checkOf(report, "autonomous_mode").value).toStartWith("on");
+    expect(checkOf(report, "token_at_rest").value).toContain("keychain");
+    expect(checkOf(report, "send_approval").value).toStartWith("on");
+    expect(report.checks.some((c) => c.name === "enforced_mode")).toBe(false);
   });
 
-  test("enforced OFF (gates would pass) → enforced_mode warn, summary warn", async () => {
-    process.env.SAFESPACE_AUTONOMOUS = "true";
+  test("each setting off is a FAIL that names its fix (the scriptable hardening check)", async () => {
     process.env.SAFESPACE_SECRET_BACKEND = "keychain";
-    // SAFESPACE_ENFORCED unset.
     const cap = captureIO();
     const report = await runPosture({}, cap.io);
-    expect(checkOf(report, "enforced_mode").status).toBe("warn");
-    expect(checkOf(report, "enforced_mode").value).toContain("off");
-    expect(report.status).toBe("warn");
+    expect(checkOf(report, "autonomous_mode")).toMatchObject({ status: "fail" });
+    expect(checkOf(report, "autonomous_mode").value).toContain("SAFESPACE_AUTONOMOUS=true");
+    expect(checkOf(report, "send_approval")).toMatchObject({ status: "fail" });
+    expect(checkOf(report, "send_approval").value).toContain("SAFESPACE_REQUIRE_SEND_APPROVAL=true");
+    expect(report.status).toBe("fail");
   });
 
-  test("enforced on + a failing gate → summary fail", async () => {
-    process.env.SAFESPACE_ENFORCED = "true";
-    process.env.SAFESPACE_AUTONOMOUS = "true";
-    process.env.SAFESPACE_SECRET_BACKEND = "file"; // KEY-FILE mode → token_at_rest fail
+  test("send-approval off fails even when everything else is hardened", async () => {
+    hardened();
+    delete process.env.SAFESPACE_REQUIRE_SEND_APPROVAL;
     const cap = captureIO();
     const report = await runPosture({}, cap.io);
+    expect(checkOf(report, "send_approval").status).toBe("fail");
     expect(report.status).toBe("fail");
-    expect(checkOf(report, "token_at_rest").status).toBe("fail");
+  });
+
+  test("key-file token storage fails and names the fix", async () => {
+    process.env.SAFESPACE_AUTONOMOUS = "true";
+    process.env.SAFESPACE_SECRET_BACKEND = "file"; // no passphrase → KEY-FILE mode
+    const cap = captureIO();
+    const report = await runPosture({}, cap.io);
+    const row = checkOf(report, "token_at_rest");
+    expect(row.status).toBe("fail");
+    expect(row.value).toContain("SAFESPACE_SECRET_PASSPHRASE");
+    expect(report.status).toBe("fail");
+  });
+
+  test("passphrase-mode FileBackend passes", async () => {
+    process.env.SAFESPACE_SECRET_BACKEND = "file";
+    process.env.SAFESPACE_SECRET_PASSPHRASE = "a-test-passphrase";
+    const cap = captureIO();
+    const report = await runPosture({}, cap.io);
+    expect(checkOf(report, "token_at_rest")).toMatchObject({ status: "pass" });
+    expect(checkOf(report, "token_at_rest").value).toContain("passphrase");
   });
 
   test("text output prints the external-layers NOTE (honest 'verify externally')", async () => {
@@ -835,16 +892,7 @@ describe("runPosture", () => {
     const parsed = JSON.parse(cap.out[0]!);
     expect(parsed.status).toBe("ok");
     expect(parsed.external_layers).toContain("SOLE-EGRESS.md");
-    expect(parsed.checks.some((c: { name: string }) => c.name === "enforced_mode")).toBe(true);
-  });
-
-  test("supervised mode OFF (default) → send_approval row present, 'off'", async () => {
-    // SAFESPACE_REQUIRE_SEND_APPROVAL unset → the gate is the default no-op.
-    const cap = captureIO();
-    const report = await runPosture({}, cap.io);
-    const row = checkOf(report, "send_approval");
-    expect(row.status).toBe("pass");
-    expect(row.value).toContain("off");
+    expect(parsed.checks.some((c: { name: string }) => c.name === "autonomous_mode")).toBe(true);
   });
 
   test("supervised mode ON → send_approval row 'on' with the pending count, NEVER the body/recipient", async () => {
@@ -882,12 +930,40 @@ describe("runPosture", () => {
     expect(row.value).toContain("unavailable");
     await fs.rm(tmp, { recursive: true, force: true });
   });
+
+  test("google_consent_requested: CONNECTORS unset → pass, says requested, not a stored grant", async () => {
+    hardened();
+    const cap = captureIO();
+    const report = await runPosture({}, cap.io);
+    const row = checkOf(report, "google_consent_requested");
+    expect(row.status).toBe("pass");
+    expect(row.value).toMatch(/^requested \d+ https scopes/);
+    expect(row.value).toContain("CONNECTORS unset");
+    expect(row.value).not.toContain("google_token");
+    expect(row.value).not.toContain("ya29.");
+    expect(row.value).not.toContain("@");
+    expect(report.status).toBe("ok");
+  });
+
+  test("google_consent_requested: CONNECTORS=gmail → warn that CONNECTORS does not shrink the request", async () => {
+    hardened();
+    process.env.SAFESPACE_CONNECTORS = "gmail";
+    const cap = captureIO();
+    const report = await runPosture({}, cap.io);
+    const row = checkOf(report, "google_consent_requested");
+    expect(row.status).toBe("warn");
+    expect(row.value).toContain("requested");
+    expect(row.value).toContain("CONNECTORS does not shrink this");
+    expect(row.value).not.toContain("ya29.");
+    expect(report.status).toBe("warn");
+  });
+
 });
 
 // ----- runPosture egress section (v1.87) — uses web-fetch (UNCACHED, reads env
 // per call) so these assertions need no allowlist-singleton reset. -----
 describe("runPosture — egress enumeration", () => {
-  const VARS = ["SAFESPACE_ENFORCED", "SAFESPACE_AUTONOMOUS", "SAFESPACE_SECRET_BACKEND", "SAFESPACE_WEBFETCH_ALLOW"];
+  const VARS = ["SAFESPACE_AUTONOMOUS", "SAFESPACE_SECRET_BACKEND", "SAFESPACE_WEBFETCH_ALLOW"];
   // beforeEach too — clear any AUTONOMOUS/WEBFETCH leaked from a prior test/file so
   // the off→allow web-fetch row is deterministically OPEN when we expect it; reset
   // the cached allowlist singletons so this section neither reads nor leaks a stale
@@ -931,9 +1007,9 @@ describe("runPosture — egress enumeration", () => {
     const wf = report.checks.find((c) => c.name === "egress:web-fetch")!;
     expect(wf.status).toBe("warn");
     expect(wf.value).toContain("OPEN");
-    // Summary is FAIL here — interactive mode also fails the autonomous_mode GATE
-    // (an egress can only be OPEN when autonomous is off, which is itself a gate
-    // failure). The egress rows add per-connector DETAIL, not a new top-line verdict.
+    // Summary is FAIL here — interactive mode also fails the autonomous_mode row (an
+    // egress can only be OPEN when autonomous is off). The egress rows add
+    // per-connector DETAIL, not a new top-line verdict.
     expect(report.status).toBe("fail");
   });
 

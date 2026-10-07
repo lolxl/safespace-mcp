@@ -16,7 +16,7 @@
 // authModel is read ONCE at the proxy router to pick this choke point; the strategy
 // objects do the rest.
 //
-// What this SHARES with withToolContext (the universal envelope): operator + tier
+// What this SHARES with withToolContext (the universal envelope): tier
 // resolution, the F4 autonomous-delete + F1 write-burst gates, the per-source
 // `sanitize(..., source.skipFields)` wrap, and a real audit sink threaded onto one
 // `auditEnd` row. (Errors are mapped by each HANDLER, then re-thrown verbatim — the
@@ -32,8 +32,8 @@
 // service-token sends) carries an egress descriptor on its ToolDef
 // (tools/egress-pipeline.ts); THIS choke point fires extract (the tool's own arg
 // validation) → gate (the composite tools/egress.ts gate) BEFORE the handler runs,
-// so egress enforcement is pipeline-owned, not handler-remembered. The gmail path
-// (with-context.ts) keeps the B3 handler-called posture.
+// so egress enforcement is pipeline-owned, not handler-remembered. The OAuth writes
+// get the same treatment in with-context.ts.
 //
 // withToolContext is UNTOUCHED by this file — the Google path stays byte-identical.
 
@@ -55,10 +55,9 @@ export async function withNonOAuthContext(
   toolName: string,
   args: Record<string, unknown>,
   handler: ToolHandler,
-  // v1.74 PR-2a — the resolved northbound identity (operator id + tier) for this
+  // v1.74 PR-2a — the resolved context (tier) for this
   // call. Defaults to the env-backed context (Model A), resolved PER CALL; the
-  // proxy passes the per-call `op`. Mirrors withToolContext. (allowedAccounts is
-  // irrelevant here — non-OAuth sources have no per-operator account; §6.2.)
+  // proxy passes the per-call `op`. Mirrors withToolContext.
   op: OperatorContext = envOperatorContext(),
 ): Promise<unknown> {
   const start = Date.now();
@@ -80,13 +79,12 @@ export async function withNonOAuthContext(
   // has none; the service-token is read inside resolveCredential and held only on
   // the credential getter), so the hash input is structurally token-free.
   const argsHash = `sha256:${crypto.createHash("sha256").update(JSON.stringify(args)).digest("hex")}`;
-  // v1.74 PR-2a — operator + tier from the resolved `op` (Model A: env via the
-  // default EnvOperatorResolver; Model B PR-2b: the connection identity).
-  const operator = op.operatorId;
+  // v1.74 PR-2a — tier from the resolved `op` (env via the default
+  // EnvOperatorResolver).
   const tier = op.tier;
   // email is null: a non-OAuth call has no Google account. The audit row's `source`
   // field ("web-fetch" / "line") disambiguates it from a Google `account: null` row.
-  auditStart({ tool: toolName, email: null, argsHash, operator });
+  auditStart({ tool: toolName, email: null, argsHash });
 
   let status: "ok" | "error" = "error";
   let errorCode: number | undefined;
@@ -110,20 +108,17 @@ export async function withNonOAuthContext(
     // authorize is a no-op + resolveCredential never throws).
     source.authorize(toolDef, {});
     const cred = await source.resolveCredential(toolDef);
-    // v1.80 PR-3 — `op.allowedAccounts` rides onto the ctx (see with-context.ts);
-    // null under Model A / for unconfined operators → the self-send partition no-ops.
     const ctx: ToolContext = {
       credential: cred,
       tier,
       audit: auditAcc.sink,
-      allowedAccounts: op.allowedAccounts,
     };
     // Gate-by-construction: a non-OAuth WRITE inherits F4 + F1. Both are no-ops for
     // a read (classifyWriteTool "exempt"; not a permanent-delete); a LINE push
     // (min_tier "share", a write) is rate-capped by F1 here.
     enforceAutonomousDeleteDeny(toolName);
-    // v1.92 — per-operator burst window (Model A null → shared sentinel bucket).
-    enforceWriteBurst(classifyWriteTool(toolName, toolDef?.min_tier), op);
+    // One process-wide burst window (shared with the OAuth and `_all` paths).
+    enforceWriteBurst(classifyWriteTool(toolName, toolDef?.min_tier));
     // B6.1 wave A1 — PIPELINE-FIRED egress for tools carrying an egress descriptor
     // (the 5 service-token sends; tools/egress-pipeline.ts): extract (the tool's own
     // arg validation — throws its plain-Error messages) then the composite gate
@@ -181,7 +176,6 @@ export async function withNonOAuthContext(
       source: source.id,
       email: null,
       argsHash,
-      operator,
       status,
       durationMs: Date.now() - start,
       sanitize: "applied",

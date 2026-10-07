@@ -59,7 +59,7 @@ afterEach(async () => {
 
 function makeCtx(): { ctx: ToolContext; rec: ReturnType<typeof capturingAudit> } {
   const rec = capturingAudit();
-  const ctx: ToolContext = { allowedAccounts: null,
+  const ctx: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() {
       return currentTier();
@@ -232,22 +232,21 @@ describe("v1.64 B3 — tainted-source gate (F3b) fires from the seam", () => {
   });
 });
 
-// ----- v1.80 PR-3 — the selfEmails partition fires from the egress seam -----
+// ----- the selfEmails exemption fires from the egress seam -----
 
-describe("v1.80 PR-3 — ctx.allowedAccounts partitions the self-send exemption (gmail egress)", () => {
+describe("the self-send exemption fires from the egress seam (gmail egress)", () => {
   // A REAL accounts.json in a temp config dir gives the allowlist loader a
-  // two-account self set; the operator under test is confined to ONE of them.
+  // two-account self set.
   let tmpDir: string;
   let prevConfigDir: string | undefined;
 
-  function partitionedCtx(allowedAccounts: readonly string[] | null): ToolContext {
+  function selfCtx(): ToolContext {
     return {
       credential: oauthCred("mine@own.com", () => FAKE_TOKEN),
       get tier() {
         return currentTier();
       },
       audit: capturingAudit().sink,
-      allowedAccounts,
     };
   }
 
@@ -283,65 +282,12 @@ describe("v1.80 PR-3 — ctx.allowedAccounts partitions the self-send exemption 
     await resetAllowlist();
   });
 
-  test("Model A (allowedAccounts null): every consented account is self — both pass", async () => {
-    const ctx = partitionedCtx(null);
+  test("every consented account is self — both pass", async () => {
+    const ctx = selfCtx();
     await enforceEgressGates(ctx, {
       tool: "gmail_send",
       recipients: ["mine@own.com", "theirs@own.com"],
       body: "hi",
     });
-  });
-
-  test("confined operator: a self recipient OUTSIDE allowedAccounts → -32019 (same code, no oracle)", async () => {
-    const ctx = partitionedCtx(["mine@own.com"]);
-    try {
-      await enforceEgressGates(ctx, {
-        tool: "gmail_send",
-        recipients: ["theirs@own.com"],
-        body: "hi",
-      });
-      expect.unreachable("expected recipient_denied_by_policy");
-    } catch (e) {
-      expect(e).toBeInstanceOf(MCPError);
-      const err = e as MCPError;
-      expect(err.errorName).toBe("recipient_denied_by_policy");
-      expect(err.errorData["tool"]).toBe("gmail_send");
-      expect(err.errorData["rejected_count"]).toBe(1);
-      // The payload shape is byte-identical to a plain allowlist denial — a
-      // partition denial is indistinguishable (no oracle), and the recipient
-      // value is never echoed.
-      expect(JSON.stringify(err.errorData)).not.toContain("theirs@own.com");
-    }
-  });
-
-  test("confined operator: a self recipient INSIDE allowedAccounts still passes", async () => {
-    const ctx = partitionedCtx(["mine@own.com"]);
-    await enforceEgressGates(ctx, {
-      tool: "gmail_send",
-      recipients: ["mine@own.com"],
-      body: "hi",
-    });
-  });
-
-  test("an EXPLICIT allowlist entry is NOT narrowed by the partition", async () => {
-    process.env.SAFESPACE_RECIPIENT_ALLOW = "theirs@own.com";
-    await resetAllowlist();
-    const ctx = partitionedCtx(["mine@own.com"]);
-    await enforceEgressGates(ctx, {
-      tool: "gmail_send",
-      recipients: ["theirs@own.com"],
-      body: "hi",
-    });
-  });
-
-  test("gmail_create_draft rides the same seam — out-of-set self recipient denied", async () => {
-    const ctx = partitionedCtx(["mine@own.com"]);
-    expect(
-      enforceEgressGates(ctx, {
-        tool: "gmail_create_draft",
-        recipients: ["theirs@own.com"],
-        body: "hi",
-      }),
-    ).rejects.toThrow(MCPError);
   });
 });

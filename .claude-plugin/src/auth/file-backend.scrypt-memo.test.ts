@@ -42,25 +42,25 @@ describe("FileBackend — scrypt key memoization (perf hot-path)", () => {
     const be = new FileBackend();
 
     // First write mints the salt + derives the key once.
-    await be.setToken(null, "a@x.com", JSON.stringify({ at: 1 }));
+    await be.setToken("a@x.com", JSON.stringify({ at: 1 }));
     expect(__scryptInvocationsForTests()).toBe(1);
 
     // Subsequent reads + a second write all reuse the salt → memo hits.
-    await be.getToken(null, "a@x.com");
-    await be.getToken(null, "a@x.com");
-    await be.setToken(null, "b@x.com", JSON.stringify({ at: 2 }));
+    await be.getToken("a@x.com");
+    await be.getToken("a@x.com");
+    await be.setToken("b@x.com", JSON.stringify({ at: 2 }));
     expect(__scryptInvocationsForTests()).toBe(1);
 
     // Correctness preserved — values round-trip exactly.
-    expect(await be.getToken(null, "a@x.com")).toBe(JSON.stringify({ at: 1 }));
-    expect(await be.getToken(null, "b@x.com")).toBe(JSON.stringify({ at: 2 }));
+    expect(await be.getToken("a@x.com")).toBe(JSON.stringify({ at: 1 }));
+    expect(await be.getToken("b@x.com")).toBe(JSON.stringify({ at: 2 }));
     expect(__scryptInvocationsForTests()).toBe(1);
   });
 
   test("a passphrase change recomputes the key (memo does NOT serve the stale key)", async () => {
     process.env.SAFESPACE_SECRET_PASSPHRASE = "pass-one";
     const be = new FileBackend();
-    await be.setToken(null, "a@x.com", JSON.stringify({ at: 1 }));
+    await be.setToken("a@x.com", JSON.stringify({ at: 1 }));
     const afterWrite = __scryptInvocationsForTests();
     expect(afterWrite).toBe(1);
 
@@ -68,7 +68,7 @@ describe("FileBackend — scrypt key memoization (perf hot-path)", () => {
     // fail GCM auth → secret_store_corrupt). The point: the memo recomputed
     // rather than returning the pass-one key.
     process.env.SAFESPACE_SECRET_PASSPHRASE = "pass-two";
-    await expect(be.getToken(null, "a@x.com")).rejects.toThrow();
+    await expect(be.getToken("a@x.com")).rejects.toThrow();
     expect(__scryptInvocationsForTests()).toBe(afterWrite + 1);
   });
 });

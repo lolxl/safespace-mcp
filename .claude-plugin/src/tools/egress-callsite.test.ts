@@ -1,20 +1,21 @@
 // Egress call-site sentinel — the machine-checked "classified external-reaching
-// tool ⇒ its handler actually CALLS its gate" invariant.
+// tool ⇒ its gate is actually CALLED" invariant: by the descriptor for a
+// PIPELINE_EGRESS tool, by the handler for a HANDLER_GATED_EXTERNAL one.
 //
 // WHY THIS EXISTS: egress-coverage.test.ts pins every write/share tool into a
-// classification bucket (CENTRALIZED_EGRESS / HANDLER_GATED_EXTERNAL /
-// OWN_DATA_WRITE). That is necessary but not sufficient — a tool can sit in
-// CENTRALIZED_EGRESS with direction:"outbound-write" while its handler never
-// invokes enforce*EgressGates (the R7 trap one level deeper: "looks gated in
-// the registry, ships with zero call-site protection").
+// classification bucket (PIPELINE_EGRESS / HANDLER_GATED_EXTERNAL /
+// OWN_DATA_WRITE). That is necessary but not sufficient — a tool can sit in a
+// gated bucket while its gate is never called (the R7 trap one level deeper:
+// "looks gated in the registry, ships with zero call-site protection").
 //
 // This sentinel closes that gap with a static call-site check: for every
-// centrally-classified (and handler-gated-external) tool, the handler source
-// must contain a call-shaped match of its gate function name(s). Import-only
-// references do not count. Dependency-free (node:fs / node:path); no AST.
+// HANDLER_GATED_EXTERNAL tool, the handler source must contain a call-shaped
+// match of its gate function name(s). Import-only references do not count.
+// Dependency-free (node:fs / node:path); no AST.
 //
 // B6.1 wave A1 — PIPELINE_EGRESS tools invert the rule: their gate is fired by
-// the non-OAuth choke point via the registry def's egress descriptor, so the
+// the tool's choke point (withNonOAuthContext for the service-token sends,
+// withToolContext for the OAuth writes) via the registry def's egress descriptor, so the
 // DESCRIPTOR module (tools/egress-pipeline.ts) must contain the call-shaped gate
 // match, the HANDLER must NOT (anti-double-fire), and the def must carry the
 // descriptor (asserted via TOOL_REGISTRY). See the pipeline describe block below.
@@ -25,30 +26,19 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  CENTRALIZED_EGRESS,
-  HANDLER_GATED_EXTERNAL,
-  PIPELINE_EGRESS,
-} from "./egress-coverage.sets";
+import { HANDLER_GATED_EXTERNAL, PIPELINE_EGRESS } from "./egress-coverage.sets";
 import { TOOL_REGISTRY } from "./registry";
 
-/** Handler path is relative to `.claude-plugin/src/`. gates = exact centralized
- *  (or bespoke) gate function name(s) the handler must call (call-shaped, not
- *  merely imported). Derived by reading each handler's live call sites. */
+/** Handler path is relative to `.claude-plugin/src/`. gates = exact bespoke gate
+ *  function name(s) the handler must call (call-shaped, not merely imported).
+ *  Derived by reading each handler's live call sites. The handler-called
+ *  `tools/egress.ts` gates all moved to PIPELINE_TABLE below (B6.1 wave A). */
 const GATE_TABLE: Record<string, { handlerFile: string; gates: string[] }> = {
-  // ── CENTRALIZED_EGRESS (tools/egress.ts) ──────────────────────────────
-  // B6.1 wave A3+D — gmail_send / gmail_create_draft MOVED to PIPELINE_TABLE below.
-  // B6.1 wave A (github + notion sweep) — the 7 github writes + 3 notion writes ALSO
-  // MOVED to PIPELINE_TABLE (their handler-called enforceGithub*/enforceNotionWriteEgressGates
-  // became CHECK-ONLY gates fired by withToolContext via each tool's egress descriptor).
-  // CENTRALIZED_EGRESS is now EMPTY, so this table's only remaining entry is the bespoke
-  // HANDLER_GATED_EXTERNAL drive_share_file below.
-
   // ── HANDLER_GATED_EXTERNAL (bespoke in-handler gates) ─────────────────
   // drive_share_file: whitelist ancestor walk + (share_type=user) recipient allowlist
   drive_share_file: {
     handlerFile: "tools/handlers/drive.ts",
-    gates: ["checkShareAllowed", "isRecipientAllowed"],
+    gates: ["checkShareAllowed", "isRecipientAllowed", "requireSendApproval"],
   },
   // B6.1 wave A2b — the 3 YouTube public-surface writes MIGRATED to PIPELINE_TABLE
   // below (their gate blocks became composite wrappers fired by the choke point).
@@ -56,7 +46,7 @@ const GATE_TABLE: Record<string, { handlerFile: string; gates: string[] }> = {
 
 /** B6.1 wave A1 (A2a adds x_post_create) — the PIPELINE_EGRESS tools: the gate is
  *  fired by the tool's choke point (withNonOAuthContext for the service-token
- *  sends; withToolContext for x_post_create) via the registry def's egress
+ *  sends; withToolContext for the OAuth writes) via the registry def's egress
  *  descriptor (tools/egress-pipeline.ts), NOT by the handler. `wrapper` = the
  *  centralized gate function the DESCRIPTOR must call (call-shaped in
  *  egress-pipeline.ts) and the HANDLER must NOT call (anti-double-fire — a double
@@ -218,14 +208,8 @@ describe("pipeline egress call-site sentinel (B6.1 wave A1) — descriptor-fired
 });
 
 describe("egress call-site sentinel — every classified external tool calls its gate", () => {
-  test("every CENTRALIZED_EGRESS tool has a GATE_TABLE entry", () => {
-    const missing = [...CENTRALIZED_EGRESS].filter((t) => !(t in GATE_TABLE));
-    expect(missing).toEqual([]);
-  });
-
-  test("every GATE_TABLE key is in CENTRALIZED_EGRESS ∪ HANDLER_GATED_EXTERNAL", () => {
-    const allowed = new Set([...CENTRALIZED_EGRESS, ...HANDLER_GATED_EXTERNAL]);
-    const extras = Object.keys(GATE_TABLE).filter((t) => !allowed.has(t));
+  test("every GATE_TABLE key is in HANDLER_GATED_EXTERNAL", () => {
+    const extras = Object.keys(GATE_TABLE).filter((t) => !HANDLER_GATED_EXTERNAL.has(t));
     expect(extras).toEqual([]);
   });
 

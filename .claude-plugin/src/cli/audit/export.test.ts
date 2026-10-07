@@ -111,6 +111,23 @@ describe("runAuditExport — cef", () => {
     expect(line).toContain("safespaceRunId=abc123");
   });
 
+  test("dispatch refusal rows export refusal_reason + tool_name_hmac", async () => {
+    await writeRaw([
+      {
+        ts: "2026-06-14T01:00:00.000Z",
+        tool: "<unknown>",
+        status: "error",
+        error_code: -32001,
+        refusal_reason: "unknown",
+        tool_name_hmac: "a".repeat(64),
+      },
+    ]);
+    const cap = captureIO();
+    await runAuditExport(["--format", "cef"], cap.io);
+    expect(cap.out[0]!).toContain("safespaceRefusalReason=unknown");
+    expect(cap.out[0]!).toContain(`safespaceToolNameHmac=${"a".repeat(64)}`);
+  });
+
   test("severity: policy denial → 8, error → 6, normal → 3", async () => {
     await writeRaw([
       { event: "share_denied_by_policy", file_id: "f1" },

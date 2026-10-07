@@ -29,7 +29,7 @@ let capturedAll: PlaylistMutationAuditMeta[] = [];
 let captured: PlaylistMutationAuditMeta | undefined;
 
 function makeCtx(tier: "read" | "write" | "share"): ToolContext {
-  return { allowedAccounts: null,
+  return {
     credential: oauthCred("alice@example.com", () => "fake-token"),
     tier,
     audit: recorderSink({

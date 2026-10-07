@@ -3,10 +3,8 @@
 // independence, sliding-window expiry, before-permit semantics (no retry-storm
 // bypass), per-call env resolution, and the bad-value lenient fallback.
 //
-// v1.92 — the gate is now PER-OPERATOR. The Model-A path (op omitted / operatorId
-// null → the shared sentinel bucket) must stay byte-identical, so the original
-// tests pass `undefined` for `op`; a new block covers per-operator isolation +
-// the registry cap override.
+// The gate is ONE process-wide window (the per-operator buckets and the
+// per-operator limit overrides went away with Model B).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
@@ -61,7 +59,7 @@ describe("write-burst F1 — classifier", () => {
   });
 });
 
-describe("write-burst F1 — enforcement (Model A, byte-identical)", () => {
+describe("write-burst F1 — enforcement (one process-wide window)", () => {
   beforeEach(() => {
     clearEnv();
     __resetWriteBurstForTests();
@@ -72,18 +70,18 @@ describe("write-burst F1 — enforcement (Model A, byte-identical)", () => {
   });
 
   test("exempt is a no-op even when called many times", () => {
-    for (let i = 0; i < 1000; i++) enforceWriteBurst("exempt", undefined, 1000);
-    expect(getWriteBurstCounts(undefined, 1000)).toEqual({ write: 0, delete: 0 });
+    for (let i = 0; i < 1000; i++) enforceWriteBurst("exempt", 1000);
+    expect(getWriteBurstCounts(1000)).toEqual({ write: 0, delete: 0 });
   });
 
   test("write bucket: at limit → -32032 reason=write", () => {
     process.env[WRITE_ENV] = "3";
-    enforceWriteBurst("write", undefined, 1000);
-    enforceWriteBurst("write", undefined, 1000);
-    enforceWriteBurst("write", undefined, 1000);
+    enforceWriteBurst("write", 1000);
+    enforceWriteBurst("write", 1000);
+    enforceWriteBurst("write", 1000);
     let thrown: unknown;
     try {
-      enforceWriteBurst("write", undefined, 1000);
+      enforceWriteBurst("write", 1000);
     } catch (e) {
       thrown = e;
     }
@@ -95,11 +93,11 @@ describe("write-burst F1 — enforcement (Model A, byte-identical)", () => {
   test("delete bucket: tighter, throws reason=delete", () => {
     process.env[DELETE_ENV] = "2";
     process.env[WRITE_ENV] = "100";
-    enforceWriteBurst("delete", undefined, 1000);
-    enforceWriteBurst("delete", undefined, 1000);
+    enforceWriteBurst("delete", 1000);
+    enforceWriteBurst("delete", 1000);
     let thrown: unknown;
     try {
-      enforceWriteBurst("delete", undefined, 1000);
+      enforceWriteBurst("delete", 1000);
     } catch (e) {
       thrown = e;
     }
@@ -110,115 +108,41 @@ describe("write-burst F1 — enforcement (Model A, byte-identical)", () => {
   test("buckets are independent: a full write bucket does not block deletes", () => {
     process.env[WRITE_ENV] = "1";
     process.env[DELETE_ENV] = "5";
-    enforceWriteBurst("write", undefined, 1000);
-    expect(() => enforceWriteBurst("write", undefined, 1000)).toThrow(MCPError);
-    expect(() => enforceWriteBurst("delete", undefined, 1000)).not.toThrow();
+    enforceWriteBurst("write", 1000);
+    expect(() => enforceWriteBurst("write", 1000)).toThrow(MCPError);
+    expect(() => enforceWriteBurst("delete", 1000)).not.toThrow();
   });
 
   test("sliding window: budget frees after WINDOW_MS", () => {
     process.env[DELETE_ENV] = "2";
-    enforceWriteBurst("delete", undefined, 1000);
-    enforceWriteBurst("delete", undefined, 1000);
-    expect(() => enforceWriteBurst("delete", undefined, 1000)).toThrow(MCPError);
+    enforceWriteBurst("delete", 1000);
+    enforceWriteBurst("delete", 1000);
+    expect(() => enforceWriteBurst("delete", 1000)).toThrow(MCPError);
     const later = 1000 + __internal.WINDOW_MS + 1;
-    expect(() => enforceWriteBurst("delete", undefined, later)).not.toThrow();
+    expect(() => enforceWriteBurst("delete", later)).not.toThrow();
   });
 
   test("throttled calls do not consume budget (no retry-storm bypass)", () => {
     process.env[WRITE_ENV] = "2";
-    enforceWriteBurst("write", undefined, 1000);
-    enforceWriteBurst("write", undefined, 1000);
-    expect(() => enforceWriteBurst("write", undefined, 1000)).toThrow(MCPError);
-    expect(getWriteBurstCounts(undefined, 1000).write).toBe(2);
+    enforceWriteBurst("write", 1000);
+    enforceWriteBurst("write", 1000);
+    expect(() => enforceWriteBurst("write", 1000)).toThrow(MCPError);
+    expect(getWriteBurstCounts(1000).write).toBe(2);
   });
 
   test("env override mid-session applies on the next call (uncached)", () => {
     process.env[WRITE_ENV] = "1";
-    enforceWriteBurst("write", undefined, 1000);
-    expect(() => enforceWriteBurst("write", undefined, 1000)).toThrow(MCPError);
+    enforceWriteBurst("write", 1000);
+    expect(() => enforceWriteBurst("write", 1000)).toThrow(MCPError);
     process.env[WRITE_ENV] = "5";
-    expect(() => enforceWriteBurst("write", undefined, 1000)).not.toThrow();
+    expect(() => enforceWriteBurst("write", 1000)).not.toThrow();
   });
 
   test("bad env value ('0') falls back to lenient default, not 0=disable", () => {
     process.env[WRITE_ENV] = "0";
     for (let i = 0; i < __internal.WRITE_BURST_DEFAULT; i++) {
-      enforceWriteBurst("write", undefined, 1000);
+      enforceWriteBurst("write", 1000);
     }
-    expect(() => enforceWriteBurst("write", undefined, 1000)).toThrow(MCPError);
-  });
-
-  test("an explicit null-operator scope shares the Model-A sentinel bucket", () => {
-    process.env[WRITE_ENV] = "1";
-    // The default (undefined op) and an explicit {operatorId:null} are the SAME bucket.
-    enforceWriteBurst("write", { operatorId: null }, 1000);
-    expect(() => enforceWriteBurst("write", undefined, 1000)).toThrow(MCPError);
-  });
-});
-
-describe("write-burst F1 — per-operator isolation (v1.92)", () => {
-  const alice = { operatorId: "alice" };
-  const bob = { operatorId: "bob" };
-  beforeEach(() => {
-    clearEnv();
-    __resetWriteBurstForTests();
-  });
-  afterEach(() => {
-    clearEnv();
-    __resetWriteBurstForTests();
-  });
-
-  test("one operator's full bucket does NOT throttle another operator", () => {
-    process.env[WRITE_ENV] = "1";
-    enforceWriteBurst("write", alice, 1000);
-    expect(() => enforceWriteBurst("write", alice, 1000)).toThrow(MCPError);
-    // bob is untouched — separate bucket.
-    expect(() => enforceWriteBurst("write", bob, 1000)).not.toThrow();
-  });
-
-  test("delete buckets are also per-operator", () => {
-    process.env[DELETE_ENV] = "1";
-    enforceWriteBurst("delete", alice, 1000);
-    expect(() => enforceWriteBurst("delete", alice, 1000)).toThrow(MCPError);
-    expect(() => enforceWriteBurst("delete", bob, 1000)).not.toThrow();
-  });
-
-  test("a Model-A (null) operator is a distinct bucket from a named operator", () => {
-    process.env[WRITE_ENV] = "1";
-    enforceWriteBurst("write", { operatorId: null }, 1000);
-    expect(() => enforceWriteBurst("write", { operatorId: null }, 1000)).toThrow(MCPError);
-    // a named operator is NOT blocked by the Model-A bucket being full.
-    expect(() => enforceWriteBurst("write", alice, 1000)).not.toThrow();
-  });
-
-  test("getWriteBurstCounts is per-operator", () => {
-    process.env[WRITE_ENV] = "100";
-    enforceWriteBurst("write", alice, 1000);
-    enforceWriteBurst("write", alice, 1000);
-    enforceWriteBurst("write", bob, 1000);
-    expect(getWriteBurstCounts(alice, 1000)).toEqual({ write: 2, delete: 0 });
-    expect(getWriteBurstCounts(bob, 1000)).toEqual({ write: 1, delete: 0 });
-    expect(getWriteBurstCounts({ operatorId: null }, 1000)).toEqual({ write: 0, delete: 0 });
-  });
-
-  test("per-operator registry override beats the global env default", () => {
-    process.env[WRITE_ENV] = "1"; // global default = 1
-    const aliceHi = { operatorId: "alice", writeBurstLimit: 3 };
-    // alice's override (3) lets her do 3 before throwing...
-    enforceWriteBurst("write", aliceHi, 1000);
-    enforceWriteBurst("write", aliceHi, 1000);
-    enforceWriteBurst("write", aliceHi, 1000);
-    expect(() => enforceWriteBurst("write", aliceHi, 1000)).toThrow(MCPError);
-    // ...while bob (no override) is capped at the global default of 1.
-    enforceWriteBurst("write", bob, 1000);
-    expect(() => enforceWriteBurst("write", bob, 1000)).toThrow(MCPError);
-  });
-
-  test("a per-operator delete override is honored independently of write", () => {
-    process.env[DELETE_ENV] = "1";
-    const aliceHi = { operatorId: "alice", deleteBurstLimit: 2 };
-    enforceWriteBurst("delete", aliceHi, 1000);
-    enforceWriteBurst("delete", aliceHi, 1000);
-    expect(() => enforceWriteBurst("delete", aliceHi, 1000)).toThrow(MCPError);
+    expect(() => enforceWriteBurst("write", 1000)).toThrow(MCPError);
   });
 });

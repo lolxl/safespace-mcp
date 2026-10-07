@@ -20,7 +20,7 @@ const VALID_PREVIOUS_ID = "task_prev_789";
 let captured: TasksMutationAuditMeta | undefined;
 
 function makeCtx(tier: "read" | "write" | "share"): ToolContext {
-  return { allowedAccounts: null,
+  return {
     credential: oauthCred("alice@example.com", () => "fake-token"),
     tier,
     audit: recorderSink({

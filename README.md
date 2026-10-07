@@ -5,15 +5,15 @@
 The problem it solves: the moment you connect an LLM agent to your real email, files, the open web, or a messaging channel, a prompt-injection payload hidden in that data can try to make the agent exfiltrate secrets, send mail, or delete things. SafeSpace sits between the agent and the outside world as a hardened envelope that enforces **least privilege**, **untrusted-content tagging**, **egress control**, and **full auditability** — regardless of which source is behind it. **The envelope is the product; sources are connectors behind it.**
 
 ```
-AI agent ──stdio MCP (Model A, local)──────▶  SafeSpace envelope  ──▶  Google Workspace      (OAuth · flagship · 84)
-         ──HTTP MCP over a tailnet─────────▶       │                   GitHub · Notion       (OAuth · 14 + 5)
-           (Model B · multi-operator)              │                   web-fetch · fs-read   (keyless · SSRF/path-gated)
+AI agent ──stdio MCP (local)───────────────▶  SafeSpace envelope  ──▶  Google Workspace      (OAuth · flagship · 84)
+                                                   │                   GitHub · Notion       (OAuth · 14 + 5)
+                                                   │                   web-fetch · fs-read   (keyless · SSRF/path-gated)
    sanitize · tier · scope · operator              │                   LINE · Telegram · Discord  (service-token push)
    egress gates · burst · autonomy                 │
    hardening · audit ──────────────────────────────┘
 ```
 
-**Status:** v1.80.0 — **108 tools** across **8 connectors**: **Google Workspace** (Gmail · Drive · Docs · Calendar · Contacts · YouTube + Analytics · Tasks · Sheets · Slides · Forms — the flagship reference connector, 84 tools), **GitHub** (14), **Notion** (5, multi-workspace), **web-fetch** + **fs-read** (keyless), and **LINE · Telegram · Discord** push (service-token). Three connector classes — **OAuth-account · service-token · keyless** — and two deployment models: **Model A** (local, stdio) and **Model B** (a shared multi-operator server on a private tailnet). Apache-2.0 licensed.
+**Status:** v1.80.0 — **108 tools** across **8 connectors**: **Google Workspace** (Gmail · Drive · Docs · Calendar · Contacts · YouTube + Analytics · Tasks · Sheets · Slides · Forms — the flagship reference connector, 84 tools), **GitHub** (14), **Notion** (5, multi-workspace), **web-fetch** + **fs-read** (keyless), and **LINE · Telegram · Discord** push (service-token). Three connector classes — **OAuth-account · service-token · keyless**. Runs locally over stdio. Apache-2.0 licensed.
 
 | Connector | Class | Tools | Auth |
 |-----------|-------|------:|------|
@@ -35,7 +35,7 @@ AI agent ──stdio MCP (Model A, local)──────▶  SafeSpace envelo
 
 Four layers protect you regardless of what the agent (or a malicious document) tries to do:
 
-1. **Tier-based tool exposure.** A single env var `SAFESPACE_TIER=read|write|share` decides which tools the proxy even advertises. `read` (the default) exposes search/read tools only; `write` adds sending, labelling, file creation, RSVP, GitHub issue writes; `share` additionally allows anyone-with-link Drive sharing and the messaging push connectors (LINE / Telegram / Discord). The proxy filters at the MCP `tools/list` boundary, so disallowed tools are **invisible** to the agent — there is no per-call escalation by design. Under Model B the tier is **per operator**.
+1. **Tier-based tool exposure.** A single env var `SAFESPACE_TIER=read|write|share` decides which tools the proxy even advertises. `read` (the default) exposes search/read tools only; `write` adds sending, labelling, file creation, RSVP, GitHub issue writes; `share` additionally allows anyone-with-link Drive sharing and the messaging push connectors (LINE / Telegram / Discord). The proxy filters at the MCP `tools/list` boundary, so disallowed tools are **invisible** to the agent — there is no per-call escalation by design.
 
 2. **Tokens never sit in plain text.** Credentials live behind a pluggable `SecretBackend` seam — the **macOS Keychain** by default, or an **encrypted file** (AES‑256‑GCM with an scrypt-derived key from `SAFESPACE_SECRET_PASSPHRASE`) for Linux / headless / portable setups. The same seam holds OAuth tokens (Google · GitHub · Notion) and service tokens (LINE · Telegram · Discord) alike. `accounts.json` is mode `0o600` and holds only metadata — **never tokens**. No telemetry, no cloud.
 
@@ -116,9 +116,7 @@ No Python required — SafeSpace calls the `googleapis` SDK directly. `web_fetch
 
 ## Deployment models
 
-**Model A — local (default).** One human operator, one local process, MCP over stdio. Nothing listens on any port. This is the plugin install below.
-
-**Model B — shared multi-operator server.** One deployment serves several trusted people (e.g. co-managing a YouTube channel). Set `SAFESPACE_TRANSPORT=http`, bind a **Tailscale** interface (never `0.0.0.0`), and list operators in `operators.json`. Connection identity is the **verified tailnet login**, read from the local `tailscaled` WhoIs API — a peer-IP fact of the WireGuard tunnel, not a forgeable client header; unlisted or unidentified peers get a generic 403. Each operator gets a per-operator **tier** and **`allowedAccounts`** confinement (operator A can never resolve, fan out to, or self-send to operator B's accounts), every audit row carries the operator, and the registry **hot-reloads** — removing an operator revokes their live session on their next call, no restart. Docker runbook: [`docs/DEPLOY.md`](docs/DEPLOY.md); design rationale: [`docs/model-b-deployment.md`](docs/model-b-deployment.md).
+**Local — stdio only.** One human operator, one local process, MCP over stdio. Nothing listens on any port. This is the plugin install below.
 
 ---
 
@@ -260,7 +258,7 @@ safespace audit sessions [--json]
 
 ### `safespace exec` — call tools from any non-Claude client
 
-Runs a tool through the **same** auth / sanitize / audit / tier middleware Claude uses, emitting one JSON line on stdout. Useful for cron jobs and scripts.
+Runs a tool through the same choke points the MCP server uses (auth / sanitize / egress gates / audit), emitting one JSON line on stdout. Useful for cron jobs and scripts. Unlike the server it skips the per-tool `min_tier` gate (handlers' own tier re-checks still read `SAFESPACE_TIER`), `SAFESPACE_CONNECTORS`, and the server's refuse-to-start checks; the F1 burst cap does not span separate `exec` runs. Do not run `exec` while a server is running on the same config dir: two processes appending to the audit hash chain is unsupported (see `docs/CARRY-FORWARD.md` item 14).
 
 ```bash
 safespace exec gmail_search \
@@ -290,9 +288,6 @@ The full catalog of environment variables (grouped by parsing idiom, with securi
 | `SAFESPACE_GITHUB_WRITE_TARGETS` / `_EXTRA` | **Default-deny** `owner/repo` allowlist for GitHub writes — unset = every GitHub write denied. |
 | `SAFESPACE_FS_READ_ROOTS` / `_EXTRA` | **Default-deny** root allowlist for `fs_read` — unset = reads nothing. |
 | `SAFESPACE_WEBFETCH_ALLOW` / `_EXTRA` | Optional host allowlist for `web_fetch` (autonomous + empty = deny-all). |
-| `SAFESPACE_TRANSPORT` / `SAFESPACE_HTTP_PORT` / `SAFESPACE_HTTP_BIND` | `http` switches on the Model B Streamable-HTTP transport (default `stdio`). Bind a tailnet interface — never `0.0.0.0`. |
-| `SAFESPACE_OPERATORS_FILE` / `SAFESPACE_TAILSCALE_SOCKET` | Model B operator registry (`login → operatorId / tier / allowedAccounts`, hot-reloaded) + the `tailscaled` LocalAPI socket for WhoIs identity. |
-| `SAFESPACE_OPERATOR_ID` | Model A operator handle stamped on every audit row (not a secret). Model B resolves the operator per connection instead. |
 | `SAFESPACE_*_BURST_LIMIT` | Write / delete / YouTube burst caps (sane defaults; see `.env.example`). |
 
 ### Per-session tier override
@@ -361,8 +356,6 @@ SafeSpace returns stable JSON-RPC `code` values for proxy-layer rejections — l
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture overview + full tool list
 - [`docs/DESIGN.md`](docs/DESIGN.md) — full design + addenda chain
 - [`docs/CLIENTS.md`](docs/CLIENTS.md) — running SafeSpace from any MCP client (Antigravity / Gemini, Codex, Cursor, Claude Desktop) via `npx`
-- [`docs/DEPLOY.md`](docs/DEPLOY.md) — Model B operator runbook (Docker / Tailscale / operators.json)
-- [`docs/model-b-deployment.md`](docs/model-b-deployment.md) — Model B design + rationale
 - [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — per-version history and per-cycle design-doc index
 - [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) — test inventory
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute · [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)

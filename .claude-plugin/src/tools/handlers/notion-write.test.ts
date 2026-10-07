@@ -27,7 +27,7 @@ function notionCred(token = "ntn_SECRET"): Credential {
   return { kind: "oauth", provider: "notion", accountId: WS, getAccessToken: () => token };
 }
 function ctx(token = "ntn_SECRET"): ToolContext {
-  return { allowedAccounts: null, credential: notionCred(token), tier: "write", audit: NOOP_AUDIT };
+  return { credential: notionCred(token), tier: "write", audit: NOOP_AUDIT };
 }
 
 /** A fetch stub returning `body` (JSON) with `status`; records url + init. */
@@ -184,7 +184,6 @@ describe("notion write — egress gate (model B: F3a secret-shape) + outbound RE
 describe("notion write — credential narrow (R8) + token-no-leak", () => {
   test("a non-Notion OAuth credential (google) is refused before any write", async () => {
     const googleCtx: ToolContext = {
-      allowedAccounts: null,
       credential: { kind: "oauth", provider: "google", accountId: "a@b.com", getAccessToken: () => "g" },
       tier: "write",
       audit: NOOP_AUDIT,

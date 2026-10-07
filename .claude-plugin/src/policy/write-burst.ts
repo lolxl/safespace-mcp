@@ -40,8 +40,7 @@ const WINDOW_MS = 60_000;
 // per-MINUTE rate, not the ~per-session counts the youtube bursts cap at 100.
 const WRITE_BURST_DEFAULT = 60;
 const DELETE_BURST_DEFAULT = 20;
-// Exported so the operator registry validates per-operator overrides against the
-// SAME bounds the env readers clamp to (v1.92 per-operator quotas).
+// The bounds the env readers clamp to.
 export const BURST_MIN = 1;
 export const BURST_MAX = 100_000;
 
@@ -94,110 +93,48 @@ export function classifyWriteTool(
   return "write";
 }
 
-// ── per-OPERATOR sliding-window state (v1.92) ──────────────────────────────
-// Was a pair of module-level arrays (per-PROCESS). Now a Map keyed by the calling
-// operator, so on a shared Model-B deployment one operator's burst can't exhaust
-// another's budget. Model A (single operator, operatorId null) maps to ONE shared
-// sentinel bucket → byte-identical to the pre-v1.92 process-wide pair.
-//
-// The sentinel key contains `<`/`>`, which are OUTSIDE isValidOperatorId's
-// `^[A-Za-z0-9_.-]{1,64}$` (operator-registry.ts), so it can NEVER collide with a
-// real registered operatorId.
-//
-// Reset on MCP server restart (= new session) — no durable state; restart IS the
-// recovery path. Map size is bounded by the registered-operator count
-// (operators.json is default-deny + small; the key is never attacker-derived), so
-// there is no unbounded growth and this cycle does no active eviction — a
-// churned-out operator's empty bucket simply persists until restart.
-const MODEL_A_BUCKET = "<model-a>";
-
-/** The per-call operator scope the burst gate keys on. STRUCTURAL (not an import
- *  of OperatorContext) so the policy module stays decoupled from identity —
- *  OperatorContext is assignable to it. The choke point passes its resolved
- *  context; Model A / direct callers pass the default (null operator → the shared
- *  sentinel bucket; no per-operator overrides → the global env defaults). */
-export interface BurstOperator {
-  readonly operatorId: string | null;
-  /** Per-operator write-bucket cap (registry override); null/undefined → the
-   *  global env default (`getWriteBurstLimit()`). Already validated to
-   *  [BURST_MIN, BURST_MAX] at registry parse. */
-  readonly writeBurstLimit?: number | null;
-  /** Per-operator delete-bucket cap; null/undefined → the global env default. */
-  readonly deleteBurstLimit?: number | null;
-}
-const MODEL_A_OP: BurstOperator = { operatorId: null };
-
-// bucketKey → the operator's two rolling-window timestamp arrays (ms of recent
-// PERMITTED calls).
-const buckets = new Map<string, { write: number[]; delete: number[] }>();
-
-function bucketFor(op: BurstOperator): { write: number[]; delete: number[] } {
-  // operatorId is null (Model A) or a non-empty validated id; `||` also folds a
-  // defensive empty string into the sentinel.
-  const key = op.operatorId || MODEL_A_BUCKET;
-  let b = buckets.get(key);
-  if (b === undefined) {
-    b = { write: [], delete: [] };
-    buckets.set(key, b);
-  }
-  return b;
-}
+// ── sliding-window state ────────────────────────────────────────────────────
+// One process-wide pair of windows (one operator per process). Reset on MCP server
+// restart — no durable state; restart IS the recovery path.
+let writes: number[] = [];
+let deletes: number[] = [];
 
 function pruned(arr: number[], now: number): number[] {
   const cutoff = now - WINDOW_MS;
   return arr.filter((t) => t > cutoff);
 }
 
-/** Enforce the burst window for ONE counted call, in the CALLING OPERATOR's
- *  bucket. No-op for "exempt". Throws MCPError("write_burst_limit_exceeded",
- *  { reason }) BEFORE the SDK call when that operator's rolling window is full;
- *  otherwise records the call timestamp (increment-before-permit). The per-operator
- *  cap is the registry override when set, else the global env default. `op`
- *  defaults to the Model-A scope and `now` is injectable — so a one-arg caller
- *  stays byte-identical to the pre-v1.92 process-wide form. */
-export function enforceWriteBurst(
-  bucket: WriteBurstBucket,
-  op: BurstOperator = MODEL_A_OP,
-  now: number = Date.now(),
-): void {
+/** Enforce the burst window for ONE counted call. No-op for "exempt". Throws
+ *  MCPError("write_burst_limit_exceeded", { reason }) BEFORE the SDK call when the
+ *  rolling window is full; otherwise records the call timestamp
+ *  (increment-before-permit). `now` is injectable for tests. */
+export function enforceWriteBurst(bucket: WriteBurstBucket, now: number = Date.now()): void {
   if (bucket === "exempt") return;
-  const b = bucketFor(op);
   if (bucket === "delete") {
-    b.delete = pruned(b.delete, now);
-    if (b.delete.length >= (op.deleteBurstLimit ?? getDeleteBurstLimit())) {
+    deletes = pruned(deletes, now);
+    if (deletes.length >= getDeleteBurstLimit()) {
       throw new MCPError("write_burst_limit_exceeded", { reason: "delete" });
     }
-    b.delete.push(now);
+    deletes.push(now);
     return;
   }
-  // bucket === "write"
-  b.write = pruned(b.write, now);
-  if (b.write.length >= (op.writeBurstLimit ?? getWriteBurstLimit())) {
+  writes = pruned(writes, now);
+  if (writes.length >= getWriteBurstLimit()) {
     throw new MCPError("write_burst_limit_exceeded", { reason: "write" });
   }
-  b.write.push(now);
+  writes.push(now);
 }
 
-/** Diagnostic: an operator's current in-window counts (after pruning at `now`).
- *  Defaults to the Model-A scope. */
-export function getWriteBurstCounts(
-  op: BurstOperator = MODEL_A_OP,
-  now: number = Date.now(),
-): { write: number; delete: number } {
-  const b = buckets.get(op.operatorId || MODEL_A_BUCKET);
-  if (b === undefined) return { write: 0, delete: 0 };
-  return {
-    write: pruned(b.write, now).length,
-    delete: pruned(b.delete, now).length,
-  };
+export function getWriteBurstCounts(now: number = Date.now()): { write: number; delete: number } {
+  return { write: pruned(writes, now).length, delete: pruned(deletes, now).length };
 }
 
-/** Test-only state reset. Gated to test env so a stray production call throws. */
 export function __resetWriteBurstForTests(): void {
   if (process.env.NODE_ENV !== "test" && process.env.BUN_ENV !== "test") {
     throw new Error("__resetWriteBurstForTests is for tests only");
   }
-  buckets.clear();
+  writes = [];
+  deletes = [];
 }
 
 /** @internal */
@@ -207,5 +144,4 @@ export const __internal = {
   DELETE_BURST_DEFAULT,
   BURST_MIN,
   BURST_MAX,
-  MODEL_A_BUCKET,
 };

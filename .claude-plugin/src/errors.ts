@@ -71,8 +71,8 @@ export type ErrorName =
   | "x_api_failed"
   | "x_post_denied_by_policy"
   | "egress_destination_blocked"
-  | "inbox_read_failed"
-  | "internal_routing_error";
+  | "internal_routing_error"
+  | "telegram_ack_denied_in_autonomous_mode";
 
 /** B6.1-B — the FROZEN `*_api_failed` brand set as a TYPE, derived from the union
  *  above by suffix (template-literal Extract) so it can NEVER drift from ErrorName:
@@ -304,8 +304,6 @@ export const ERROR_CODES: Record<ErrorName, Spec> = {
   // API failure. errorData.host = the blocked hostname ONLY (a fixed known value,
   // not PII; the full URL — which can hold a token, e.g. Telegram's — is NEVER echoed).
   egress_destination_blocked: { code: -32047, recovery: "A SafeSpace outbound request was blocked because its destination host is not in the enforced egress-destination registry for that connector (errorData.host = the blocked hostname). This is a defense-in-depth backstop against a connector targeting an unexpected host (a bug or a host-injection escape), not a user-configurable allowlist — the expected provider hosts are fixed in code. If this fires for a legitimate host, the registry in policy/egress-destinations.ts is out of date with the connector. Run `safespace doctor --posture` to see the registered destinations." },
-  // v1.102 (W0) — inbox_read could not read the durable webhook inbox store.
-  inbox_read_failed: { code: -32051, recovery: "inbox_read could not read the inbound-webhook inbox (errorData.reason: store_unavailable = the inbox store is missing, unreadable, or corrupt). The inbox is populated by the inbound webhook listener (SAFESPACE_WEBHOOK_PORT); if no webhook listener is configured the inbox is simply empty. No message content is echoed." },
   // v1.112.8 / v1.115.3 — fail-closed source routing / provider-guard / envelope
   // invariant tripwires. A should-never-fire internal misconfiguration (unknown
   // ToolDef.source, a handler that received the wrong credential kind/provider,
@@ -315,6 +313,11 @@ export const ERROR_CODES: Record<ErrorName, Spec> = {
   // credential kind/provider arrived, or which invariant fired — those details must not
   // reach a client. -32054 is reserved by an in-flight X-connector PR; this takes -32055.
   internal_routing_error: { code: -32055, recovery: "Internal source-routing misconfiguration; this is a bug — report it. errorData.reason ∈ {unknown_source, credential_mismatch, invariant_violation, egress_gate_not_fired}. Not a user-actionable condition (no tool args or env can fix it)." },
+  // v1.128 Q5-B — autonomous deployments must not ACK the Telegram inbox.
+  // Advancing getUpdates `offset` permanently confirms update_id < offset
+  // (at-most-once). Do NOT overload F4's delete-bucket. The offset value is
+  // NEVER echoed. min_tier stays read.
+  telegram_ack_denied_in_autonomous_mode: { code: -32057, recovery: "telegram_get_updates with an offset is denied in autonomous mode (SAFESPACE_AUTONOMOUS=true): advancing the cursor permanently ACKs the Telegram inbox (at-most-once). Omit offset to re-read the current batch without confirming it, or run this call from an interactive (non-autonomous) session. errorData.reason=offset_present. The offset value is not echoed." },
 };
 
 export class MCPError extends Error {

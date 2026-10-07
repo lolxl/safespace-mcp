@@ -284,7 +284,6 @@ describe("egress tripwire — flag set-site unit (all 7 entry points)", () => {
         return currentTier();
       },
       audit: capturingAudit().sink,
-      allowedAccounts: null,
     };
   }
 

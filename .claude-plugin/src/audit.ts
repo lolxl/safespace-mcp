@@ -146,10 +146,9 @@ export async function hashTargetEmail(email: string | null): Promise<string | nu
 // consistent) — truncation detection needs the tip MAC recorded out-of-band, which
 // `verify` prints for exactly that purpose.
 //
-// SINGLE-WRITER assumption: the running `lastMac` is per-process. Both supported
-// topologies are single-writer (Model A = one stdio process; Model B = one
-// in-process container). Two processes appending to the same file would fork the
-// chain — which `verify` would surface as a break (correctly: it IS an anomaly).
+// SINGLE-WRITER assumption: the running `lastMac` is per-process, and the only
+// supported topology is one stdio server process per config dir. Two server processes
+// appending to the same file would fork the chain — which `verify` would surface as a break (correctly: it IS an anomaly).
 
 /** The prev-mac seed for the FIRST chained row (and the restart point when the file
  *  has no chained tail). A fixed, non-secret label — the salt provides the secrecy. */
@@ -207,7 +206,7 @@ export function chainGenesis(): string {
 }
 
 // A per-process write mutex: the chain needs SERIAL writes (each row folds in the
-// previous row's MAC), so concurrent auditEnd calls (Model B, async tools) must not
+// previous row's MAC), so concurrent auditEnd calls (async tools) must not
 // race to read-tip-then-append. Each call awaits its own segment, so a caller that
 // `await`s auditEnd sees its row durably written.
 let writeTail: Promise<void> = Promise.resolve();
@@ -332,14 +331,6 @@ export interface AuditStartContext {
    *  for every Google call (which always passes a real email). */
   email: string | null;
   argsHash: string;
-  /** v1.36 BLOCKER 2 (audit actor) — the human operator who drove this call,
-   *  resolved from $SAFESPACE_OPERATOR_ID (identity/operator-id.ts). Distinct
-   *  from `email` (the Google account): one operator may drive several
-   *  accounts; one account may be co-managed by several operators. Optional so
-   *  existing callers / single-user installs need no change — `auditEnd` emits
-   *  `operator: null` when unset (Q4 zero-impact default). Plaintext on the row
-   *  (Q3), mirroring `account`. See docs/v1.36-identity-tenancy-layer.md §5.1. */
-  operator?: string | null;
 }
 
 export function auditStart(_ctx: AuditStartContext): void {
@@ -521,6 +512,37 @@ export interface AuditEndContext extends AuditStartContext {
    *  their meta (e.g. the 2 sheets formula-reject handlers). See
    *  docs/v1.33-audit-cli-forensics.md §4.4. */
   errorForensics?: Record<string, unknown>;
+  /** Why a call was refused at the dispatch boundary, before any choke point ran.
+   *  Row-only: the client always gets the same `tool_not_found` for all three, so
+   *  this adds no tier/connector oracle. ABSENT on every dispatched call. */
+  refusalReason?: RefusalReason;
+  /** HMAC (audit salt) of a caller-supplied tool name that is not in the registry.
+   *  The raw name is agent-controlled free text and is never written. */
+  toolNameHmac?: string;
+}
+
+export type RefusalReason = "unknown" | "tier_hidden" | "connector_hidden";
+
+/** Errors whose terminal audit row has already been written by the layer that threw
+ *  them. A caller wrapping that layer checks this so a failure is never logged twice. */
+const AUDITED_ERRORS = new WeakSet<object>();
+
+export function markErrorAudited(err: unknown): void {
+  if (typeof err === "object" && err !== null) AUDITED_ERRORS.add(err);
+}
+
+export function isErrorAudited(err: unknown): boolean {
+  return typeof err === "object" && err !== null && AUDITED_ERRORS.has(err);
+}
+
+/** Tool label written for a refused name that is not in the registry. */
+export const UNKNOWN_TOOL_LABEL = "<unknown>";
+
+/** HMAC-SHA256 of a caller-supplied unknown tool name, same salt and algorithm as
+ *  `hashTargetEmail`. */
+export async function hashUnknownToolName(name: string): Promise<string> {
+  const salt = await getOrCreateAuditSalt();
+  return crypto.createHmac(AUDIT_HMAC_ALG, salt).update(name).digest("hex");
 }
 
 /** Append one JSON line per call. POSIX `appendFile` is atomic for
@@ -548,12 +570,9 @@ export async function auditEnd(ctx: AuditEndContext): Promise<void> {
     // non-Google connector exists; NOT presence-as-signal.
     source: ctx.source ?? "google-workspace",
     account: ctx.email,
-    // v1.36 BLOCKER 2 — human operator actor. ALWAYS emitted (like `account`),
-    // `null` when unset so single-user rows stay byte-stable except for this one
-    // added field (Q4). Plaintext (Q3). NOT presence-as-signal: an absent key
-    // would conflate "single-user" with "field stripped", defeating the
-    // who-did-what forensic value in a co-management deployment.
-    operator: ctx.operator ?? null,
+    // Always null: the per-operator label (SAFESPACE_OPERATOR_ID) was retired. Kept
+    // so the row shape that readers and exports expect does not change.
+    operator: null,
     args_hash: ctx.argsHash,
     status: ctx.status,
     duration_ms: ctx.durationMs,
@@ -619,6 +638,13 @@ export async function auditEnd(ctx: AuditEndContext): Promise<void> {
   // cli/audit/suspicious.ts (-32025 / -32026 / -32007 / -32022). Q3 LOCKED.
   if (ctx.errorCode !== undefined) {
     payload.error_code = ctx.errorCode;
+  }
+  // Presence-as-signal, like error_code: only dispatch-boundary refusals carry these.
+  if (ctx.refusalReason !== undefined) {
+    payload.refusal_reason = ctx.refusalReason;
+  }
+  if (ctx.toolNameHmac !== undefined) {
+    payload.tool_name_hmac = ctx.toolNameHmac;
   }
   // v1.33 (d) — error_code catch-path forensic GAP-FILL safety net. When a
   // handler threw an MCPError carrying whitelisted forensic fields (e.g.

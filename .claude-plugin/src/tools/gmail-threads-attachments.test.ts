@@ -9,7 +9,7 @@ import { gmailGetAttachment, gmailGetThread } from "./handlers";
 import type { ToolContext } from "./types";
 
 const FAKE_TOKEN = "ya29.fake-token-for-tests";
-const FAKE_CTX: ToolContext = { allowedAccounts: null,
+const FAKE_CTX: ToolContext = {
   credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
   audit: NOOP_AUDIT,
   get tier() {

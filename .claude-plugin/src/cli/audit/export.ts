@@ -100,6 +100,8 @@ const CEF_FIELDS: ReadonlyArray<readonly [string, string]> = [
   ["policy_decision", "safespacePolicyDecision"],
   ["event", "safespaceEvent"],
   ["error_code", "safespaceErrorCode"],
+  ["refusal_reason", "safespaceRefusalReason"],
+  ["tool_name_hmac", "safespaceToolNameHmac"],
   ["source", "safespaceSource"],
   ["operator", "safespaceOperator"],
   ["row_mac", "safespaceRowMac"],

@@ -48,29 +48,13 @@ import type { EgressShape, ToolContext, ToolHandler } from "./types";
 // "google-workspace", so existing single-provider callers + tests are unchanged.
 const lastUsedAccount = new Map<string, string>();
 
-// v1.74 PR-2c — the last-used map is keyed by (operatorId, sourceId) so one
-// operator's last-used can NEVER seed another operator's default account (the
-// Model-B in-process isolation; the `::` separator is collision-free — neither an
-// operatorId [^[A-Za-z0-9_.-]{1,64}$] nor a sourceId [kebab id] contains `:`).
-// operatorId defaults to null (Model A — a single operator; existing single-arg
-// callers + tests resolve under the one `::google-workspace` key, byte-identical).
-function lastUsedKey(sourceId: string, operatorId: string | null): string {
-  return `${operatorId ?? ""}::${sourceId}`;
+// The last-used account per source (the weakest default-selection tier).
+export function getLastUsed(sourceId = "google-workspace"): string | null {
+  return lastUsedAccount.get(sourceId) ?? null;
 }
 
-export function getLastUsed(
-  sourceId = "google-workspace",
-  operatorId: string | null = null,
-): string | null {
-  return lastUsedAccount.get(lastUsedKey(sourceId, operatorId)) ?? null;
-}
-
-export function setLastUsed(
-  account: string,
-  sourceId = "google-workspace",
-  operatorId: string | null = null,
-): void {
-  lastUsedAccount.set(lastUsedKey(sourceId, operatorId), account);
+export function setLastUsed(account: string, sourceId = "google-workspace"): void {
+  lastUsedAccount.set(sourceId, account);
 }
 
 export function _resetLastUsedForTests(): void {
@@ -125,11 +109,10 @@ export async function withToolContext(
   handler: ToolHandler,
   deps: WithContextDeps = {},
   opts: WithContextOptions = {},
-  // v1.74 PR-2a — the resolved northbound identity for this call. Defaults to the
-  // env-backed context (Model A), resolved PER CALL (never snapshot) so existing
-  // callers (cli exec, tests) stay byte-identical; the proxy passes a per-call `op`
-  // resolved once at the dispatch choke point. Model B (PR-2b) supplies a
-  // connection-derived context here without any handler change.
+  // v1.74 PR-2a — the resolved identity for this call. Defaults to the env-backed
+  // context, resolved PER CALL (never snapshot) so callers (cli exec, tests) need
+  // not pass one; the proxy passes a per-call `op` resolved once at the dispatch
+  // choke point.
   op: OperatorContext = envOperatorContext(),
 ): Promise<unknown> {
   // Defensive: cross_account tools MUST be dispatched outside withToolContext
@@ -165,52 +148,67 @@ export async function withToolContext(
     // v1.115.3 — stable MCPError (never a plain Error that leaks internal detail as -32603).
     throw new MCPError("internal_routing_error", { reason: "invariant_violation" });
   }
-  // Account resolution lifted VERBATIM into source.resolveAccount (order: explicit
-  // args.account_id → active-account file → per-source in-memory last-used →
-  // validate against the index; account_not_found payloads byte-identical).
-  const resolved = await source.resolveAccount(toolDef, {
-    explicitAccountId:
-      typeof args.account_id === "string" ? args.account_id : undefined,
-    // v1.74 PR-2c — per-operator last-used + the confinement set (both null/default
-    // under Model A → byte-identical). Operator A can never resolve B's account.
-    lastUsed: getLastUsed(source.id, op.operatorId),
-    allowedAccounts: op.allowedAccounts,
-    readActiveImpl: deps.readActiveImpl,
-    loadIndexImpl: deps.loadIndexImpl,
-  });
-  const accountId = resolved.accountId;
-
-  // v1.66 — the OAuth scope pre-check is the source's `authorize` strategy (thesis
-  // §4: the OAuth scope machinery demotes to the source). It reads the account's
-  // PERSISTED granted scopes (not the token) and throws scope_mismatch BEFORE any
-  // token refresh — byte-identical to the pre-v1.66 inline check.
-  source.authorize(toolDef, { account: resolved });
-
-  // v1.66 — resolve the per-call credential via the source strategy. For
-  // google-workspace this refreshes the active account's access token and returns
-  // {kind:"oauth"} with a getter over it. The 401 force-refresh-retry CONTROL FLOW
-  // below stays in this choke point, gated on source.refreshable (a non-refreshing
-  // OAuth token like a GitHub OAuth-App token skips it). The literal runPipeline
-  // collapse is B6.1 — docs/v1.66-line-oa-connector.md §1.2.
-  let cred = await source.resolveCredential(toolDef, { accountId, refresh: deps });
-
   // args is the caller-supplied MCP tool args dict; tokenSet is held in
   // this local scope and NEVER merged into args, so access_token cannot
   // feed the hash input. (sec-rev 5.8 LOW guard against future regression.)
   const argsHash = `sha256:${crypto.createHash("sha256").update(JSON.stringify(args)).digest("hex")}`;
-  // v1.36 BLOCKER 2 / v1.74 PR-2a — the human operator for this call now comes from
-  // the resolved OperatorContext `op` (Model A: $SAFESPACE_OPERATOR_ID via the
-  // default EnvOperatorResolver, null when unset/invalid; Model B PR-2b: the
-  // verified-connection identity). Threaded into BOTH auditStart (cosmetic — a
-  // no-op stub) and the durable auditEnd row.
-  const operator = op.operatorId;
-  // v1.38 BLOCKER 3 / v1.74 PR-2a — the privilege tier for this call comes from the
-  // same `op` (Model A: currentTier()/$SAFESPACE_TIER; Model B PR-2b: the
-  // per-operator registry tier). "Model B replaces THIS one line with a per-session
-  // read" is now literally true — it is the resolver, not a process-global read.
+  // v1.38 BLOCKER 3 / v1.74 PR-2a — the privilege tier for this call comes from
+  // `op` (currentTier()/$SAFESPACE_TIER via the resolver).
   // Threaded as ctx.tier (below) for handler defense-in-depth re-checks.
   const tier = op.tier;
-  auditStart({ tool: toolName, email: accountId, argsHash, operator });
+  // Pre-flight (account → scope → credential) runs before the audited try below,
+  // so a failure here writes its own terminal row instead of leaving none.
+  let preflightAccountId: string | null = null;
+  const preflight = async () => {
+    // Account resolution lifted VERBATIM into source.resolveAccount (order: explicit
+    // args.account_id → active-account file → per-source in-memory last-used →
+    // validate against the index; account_not_found payloads byte-identical).
+    const resolved = await source.resolveAccount(toolDef, {
+      explicitAccountId:
+        typeof args.account_id === "string" ? args.account_id : undefined,
+      lastUsed: getLastUsed(source.id),
+      readActiveImpl: deps.readActiveImpl,
+      loadIndexImpl: deps.loadIndexImpl,
+    });
+    preflightAccountId = resolved.accountId;
+
+    // v1.66 — the OAuth scope pre-check is the source's `authorize` strategy (thesis
+    // §4: the OAuth scope machinery demotes to the source). It reads the account's
+    // PERSISTED granted scopes (not the token) and throws scope_mismatch BEFORE any
+    // token refresh — byte-identical to the pre-v1.66 inline check.
+    source.authorize(toolDef, { account: resolved });
+
+    // v1.66 — resolve the per-call credential via the source strategy. For
+    // google-workspace this refreshes the active account's access token and returns
+    // {kind:"oauth"} with a getter over it. The 401 force-refresh-retry CONTROL FLOW
+    // below stays in this choke point, gated on source.refreshable (a non-refreshing
+    // OAuth token like a GitHub OAuth-App token skips it). The literal runPipeline
+    // collapse is B6.1 — docs/v1.66-line-oa-connector.md §1.2.
+    const cred = await source.resolveCredential(toolDef, {
+      accountId: resolved.accountId,
+      refresh: deps,
+    });
+    return { accountId: resolved.accountId, cred };
+  };
+  const preflightResult = await preflight().catch(async (err: unknown) => {
+    // Awaited before the rethrow: a CLI caller may exit as soon as this rejects.
+    await auditEnd({
+      tool: toolName,
+      source: source.id,
+      email: preflightAccountId,
+      argsHash,
+      status: "error",
+      durationMs: Date.now() - start,
+      sanitize: opts.skipSanitize ? "bypassed" : "applied",
+      errorCode: err instanceof MCPError ? err.code : undefined,
+      errorForensics: err instanceof MCPError ? pickAuditErrorForensics(err.errorData) : undefined,
+    });
+    throw err;
+  });
+  const accountId = preflightResult.accountId;
+  let cred = preflightResult.cred;
+
+  auditStart({ tool: toolName, email: accountId, argsHash });
 
   let status: "ok" | "error" = "error";
   // v1.24 Phase 1 Item 2 — captures the numeric MCPError code at every
@@ -246,14 +244,10 @@ export async function withToolContext(
     // owns the tokenSet; each call returns a fresh getter, and the choke point
     // rebuilds ctx — behavior-equivalent: the retried handler reads the
     // force-refreshed token either way). The audit sink is stable across the rebuild.
-    // v1.80 PR-3 — `op.allowedAccounts` rides onto the ctx so the egress layer can
-    // partition the recipient-allowlist self-send exemption per operator (null
-    // under Model A → no-op).
     let ctx: ToolContext = {
       credential: cred,
       tier,
       audit: auditAcc.sink,
-      allowedAccounts: op.allowedAccounts,
     };
 
     // v1.24 Phase 1 Item 2 — wrap handler + sanitize body with a single
@@ -279,12 +273,11 @@ export async function withToolContext(
       // Reads (min_tier === "read") are exempt; write / permanent-delete calls
       // are rate-capped in a rolling window. Inside this try so a thrown -32032
       // flows through the error-code audit stamping like a handler throw.
-      // v1.92 — `op` keys the burst window per-operator (Model A: null → the
-      // shared sentinel bucket = byte-identical; Model B: this operator's bucket +
-      // registry cap override).
-      enforceWriteBurst(classifyWriteTool(toolName, TOOL_REGISTRY[toolName]?.min_tier), op);
+      // One process-wide write window and delete window; limits come from env.
+      enforceWriteBurst(classifyWriteTool(toolName, TOOL_REGISTRY[toolName]?.min_tier));
       // B6.1 wave A2a — PIPELINE-FIRED egress for OAuth-routed tools carrying an
-      // egress descriptor (x_post_create today; tools/egress-pipeline.ts — the
+      // egress descriptor (every OAuth PIPELINE_EGRESS write — gmail, GitHub, Notion,
+      // X, YouTube; tools/egress-pipeline.ts — the
       // with-context twin of the A1 firing site in with-nonoauth-context.ts):
       // extract (the tool's own arg validation — throws its plain-Error messages)
       // then the composite gate (sets ctx.egressGateFired; throws on denial), both
@@ -292,10 +285,12 @@ export async function withToolContext(
       // shape → stored on ctx.egress so the handler wires the PIPELINE's vetted
       // bytes (requireEgressResult), never its own recomputation. INSIDE the
       // errorCode-stamping try so a denial lands on the audit row exactly like a
-      // handler throw. Fires ONCE per call — the 401-retry ctx rebuild below
-      // CARRIES egressGateFired/egress forward instead of re-firing. Tools without
-      // a descriptor (every other OAuth tool — the gmail/github/notion egress stays
-      // handler-called, the B3 posture) skip this block: byte-identical.
+      // handler throw. Fires once before the handler; only a 401 raised by the gate
+      // itself (gmail recipient resolution) force-refreshes and re-runs it once. The
+      // handler-stage 401-retry ctx rebuild below CARRIES egressGateFired/egress
+      // forward instead of re-firing. Tools without
+      // a descriptor (every non-external OAuth tool, and the bespoke-gated
+      // drive_share_file) skip this block.
       const eg = TOOL_REGISTRY[toolName]?.egress;
       if (eg !== undefined) {
         const shape = eg.extract(args);
@@ -328,7 +323,6 @@ export async function withToolContext(
             credential: cred,
             tier,
             audit: auditAcc.sink,
-            allowedAccounts: op.allowedAccounts,
           };
           try {
             out = await eg.gate(ctx, shape, source.resolveRecipients);
@@ -377,16 +371,16 @@ export async function withToolContext(
             credential: cred,
             tier,
             audit: auditAcc.sink,
-            allowedAccounts: op.allowedAccounts,
             // B6.1 wave A2a — carry the pipeline-fired egress results across the
-            // retry rebuild: the pipeline ran ONCE before the retry loop; gate
+            // retry rebuild: the pipeline finished before the handler retry loop; gate
             // decisions are args-based and approval/audit already happened —
             // re-firing here would double requireSendApproval + the denial audit
-            // rows. For handler-called-gate tools this is inert (both fields are
-            // undefined at rebuild time; the retried handler re-fires its own gate
-            // regardless, as today).
+            // rows. Handler-called consume (drive_share_file anyone) is NOT inert:
+            // sendApprovalConsumedFingerprint rides the rebuild so the retried
+            // handler does not burn the owner's one-time approval.
             egressGateFired: ctx.egressGateFired,
             egress: ctx.egress,
+            sendApprovalConsumedFingerprint: ctx.sendApprovalConsumedFingerprint,
           };
           try {
             raw = await handler(ctx, args);
@@ -412,13 +406,11 @@ export async function withToolContext(
 
       // v1.116 — choke-point egress tripwire. A tool LABELED direction:"outbound-write"
       // whose call completed WITHOUT its centralized egress gate (tools/egress.ts sets
-      // ctx.egressGateFired — handler-called for gmail/github/notion, PIPELINE-fired above
-      // for a descriptor-carrying tool like x_post_create since B6.1 wave A2a) → a loud,
+      // ctx.egressGateFired — PIPELINE-fired above via the tool's egress descriptor) → a loud,
       // audited failure. `ctx` is the `let` the 401 force-refresh retry REASSIGNS, so at
       // this point it is the SUCCESSFUL attempt's ctx instance (never a stale
-      // first-attempt ctx after a retried send) — a handler-called gate on the retried
-      // handler set the flag on THIS same instance, and the rebuilt literal CARRIES the
-      // pipeline-fired flag forward (the pipeline fires once, pre-retry-loop).
+      // first-attempt ctx after a retried send) — the rebuilt literal CARRIES the
+      // pipeline-fired flag forward (the pipeline fires before the handler retry loop).
       //
       // HONEST BOUNDARY: this fires AFTER the handler, so a drifted call's network egress
       // ALREADY happened — the tripwire converts silent gate-omission drift into an audited
@@ -453,7 +445,7 @@ export async function withToolContext(
           });
         }
       }
-      setLastUsed(accountId, source.id, op.operatorId);
+      setLastUsed(accountId, source.id);
       status = "ok";
       return sanitized;
     } catch (err) {
@@ -587,9 +579,6 @@ export async function withToolContext(
       source: source.id,
       email: accountId,
       argsHash,
-      // v1.36 BLOCKER 2 — same operator resolved at auditStart above; recorded
-      // on the durable row (null when no $SAFESPACE_OPERATOR_ID).
-      operator,
       status,
       durationMs: Date.now() - start,
       sanitize: opts.skipSanitize ? "bypassed" : "applied",

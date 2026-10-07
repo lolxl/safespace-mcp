@@ -32,25 +32,26 @@ export interface ToolDef {
    *  label this cycle — nothing branches on it yet. */
   source?: string;
   /** Classification LABEL for the data-flow direction — read by the test-only
-   *  egress sentinels (`egress-coverage.test.ts` + `egress-callsite.test.ts`),
-   *  NOT by any runtime choke point today. `"outbound-write"` ⇔ membership in
-   *  `CENTRALIZED_EGRESS` (the tool reaches an external party and is gated by
-   *  a centralized `enforce*EgressGates` call in its handler). Handler-gated
-   *  external tools (`HANDLER_GATED_EXTERNAL` — drive share, YouTube comment/
-   *  video writes) MUST leave this field unset; the coverage sentinel enforces
-   *  both directions of that invariant. `"inbound-read"` (or unset on a non-
-   *  external tool) means no egress classification. Pipeline-fired egress
-   *  (auto-routing off this field inside with-context) remains future work. */
+   *  egress-coverage sentinel (`egress-coverage.test.ts`) and
+   *  by the choke points' post-handler tripwire (an `"outbound-write"` call that
+   *  finished without its gate firing → `internal_routing_error`). `"outbound-write"` ⇔ membership in
+   *  `PIPELINE_EGRESS` (the tool reaches an external party and its
+   *  `tools/egress.ts` gate is fired by the choke point via its `egress`
+   *  descriptor). Handler-gated external tools (`HANDLER_GATED_EXTERNAL` — drive
+   *  share) MUST leave this field unset; the coverage sentinel enforces both
+   *  directions of that invariant. `"inbound-read"` (or unset on a non-external
+   *  tool) means no egress classification. */
   direction?: "inbound-read" | "outbound-write";
   /** B6.1 wave A1 — the PIPELINE-FIRED egress descriptor (tools/egress-pipeline.ts).
-   *  When present, the non-OAuth choke point (with-nonoauth-context.ts) fires
-   *  extract → gate BEFORE the handler runs; the handler must NOT call the gate
-   *  itself. The call-site sentinel (egress-callsite.test.ts) enforces both
+   *  When present, the tool's choke point (with-nonoauth-context.ts for the
+   *  service-token sends, with-context.ts for the OAuth writes) fires extract →
+   *  gate BEFORE the handler runs; the handler must NOT call the gate itself. When
+   *  the gate TRANSFORMS the content (sanitize / rewrite), the handler sends the
+   *  gate's result (`requireEgressResult`), never the raw args; a check-only gate
+   *  leaves the handler to build the body from the validated args. The call-site sentinel (egress-callsite.test.ts) enforces both
    *  directions: the descriptor module must call the tool's gate wrapper, and the
-   *  handler file must not (anti-double-fire). Carried today by the 5 class-B
-   *  service-token send tools (the PIPELINE_EGRESS set in egress-coverage.sets.ts);
-   *  unset on every other tool (the gmail/github/notion egress stays
-   *  handler-called through with-context.ts, the B3 posture — waves A3+D;
-   *  x_post_create migrated onto the pipeline in wave A2a, v1.123). */
+   *  handler file must not (anti-double-fire). Carried by every PIPELINE_EGRESS
+   *  tool (egress-coverage.sets.ts) — every external-reaching write except the
+   *  bespoke-gated drive_share_file; unset on every other tool. */
   egress?: EgressDescriptor;
 }

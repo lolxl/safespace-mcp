@@ -14,15 +14,19 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { ENV_CONFIG_DIR } from "../config";
 
+/** The compiled-in config dir, ignoring SAFESPACE_CONFIG_DIR. Per-OS default:
+ *  %APPDATA%\safespace on Windows (the roaming-profile convention), ~/.config/safespace
+ *  on macOS/Linux. Guard the unusual case (e.g. a Windows container) where APPDATA is
+ *  unset. */
+export function defaultConfigDir(): string {
+  return process.platform === "win32"
+    ? path.join(process.env.APPDATA ?? os.homedir(), "safespace")
+    : path.join(os.homedir(), ".config", "safespace");
+}
+
 export function configDir(): string {
-  // Per-OS default: %APPDATA%\safespace on Windows (the roaming-profile convention),
-  // ~/.config/safespace on macOS/Linux. The SAFESPACE_CONFIG_DIR override wins when set.
-  // Guard the unusual case (e.g. a Windows container) where APPDATA is unset.
-  const def =
-    process.platform === "win32"
-      ? path.join(process.env.APPDATA ?? os.homedir(), "safespace")
-      : path.join(os.homedir(), ".config", "safespace");
-  return process.env[ENV_CONFIG_DIR] ?? def;
+  // The SAFESPACE_CONFIG_DIR override wins when set.
+  return process.env[ENV_CONFIG_DIR] ?? defaultConfigDir();
 }
 function indexPath(): string { return path.join(configDir(), "accounts.json"); }
 function backupPath(): string { return path.join(configDir(), "accounts.json.bak"); }

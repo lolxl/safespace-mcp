@@ -7,6 +7,9 @@ import { saveIndex } from "./auth/keychain";
 // platform default as production: KeychainBackend on macOS, FileBackend else).
 import { deleteToken, setToken } from "./auth/token-store";
 import { CliError, runCli, type CliIO } from "./cli";
+import { __resetChainState } from "./audit";
+import { MCPError } from "./errors";
+import { __resetServiceTokenBackendForTests } from "./auth/service-token-store";
 
 let tmpDir: string;
 let prevEnv: string | undefined;
@@ -44,6 +47,51 @@ async function planIndex(emails: Array<{ email: string; scopes?: string[]; lastU
     })),
   });
 }
+
+describe("runCli — SAFESPACE_OPERATOR_ID retired", () => {
+  let prevOp: string | undefined;
+  let prevLine: string | undefined;
+  beforeEach(() => {
+    prevOp = process.env.SAFESPACE_OPERATOR_ID;
+    prevLine = process.env.SAFESPACE_LINE_CHANNEL_TOKEN;
+  });
+  afterEach(() => {
+    if (prevOp === undefined) delete process.env.SAFESPACE_OPERATOR_ID;
+    else process.env.SAFESPACE_OPERATOR_ID = prevOp;
+    if (prevLine === undefined) delete process.env.SAFESPACE_LINE_CHANNEL_TOKEN;
+    else process.env.SAFESPACE_LINE_CHANNEL_TOKEN = prevLine;
+  });
+
+  test("every subcommand, doctor included, refuses before doing anything", async () => {
+    process.env.SAFESPACE_OPERATOR_ID = "alice-x9";
+    // An env service token would make `line status` answer without the backend.
+    process.env.SAFESPACE_LINE_CHANNEL_TOKEN = "env-line-token";
+    await planIndex([{ email: "a@example.com" }]);
+    for (const argv of [
+      ["doctor"],
+      ["doctor", "--deep"],
+      ["line", "status"],
+      ["account-list"],
+      ["consent", "a@example.com"],
+      ["exec", "gmail_list_labels", "--params", "{}"],
+    ]) {
+      const { io, out, err } = captureIO();
+      const p = runCli(argv, io);
+      await expect(p).rejects.toBeInstanceOf(CliError);
+      await expect(p).rejects.toThrow(/SAFESPACE_OPERATOR_ID/);
+      await p.catch((e: Error) => expect(e.message).not.toContain("alice-x9"));
+      expect(out).toEqual([]);
+      expect(err).toEqual([]);
+    }
+  });
+
+  test("an empty value is unset: the CLI runs", async () => {
+    process.env.SAFESPACE_OPERATOR_ID = "";
+    const { io, out } = captureIO();
+    await runCli(["account-list"], io);
+    expect(out.length).toBeGreaterThan(0);
+  });
+});
 
 describe("runCli — dispatch + usage", () => {
   test("no subcommand → CliError with usage", async () => {
@@ -624,11 +672,124 @@ describe("runCli exec", () => {
   });
 });
 
-describe("runCli doctor --posture (v1.86 enforced-mode posture)", () => {
-  const POSTURE_VARS = ["SAFESPACE_ENFORCED", "SAFESPACE_AUTONOMOUS", "SAFESPACE_SECRET_BACKEND", "SAFESPACE_TRANSPORT", "SAFESPACE_HTTP_BIND"];
-  let prevExitCode: typeof process.exitCode;
+describe("runCli exec — routes like the server (non-OAuth, cross-account)", () => {
+  // Pinned so a developer shell cannot change which gate answers; the file backend
+  // keeps the service-token case off the real Keychain.
+  const PINNED = [
+    "SAFESPACE_FS_READ_ROOTS",
+    "SAFESPACE_FS_READ_ROOTS_EXTRA",
+    "SAFESPACE_AUTONOMOUS",
+    "SAFESPACE_WEBFETCH_ALLOW",
+    "SAFESPACE_WEBFETCH_ALLOW_EXTRA",
+    "SAFESPACE_TELEGRAM_BOT_TOKEN",
+    "SAFESPACE_SECRET_BACKEND",
+    "SAFESPACE_SECRET_PASSPHRASE",
+  ];
+  const saved: Record<string, string | undefined> = {};
   beforeEach(() => {
-    prevExitCode = process.exitCode;
+    for (const k of PINNED) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    process.env.SAFESPACE_SECRET_BACKEND = "file";
+    __resetChainState(); // this test's config dir starts its own chain
+    __resetServiceTokenBackendForTests();
+  });
+  afterEach(() => {
+    for (const k of PINNED) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    __resetChainState();
+    __resetServiceTokenBackendForTests();
+  });
+
+  /** The non-OAuth choke point writes its row without awaiting it; poll briefly. */
+  async function auditRows(): Promise<Array<Record<string, unknown>>> {
+    for (let i = 0; i < 50; i++) {
+      try {
+        const text = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
+        const rows = text.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
+        if (rows.length > 0) return rows;
+      } catch {
+        // not written yet
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return [];
+  }
+
+  test("web_fetch reaches the non-OAuth choke point: its own refusal + an audit row", async () => {
+    const { io } = captureIO();
+    await expect(
+      runCli(["exec", "web_fetch", "--params", JSON.stringify({ url: "http://127.0.0.1/" })], io),
+    ).rejects.toThrow(/url_blocked_by_policy/);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: "web_fetch", source: "web-fetch", status: "error" });
+  });
+
+  test("fs_read reaches the non-OAuth choke point: its own refusal + an audit row", async () => {
+    const { io } = captureIO();
+    await expect(
+      runCli(["exec", "fs_read", "--params", JSON.stringify({ path: "/etc/hosts" })], io),
+    ).rejects.toThrow(/path_blocked_by_policy/);
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: "fs_read", source: "fs-read", status: "error" });
+  });
+
+  test("a cross-account tool fans out via withAllAccounts and writes its aggregate row", async () => {
+    const { io, out } = captureIO();
+    await runCli(["exec", "gmail_search_all", "--params", JSON.stringify({ query: "x" })], io);
+    expect(JSON.parse(out.join("\n"))).toEqual({ successes: [], failures: [] });
+    const rows = await auditRows();
+    expect(rows.some((r) => r.tool === "gmail_search_all" && r.event === "cross_account_aggregate")).toBe(true);
+  });
+
+  test("a service-token tool reaches its choke point: no_token + an audit row", async () => {
+    const { io } = captureIO();
+    const err = await runCli(
+      ["exec", "telegram_send_message", "--params", JSON.stringify({ chat_id: "1", text: "x" })],
+      io,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(MCPError);
+    expect((err as MCPError).errorName).toBe("telegram_api_failed");
+    expect((err as MCPError).errorData).toMatchObject({ reason: "no_token" });
+    const rows = await auditRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ tool: "telegram_send_message", source: "telegram", status: "error" });
+  });
+
+  test("--raw and --account are refused outside single-account OAuth tools", async () => {
+    const { io, err } = captureIO();
+    await expect(
+      runCli(["exec", "web_fetch", "--raw", "--params", JSON.stringify({ url: "https://example.com/" })], io),
+    ).rejects.toThrow(/--raw applies only to single-account OAuth tools/);
+    await expect(
+      runCli(["exec", "gmail_search_all", "--account", "a@example.com", "--params", "{}"], io),
+    ).rejects.toThrow(/--account applies only to single-account OAuth tools; gmail_search_all is a cross-account tool/);
+    expect(err).toEqual([]); // refused before the --raw warning
+  });
+
+  test("a failing exec still lands its audit row before the process exits", async () => {
+    const proc = Bun.spawn(
+      [process.execPath, path.join(import.meta.dir, "cli.ts"), "exec", "web_fetch", "--params", JSON.stringify({ url: "http://127.0.0.1/" })],
+      { env: { ...process.env, SAFESPACE_CONFIG_DIR: tmpDir }, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await proc.exited).toBe(1);
+    const text = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
+    expect(text).toContain('"tool":"web_fetch"');
+  });
+});
+
+describe("runCli doctor --posture (hardening posture)", () => {
+  const POSTURE_VARS = ["SAFESPACE_AUTONOMOUS", "SAFESPACE_SECRET_BACKEND", "SAFESPACE_REQUIRE_SEND_APPROVAL"];
+  let prevExitCode: number;
+  beforeEach(() => {
+    // Bun ignores `process.exitCode = undefined`, so restoring an unset code must
+    // write 0 — otherwise the failing-gate test below leaks exit 1 into the run.
+    prevExitCode = (process.exitCode as number | undefined) ?? 0;
   });
   afterEach(async () => {
     for (const v of POSTURE_VARS) delete process.env[v];
@@ -641,23 +802,23 @@ describe("runCli doctor --posture (v1.86 enforced-mode posture)", () => {
     }
   });
 
-  test("routes to the posture report (enforced_mode + the three gates)", async () => {
+  test("routes to the posture report (the three hardening settings)", async () => {
     process.env.SAFESPACE_AUTONOMOUS = "true";
     process.env.SAFESPACE_SECRET_BACKEND = "keychain";
     const { io, out } = captureIO();
     await runCli(["doctor", "--posture"], io);
     const joined = out.join("\n");
-    expect(joined).toContain("enforced_mode");
+    expect(joined).not.toContain("enforced_mode");
     expect(joined).toContain("autonomous_mode");
+    expect(joined).toContain("send_approval");
     expect(joined).toContain("token_at_rest");
-    expect(joined).toContain("http_bind");
     expect(joined).toContain("SOLE-EGRESS.md"); // the external-layers note
   });
 
   test("--posture --json emits one JSON line with external_layers", async () => {
-    process.env.SAFESPACE_ENFORCED = "true";
     process.env.SAFESPACE_AUTONOMOUS = "true";
     process.env.SAFESPACE_SECRET_BACKEND = "keychain";
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
     const { io, out } = captureIO();
     await runCli(["doctor", "--posture", "--json"], io);
     expect(out.length).toBe(1);
@@ -666,13 +827,24 @@ describe("runCli doctor --posture (v1.86 enforced-mode posture)", () => {
     expect(parsed.external_layers).toContain("SOLE-EGRESS.md");
   });
 
-  test("a failing gate under --posture sets a non-zero exit code", async () => {
-    process.env.SAFESPACE_ENFORCED = "true";
+  test("a setting that is off under --posture sets a non-zero exit code", async () => {
     process.env.SAFESPACE_AUTONOMOUS = "true";
     process.env.SAFESPACE_SECRET_BACKEND = "file"; // KEY-FILE mode → token_at_rest fail
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
+    const { io, out } = captureIO();
+    await runCli(["doctor", "--posture"], io);
+    expect(out.join("\n")).toContain("[FAIL] token_at_rest");
+    expect(process.exitCode).toBe(1);
+  });
+
+  test("a fully hardened posture leaves the exit code at 0", async () => {
+    process.env.SAFESPACE_AUTONOMOUS = "true";
+    process.env.SAFESPACE_SECRET_BACKEND = "keychain";
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
+    process.exitCode = 0;
     const { io } = captureIO();
     await runCli(["doctor", "--posture"], io);
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(0);
   });
 
   test("an unknown doctor flag still errors (usage lists --posture)", async () => {

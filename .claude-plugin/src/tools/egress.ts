@@ -136,14 +136,11 @@ async function enforceRecipientAllowlist(
   }
   const recipientStartMs = Date.now();
   const allowlistState = await getAllowlistState();
-  // v1.80 PR-3 — partition the implicit SELF-SEND exemption to the calling
-  // operator's allowedAccounts (Model B). null (Model A / unconfined) → no-op;
-  // explicit allow/extra entries are never narrowed (see isRecipientAllowed).
-  const confineSelfTo =
-    ctx.allowedAccounts === null ? null : new Set(ctx.allowedAccounts);
+  // Every consented account keeps the implicit self-send exemption (one operator
+  // per process).
   const rejected: string[] = [];
   for (const addr of allRecipients) {
-    if (!isRecipientAllowed(addr, allowlistState, confineSelfTo)) {
+    if (!isRecipientAllowed(addr, allowlistState)) {
       rejected.push(addr);
     }
   }
@@ -652,11 +649,11 @@ export function enforceGithubReviewEgressGates(
  *
  *  On an allowlist miss → throw `x_post_denied_by_policy` (-32056) with a closed-set
  *  reason; the account id is NEVER echoed (PII-oracle defense, mirroring -32042). */
-export function enforceXPostEgressGates(
+export async function enforceXPostEgressGates(
   ctx: ToolContext,
   accountId: string,
   text: string,
-): string {
+): Promise<string> {
   ctx.egressGateFired = true;
   const state = getXPostAllowlistState();
   if (!isXPostAccountAllowed(accountId, state)) {
@@ -669,7 +666,16 @@ export function enforceXPostEgressGates(
   enforceOutboundSecret(ctx, text);
   // Public-surface 6-step REJECT (-32027 on failure). Weighted-280 is pre-checked in the
   // handler (before this gate); the byte cap here is a defense-in-depth backstop.
-  return outboundSanitize(text, { tool: "x_post_create", maxBytes: 2000 });
+  const sanitized = outboundSanitize(text, { tool: "x_post_create", maxBytes: 2000 });
+  // v1.128 Q3-B — supervised approval LAST (after allowlist + secret + sanitize) so a
+  // denied post never creates a pending. Fingerprint binds the SANITIZED body (the wire).
+  await requireSendApproval(ctx, {
+    tool: "x_post_create",
+    recipients: [],
+    body: sanitized,
+    target: { kind: "x_post", account_id: accountId },
+  });
+  return sanitized;
 }
 
 /** v1.121 B6.1 wave A2b — the YouTube COMMENT WRITE egress gate (PUBLIC-surface),
@@ -692,7 +698,7 @@ export function enforceXPostEgressGates(
  *  `parentCommentId` (REPLY only; undefined for comment_post) is carried so the reply's
  *  denial rows keep `parent_comment_id_hash` — its ABSENCE omits the field, byte-identical
  *  to the two pre-A2b handler blocks. */
-export function enforceYoutubeCommentEgressGates(
+export async function enforceYoutubeCommentEgressGates(
   ctx: ToolContext,
   egress: {
     tool: "youtube_video_comment_post" | "youtube_comment_reply";
@@ -700,7 +706,7 @@ export function enforceYoutubeCommentEgressGates(
     body: string;
     parentCommentId?: string;
   },
-): string {
+): Promise<string> {
   ctx.egressGateFired = true;
   const target_video_hash = sha256Hex(egress.videoId);
   const comment_length = egress.body.length;
@@ -734,12 +740,32 @@ export function enforceYoutubeCommentEgressGates(
   }
 
   // ── Outbound sanitize (6-step REJECT) → the vetted bytes for the wire ──
+  let sanitized: string;
   try {
-    return outboundSanitize(egress.body, { tool: egress.tool });
+    sanitized = outboundSanitize(egress.body, { tool: egress.tool });
   } catch (err) {
     ctx.audit.record("commentPostMeta", denyMeta("denied_outbound_sanitize_rejected"));
     throw err;
   }
+  // v1.128 Q3-B — supervised approval LAST so an allowlist/burst/sanitize deny never
+  // creates a pending. Target is video id (comment_post) or parent comment id (reply).
+  const target =
+    egress.tool === "youtube_video_comment_post"
+      ? { kind: "youtube_video" as const, video_id: egress.videoId }
+      : (() => {
+          const parent = egress.parentCommentId;
+          if (parent === undefined || parent.length === 0) {
+            throw new Error("internal: youtube_comment_reply egress missing parentCommentId");
+          }
+          return { kind: "youtube_comment" as const, parent_comment_id: parent };
+        })();
+  await requireSendApproval(ctx, {
+    tool: egress.tool,
+    recipients: [],
+    body: sanitized,
+    target,
+  });
+  return sanitized;
 }
 
 /** v1.121 B6.1 wave A2b — the youtube_video_update snippet-write egress gate

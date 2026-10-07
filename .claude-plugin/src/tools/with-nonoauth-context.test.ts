@@ -78,10 +78,8 @@ describe("withNonOAuthContext (web-fetch keyless path — byte-identical to v1.6
 
   // v1.74 PR-2a — the OperatorContext threads through the NON-OAuth choke point
   // too (the path server.ts dispatches for keyless/service-token tools).
-  test("explicit op drives the audit operator + ctx.tier, OVERRIDING env", async () => {
-    const prevOp = process.env.SAFESPACE_OPERATOR_ID;
+  test("explicit op drives ctx.tier, OVERRIDING env; the row's operator is null", async () => {
     const prevTier = process.env.SAFESPACE_TIER;
-    process.env.SAFESPACE_OPERATOR_ID = "envguy";
     process.env.SAFESPACE_TIER = "read";
     try {
       let seenTier: string | undefined;
@@ -92,32 +90,32 @@ describe("withNonOAuthContext (web-fetch keyless path — byte-identical to v1.6
           seenTier = ctx.tier;
           return { ok: true };
         },
-        { operatorId: "alice", tier: "write", allowedAccounts: null },
+        { tier: "write" },
       );
       await waitForAudit();
       const rows = await readAuditLines();
       expect(rows).toHaveLength(1);
-      expect(rows[0]!.operator).toBe("alice"); // op wins over env "envguy"
+      expect(rows[0]!.operator).toBeNull();
       expect(seenTier).toBe("write"); // handler saw op.tier, not env "read"
     } finally {
-      if (prevOp === undefined) delete process.env.SAFESPACE_OPERATOR_ID;
-      else process.env.SAFESPACE_OPERATOR_ID = prevOp;
       if (prevTier === undefined) delete process.env.SAFESPACE_TIER;
       else process.env.SAFESPACE_TIER = prevTier;
     }
   });
 
-  test("omitting op falls back to env (Model A byte-identical)", async () => {
-    const prevOp = process.env.SAFESPACE_OPERATOR_ID;
-    process.env.SAFESPACE_OPERATOR_ID = "envguy";
+  test("omitting op falls back to the env tier", async () => {
+    const prevTier = process.env.SAFESPACE_TIER;
+    process.env.SAFESPACE_TIER = "write";
     try {
-      await withNonOAuthContext("web_fetch", { url: "https://x/" }, async () => ({ ok: true }));
-      await waitForAudit();
-      const rows = await readAuditLines();
-      expect(rows[0]!.operator).toBe("envguy"); // default op = env, as before
+      let seenTier: string | undefined;
+      await withNonOAuthContext("web_fetch", { url: "https://x/" }, async (ctx) => {
+        seenTier = ctx.tier;
+        return { ok: true };
+      });
+      expect(seenTier).toBe("write");
     } finally {
-      if (prevOp === undefined) delete process.env.SAFESPACE_OPERATOR_ID;
-      else process.env.SAFESPACE_OPERATOR_ID = prevOp;
+      if (prevTier === undefined) delete process.env.SAFESPACE_TIER;
+      else process.env.SAFESPACE_TIER = prevTier;
     }
   });
 

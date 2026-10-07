@@ -247,4 +247,22 @@ describe("verifyChain", () => {
     expect(r.chainedRows).toBe(3); // 2 auditEnd + 1 pending
     expect(r.unchainedEventRows).toBe(1); // the approved row, tolerated
   });
+
+  test("public-write pending records target_hash, never the target plaintext", async () => {
+    await auditSendApprovalEvent({
+      event: "pending",
+      pending_id: "p2",
+      tool: "x_post_create",
+      fingerprint: "fp2",
+      recipients: [],
+      operator: "",
+      target: { kind: "x_post", account_id: "2244994945" },
+    });
+    const rows = await readLines();
+    const pending = rows.find((r) => r.event === "send_approval_pending" && r.pending_id === "p2")!;
+    expect(typeof pending.target_hash).toBe("string");
+    expect((pending.target_hash as string)).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(pending)).not.toContain("2244994945");
+    expect(pending.account_id).toBeUndefined();
+  });
 });

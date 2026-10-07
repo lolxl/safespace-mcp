@@ -86,10 +86,7 @@ describe("dispatch routing — the proxy's authModel branch (v1.65 / v1.66 Phase
   // silently inherit the non-OAuth path (which skips OAuth/scope/refresh) by a
   // stray `source` label.
   test("web_fetch + fs_read are keyless, line/telegram/discord are service-token; google/github/notion (+ the rest) are oauth", () => {
-    // v1.102 (W0) — inbox_read is keyless (source:"webhook", authModel "none"): it reads
-    // a local store the listener populated; the signing secret is listener infra, not a
-    // tool credential.
-    const keyless = new Set(["web_fetch", "fs_read", "inbox_read"]);
+    const keyless = new Set(["web_fetch", "fs_read"]);
     // v1.78 — Notion moved from service-token (v1.77 A) to OAuth (the 3rd OAuth source),
     // so its 5 tools are now in the `oauth` (default) bucket below.
     const serviceToken = new Set([

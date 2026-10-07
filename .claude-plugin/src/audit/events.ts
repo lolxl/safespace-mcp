@@ -1,6 +1,6 @@
 // Audit EVENT appenders — the bare forensic / policy JSONL rows that sit
 // ALONGSIDE the per-call auditEnd row (share / share-denied / recipient-denied /
-// send-approval / webhook receipt + rejected / cross-account aggregate).
+// send-approval / cross-account aggregate).
 // Extracted VERBATIM from audit.ts (the chain WRITER) as a sibling leaf. Each
 // appender builds its payload then routes through the chain writer's
 // `appendChainedRow` (server-process rows join the v1.89 tamper-evident chain) or
@@ -14,8 +14,8 @@
 // only CALLS them inside appender bodies (at runtime), never at module-eval time.
 // Same documented pattern as tools/with-all-accounts.ts <-> tools/registry.
 
-import * as crypto from "node:crypto";
 import { appendBareRow, appendChainedRow, getRunId, hashTargetEmail } from "../audit";
+import { canonicalizeTarget, type ApprovalTarget } from "../auth/send-approval-store";
 
 export interface AuditShareEventContext {
   tool: "drive_share_file" | "drive_unshare_file";
@@ -137,11 +137,13 @@ export async function auditRecipientDeniedEvent(
 }
 
 /** v1.99 — a send-approval gate decision (OPT-IN supervised mode). Records the tool, the
- *  pending id, the send fingerprint, the operator, and each recipient as an HMAC-SHA256 HASH
- *  — NEVER the body (which lives only in pending-sends.json for the owner's local review). Same
- *  swallow-errors / bare-append pattern as auditRecipientDeniedEvent (these forensic lines sit
- *  outside the v1.89 row_mac chain). `event` ∈ pending (blocked, awaiting approval) / consumed
- *  (an approved send went through) / approved|denied (the owner's CLI action). */
+ *  pending id, the send fingerprint, the operator, each recipient as an HMAC-SHA256 HASH,
+ *  and (when present) a `target_hash` of the canonical typed target — NEVER the body or
+ *  the target plaintext (those live only in pending-sends.json for the owner's local
+ *  review). Same swallow-errors / bare-append pattern as auditRecipientDeniedEvent
+ *  (these forensic lines sit outside the v1.89 row_mac chain). `event` ∈ pending
+ *  (blocked, awaiting approval) / consumed (an approved send went through) /
+ *  approved|denied (the owner's CLI action). */
 export interface AuditSendApprovalContext {
   event: "pending" | "consumed" | "approved" | "denied";
   pending_id: string;
@@ -150,6 +152,8 @@ export interface AuditSendApprovalContext {
   recipients: string[];
   /** "" = Model A → recorded as null. */
   operator: string;
+  /** Typed public-write target; hashed into target_hash, never stored plaintext. */
+  target?: ApprovalTarget;
 }
 
 export async function auditSendApprovalEvent(ctx: AuditSendApprovalContext): Promise<void> {
@@ -165,6 +169,10 @@ export async function auditSendApprovalEvent(ctx: AuditSendApprovalContext): Pro
     recipient_hashes: hashes,
     operator: ctx.operator === "" ? null : ctx.operator,
   };
+  if (ctx.target !== undefined) {
+    const th = await hashTargetEmail(JSON.stringify(canonicalizeTarget(ctx.target))).catch(() => null);
+    if (th !== null) payload.target_hash = th;
+  }
   // Process-scoped chaining (v1.89 single-writer): the SERVER emits the blocked
   // (`pending`) + approved-send-went-through (`consumed`) events and joins them to
   // the tamper-evident chain; the owner's CLI actions (`approved` / `denied`) are
@@ -176,48 +184,6 @@ export async function auditSendApprovalEvent(ctx: AuditSendApprovalContext): Pro
   } else {
     await appendBareRow(payload, "audit send-approval");
   }
-}
-
-/** v1.102 (W0) — an inbound-webhook receipt forensic line (the first public surface).
- *  Records the provider, sha256(event_id), verified=true, and whether the row was newly
- *  persisted (false on a dedup hit) — NEVER the body, the sender, or the raw event_id.
- *  Same swallow-errors / bare-append pattern as auditSendApprovalEvent (outside the
- *  v1.89 row_mac chain). `run_id` groups receipts within a process session (F5). */
-export interface AuditWebhookReceiptContext {
-  provider: string;
-  event_id: string;
-  persisted: boolean;
-}
-
-export async function auditWebhookReceiptEvent(ctx: AuditWebhookReceiptContext): Promise<void> {
-  const event_id_hash = crypto.createHash("sha256").update(ctx.event_id).digest("hex");
-  const payload: Record<string, unknown> = {
-    ts: new Date().toISOString(),
-    event: "webhook_receipt",
-    provider: ctx.provider,
-    event_id_hash,
-    verified: true,
-    persisted: ctx.persisted,
-    run_id: getRunId(),
-  };
-  await appendChainedRow(payload, "audit webhook-receipt");
-}
-
-/** v1.102 (W0) — a COUNTS-ONLY rejected-receipt forensic line (security MISSED-4): a
- *  forged / bad-signature flood must leave a trail (it's the only way an operator sees
- *  they're being probed on the public surface), but emitting one line per rejected
- *  request would let the flood fill the log. The listener aggregates rejects into a
- *  fixed 60 s rolling window and emits ONE line per window with the count — NO body, NO
- *  source, NO event-id, NO reason. */
-export async function auditWebhookRejectedEvent(provider: string, count: number): Promise<void> {
-  const payload: Record<string, unknown> = {
-    ts: new Date().toISOString(),
-    event: "webhook_rejected",
-    provider,
-    count,
-    run_id: getRunId(),
-  };
-  await appendChainedRow(payload, "audit webhook-rejected");
 }
 
 // v1.14 Phase 1: cross-account aggregate audit row.

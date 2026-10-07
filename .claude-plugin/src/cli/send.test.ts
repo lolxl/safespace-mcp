@@ -55,6 +55,30 @@ describe("runSendCmd", () => {
     expect(joined).toContain("gmail_send");
     expect(joined).toContain("alice@x.com");
     expect(joined).toContain("hello world");
+    expect(joined).not.toContain("target:");
+  });
+
+  test("list prints a typed public-write target the owner can see", async () => {
+    const fp = computeFingerprint("x_post_create", [], "hello world", "", { kind: "x_post", account_id: "12345" });
+    const id = await createPending(
+      pendingSendsPath(),
+      {
+        fingerprint: fp,
+        tool: "x_post_create",
+        recipients: [],
+        body: "hello world",
+        operator: "",
+        target: { kind: "x_post", account_id: "12345" },
+      },
+      Date.now(),
+      60_000,
+    );
+    const c = cap();
+    await runSendCmd(["list"], c.io);
+    const joined = c.out.join("\n");
+    expect(joined).toContain(id);
+    expect(joined).toContain("x_post_create");
+    expect(joined).toContain("target: account_id=12345");
   });
 
   test("approve flips the record to approved", async () => {

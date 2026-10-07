@@ -74,7 +74,6 @@ describe("TOOL_REGISTRY", () => {
       "gmail_search",
       "gmail_search_all",
       "gmail_send",
-      "inbox_read",
       "line_push_message",
       "mattermost_list_channels",
       "mattermost_list_teams",
@@ -1601,8 +1600,8 @@ describe("v1.97 — Slack READ tools (the first service-token READ)", () => {
     expect(TOOL_REGISTRY.slack_users_list!.inputSchema.required).toBeUndefined();
   });
 
-  test("130 implemented tools (v1.107 +4 Mattermost; v1.114 +2 X read; v1.115 +1 X post)", () => {
-    expect(IMPLEMENTED_TOOLS.size).toBe(130);
+  test("129 implemented tools (v1.107 +4 Mattermost; v1.114 +2 X read; v1.115 +1 X post; inbox_read retired)", () => {
+    expect(IMPLEMENTED_TOOLS.size).toBe(129);
   });
 });
 

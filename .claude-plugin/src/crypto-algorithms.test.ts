@@ -14,17 +14,13 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-  AGENT_TOKEN_HMAC_ALG,
   AUDIT_HMAC_ALG,
-  WEBHOOK_SIGNATURE_HMAC_ALG,
 } from "./crypto-algorithms";
 
 const SRC_DIR = import.meta.dir;
 
 describe("crypto-algorithms — pinned keyed-MAC invariant", () => {
   it("pins every keyed-MAC / signature contract to HMAC-SHA256", () => {
-    expect(AGENT_TOKEN_HMAC_ALG).toBe("sha256");
-    expect(WEBHOOK_SIGNATURE_HMAC_ALG).toBe("sha256");
     expect(AUDIT_HMAC_ALG).toBe("sha256");
   });
 

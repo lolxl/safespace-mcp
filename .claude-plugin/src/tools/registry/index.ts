@@ -18,7 +18,6 @@ import { slidesTools } from "./slides";
 import { githubTools } from "./github";
 import { webTools } from "./web";
 import { fsTools } from "./fs";
-import { inboxTools } from "./inbox";
 import { lineTools } from "./line";
 import { telegramTools } from "./telegram";
 import { discordTools } from "./discord";
@@ -69,7 +68,6 @@ const FRAGMENTS: Record<string, ToolDef> = {
   ...githubTools,
   ...webTools,
   ...fsTools,
-  ...inboxTools,
   ...lineTools,
   ...telegramTools,
   ...discordTools,
@@ -197,8 +195,6 @@ const TOOL_ORDER: readonly string[] = [
   "web_fetch",
   // v1.75 — the second keyless connector (host filesystem read).
   "fs_read",
-  // v1.102 (W0) — the inbound webhook inbox READ (keyless; populated by the listener).
-  "inbox_read",
   // v1.66 Phase C PR 2 — the first service-token, non-Google connector (LINE OA).
   "line_push_message",
   // v1.68 — the second service-token, non-Google connector (Telegram Bot).

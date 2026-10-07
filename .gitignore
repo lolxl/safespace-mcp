@@ -42,11 +42,12 @@ CLAUDE.local.md
 # (they live in the private archive). Convenience copy for local dev only.
 docs-archive/
 
-# Model B deployment (v1.74) — the Compose secret files (FileBackend passphrase,
-# OAuth client secrets) live here mode-600 and MUST NEVER be committed. The
-# committed templates are deploy/*.example.* only.
+# Legacy state from the removed multi-operator deployment — the Compose secret
+# files (FileBackend passphrase, OAuth client secrets) and the operators registry
+# may still sit in an upgraded checkout. They MUST NEVER be committed.
 secrets/
 operators.json
+agent-tokens.json
 
 # graphify knowledge-graph output — generated artifacts (graph data, HTML,
 # AST/semantic cache, cost tracker, temp interpreter paths). Rebuilt on demand

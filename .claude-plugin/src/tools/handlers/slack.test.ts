@@ -16,7 +16,7 @@ const CHAN = "C0123456789";
 const OTHER = "C9876543210";
 
 function ctx(token = "bot-tok"): ToolContext {
-  return { allowedAccounts: null, credential: serviceTokenCred(() => token), tier: "share", audit: NOOP_AUDIT };
+  return { credential: serviceTokenCred(() => token), tier: "share", audit: NOOP_AUDIT };
 }
 
 /** A fetch stub that records the last call and returns a fixed status + body. Slack's
@@ -120,7 +120,7 @@ describe("slackSendMessage — input validation (plain Error, fail-fast)", () =>
 describe("slackSendMessage — credential narrow (R6)", () => {
   test("throws if the credential is not service-token (an OAuth ctx)", async () => {
     const f = fetchStub();
-    const oauthCtx: ToolContext = { allowedAccounts: null, credential: oauthCred(), tier: "share", audit: NOOP_AUDIT };
+    const oauthCtx: ToolContext = { credential: oauthCred(), tier: "share", audit: NOOP_AUDIT };
     await expect(
       slackSendMessage(oauthCtx, { channel: CHAN, text: "x" }, { fetchImpl: f.impl }),
     ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });

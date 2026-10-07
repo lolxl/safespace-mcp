@@ -3,7 +3,7 @@ import { ERROR_CODES, MCPError } from "./errors";
 import type { ConnectorApiFailedName } from "./auth/http/connector-error-contract";
 
 describe("ERROR_CODES table", () => {
-  test("contains 54 names after v1.115 (added x_post_denied_by_policy)", () => {
+  test("contains 54 names (v1.128 added telegram_ack_denied_in_autonomous_mode; inbox_read_failed retired with the webhook listener)", () => {
     expect(Object.keys(ERROR_CODES).sort()).toEqual([
       "account_not_found",
       "batch_too_large",
@@ -21,7 +21,6 @@ describe("ERROR_CODES table", () => {
       "github_approve_denied_by_policy",
       "github_merge_denied_by_policy",
       "github_write_denied_by_policy",
-      "inbox_read_failed",
       "internal_routing_error",
       "keychain_locked",
       "label_limit_exceeded",
@@ -49,6 +48,7 @@ describe("ERROR_CODES table", () => {
       "system_label_forbidden",
       "tainted_recipient_denied",
       "tasks_delete_denied_by_policy",
+      "telegram_ack_denied_in_autonomous_mode",
       "telegram_api_failed",
       "tool_not_found",
       "url_blocked_by_policy",
@@ -124,8 +124,7 @@ describe("ERROR_CODES table", () => {
     // most-negative (the chat.postMessage 200-but-ok:false body model maps here).
     // v1.99 (enforced send-approval gate) added -32050 send_approval_required
     // (supervised mode blocks an unapproved outbound message send).
-    // v1.102 (W0 inbound webhook listener) added -32051 inbox_read_failed — new
-    // most-negative (the durable webhook inbox store was missing/corrupt).
+    // v1.102 added -32051 inbox_read_failed; retired with the webhook listener (gap).
     // v1.106 (youtube_video_update) added -32052 video_target_denied_by_policy — new
     // most-negative (the deny-default video-metadata-write target allowlist).
     // v1.107 (Mattermost self-hosted class-B connector) added -32053 mattermost_api_failed.
@@ -133,14 +132,15 @@ describe("ERROR_CODES table", () => {
     // throws; -32054 was skipped, reserved for the X connector).
     // v1.113 (X/Twitter OAuth provider, class A — ZERO tools yet) added -32054 x_api_failed.
     // v1.115 (x_post_create) added -32056 x_post_denied_by_policy.
+    // v1.128 Q5-B added -32057 telegram_ack_denied_in_autonomous_mode.
     const codes = Object.values(ERROR_CODES).map((s) => s.code).sort((a, b) => a - b);
     expect(codes).toEqual([
+      -32057,
       -32056,
       -32055,
       -32054,
       -32053,
       -32052,
-      -32051,
       -32050,
       -32049,
       -32048,

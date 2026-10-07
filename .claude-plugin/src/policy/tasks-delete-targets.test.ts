@@ -177,7 +177,7 @@ describe("tasks_delete gate — ctx.tier=write, allowlist enforced before SDK", 
   let sdkCalled = false;
 
   function ctxWrite(): ToolContext {
-    return { allowedAccounts: null,
+    return {
       credential: oauthCred("alice@example.com", () => "fake-token"),
       tier: "write",
       audit: NOOP_AUDIT,

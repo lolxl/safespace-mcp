@@ -29,7 +29,6 @@ const ENV_BACKUP = {
   id: process.env.GOOGLE_CLIENT_ID,
   secret: process.env.GOOGLE_CLIENT_SECRET,
   tier: process.env.SAFESPACE_TIER,
-  operator: process.env.SAFESPACE_OPERATOR_ID,
 };
 
 beforeEach(() => {
@@ -42,8 +41,6 @@ afterEach(() => {
   process.env.GOOGLE_CLIENT_SECRET = ENV_BACKUP.secret;
   if (ENV_BACKUP.tier === undefined) delete process.env.SAFESPACE_TIER;
   else process.env.SAFESPACE_TIER = ENV_BACKUP.tier;
-  if (ENV_BACKUP.operator === undefined) delete process.env.SAFESPACE_OPERATOR_ID;
-  else process.env.SAFESPACE_OPERATOR_ID = ENV_BACKUP.operator;
 });
 
 function freshTokenSet(overrides: Partial<TokenSet> = {}): TokenSet {
@@ -110,7 +107,6 @@ const BASE_OK_ROW_KEYS = [
   "argsHash",
   "durationMs",
   "email",
-  "operator",
   "sanitize",
   "source",
   "status",

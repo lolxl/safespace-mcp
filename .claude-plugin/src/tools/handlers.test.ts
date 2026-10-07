@@ -106,7 +106,6 @@ describe("driveGetFileContent — streaming cap (binding gate in `readCappedStre
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -532,7 +531,6 @@ describe("gmailSend (WRITE tool)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -1087,7 +1085,6 @@ describe("gmailSearch (READ tool)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -1242,7 +1239,6 @@ describe("driveSearch (READ tool)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -1432,7 +1428,6 @@ describe("gmailGetMessage (READ tool)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -1605,7 +1600,6 @@ describe("gmailListLabels (READ tool)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -1755,7 +1749,6 @@ describe("gmailCreateLabel (WRITE tool)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -2186,7 +2179,6 @@ describe("gmailModifyMessage (WRITE tool)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
   // Valid Gmail message id format: 16-char lowercase hex.
@@ -2598,7 +2590,6 @@ describe("driveShareFile (SHARE tool)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -3431,48 +3422,8 @@ describe("driveShareFile (SHARE tool)", () => {
     expect(out.id).toBe("perm_anyone");
   });
 
-  /* ───────── v1.80 PR-3 — the selfEmails partition at the drive_share boundary ───────── */
-  test("v1.80 partition: a self target_email OUTSIDE ctx.allowedAccounts → recipient_denied_by_policy", async () => {
-    // Two consented accounts in THIS test's config dir; the operator is
-    // confined (Model B) to mine@own.com only. Pre-v1.80 the GLOBAL self set
-    // exempted theirs@own.com from the allowlist → the share went through.
-    await fs.writeFile(
-      path.join(tmpDir, "accounts.json"),
-      JSON.stringify({
-        version: 2,
-        accounts: [
-          { email: "mine@own.com", scopes: [], added_at: "2026-01-01T00:00:00Z", last_used_at: null },
-          { email: "theirs@own.com", scopes: [], added_at: "2026-01-01T00:00:00Z", last_used_at: null },
-        ],
-      }),
-    );
-    process.env.SAFESPACE_RECIPIENT_ALLOW = ""; // active, zero explicit entries
-    const { __internal } = await import("../policy/recipient-allowlist");
-    __internal.resetSingletons();
-    let handlerCalled = false;
-    const { setGaxiosHandler } = await import("../google-api/test-utils");
-    setGaxiosHandler(async () => {
-      handlerCalled = true;
-      return { data: { id: "perm_x" }, status: 200 };
-    });
-    const confinedCtx: ToolContext = { ...FAKE_CTX, allowedAccounts: ["mine@own.com"] };
-    await expect(
-      driveShareFile(confinedCtx, {
-        file_id: VALID_FILE_ID,
-        share_type: "user",
-        role: "reader",
-        target_email: "theirs@own.com",
-        expiration_days: 7,
-      }),
-    ).rejects.toMatchObject({
-      errorName: "recipient_denied_by_policy",
-      errorData: expect.objectContaining({ tool: "drive_share_file" }),
-    });
-    expect(handlerCalled).toBe(false);
-    __internal.resetSingletons();
-  });
-
-  test("v1.80 partition: Model A (allowedAccounts null) keeps the global self exemption (byte-identical)", async () => {
+  /* ───────── the self-send exemption at the drive_share boundary ───────── */
+  test("a self target_email (consented account) is exempt from the recipient allowlist at the drive_share boundary", async () => {
     await fs.writeFile(
       path.join(tmpDir, "accounts.json"),
       JSON.stringify({
@@ -3488,7 +3439,6 @@ describe("driveShareFile (SHARE tool)", () => {
     __internal.resetSingletons();
     const { setGaxiosHandler } = await import("../google-api/test-utils");
     setGaxiosHandler(async () => ({ data: { id: "perm_self" }, status: 200 }));
-    // FAKE_CTX carries allowedAccounts: null (the Model-A value).
     const out = (await driveShareFile(FAKE_CTX, {
       file_id: VALID_FILE_ID,
       share_type: "user",
@@ -3640,7 +3590,6 @@ describe("driveUnshareFile (RECOVERY tool — bypasses v2.1/v2.2 gates)", () => 
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -4190,7 +4139,6 @@ describe("gmailModifyMessagesBatch (WRITE tool — direct multipart batch)", () 
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
   const VALID_ID_A = "19de5a8c628b9010";
@@ -4650,7 +4598,6 @@ describe("docsGetContent (READ tool, v1.12 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -4964,7 +4911,6 @@ describe("docsCreate (WRITE tool, v1.12 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -5181,7 +5127,6 @@ describe("docsAppendText (limited WRITE tool, v1.12 Phase 2)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -5528,7 +5473,6 @@ describe("calendarListEvents (READ tool, v1.13 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -5779,7 +5723,6 @@ describe("calendarGetEvent (READ tool, v1.13 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -5964,7 +5907,6 @@ describe("calendarCreateEvent (WRITE tool, v1.13 Phase 2)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -7667,7 +7609,6 @@ describe("contactsSearch (READ tool, v1.15 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -7846,7 +7787,6 @@ describe("contactsLookupEmail (READ tool, v1.15 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -8060,7 +8000,6 @@ describe("contactsGet (READ tool, v1.15 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -8212,7 +8151,6 @@ describe("tasksLists (READ tool, v1.19 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -8310,7 +8248,6 @@ describe("tasksList (READ tool, v1.19 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -8507,7 +8444,6 @@ describe("tasksGet (READ tool, v1.19 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -8687,13 +8623,11 @@ describe("contacts cache-warming (sec-rev hooks #1 / #12)", () => {
   const FAKE_CTX_A: ToolContext = {
     credential: oauthCred("accountA@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
   const FAKE_CTX_B: ToolContext = {
     credential: oauthCred("accountB@example.com", () => "ya29.different-token-for-B"),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -8877,7 +8811,6 @@ describe("Phase 3 — gmail_send contact-lookup integration (v1.15)", () => {
   const FAKE_CTX_BASE: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -9341,7 +9274,6 @@ describe("Phase 3 — calendar_create_event contact-lookup integration (v1.15)",
   const FAKE_CTX_BASE: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
   const VALID_START = { dateTime: "2026-06-01T10:00:00Z" };
@@ -9688,7 +9620,6 @@ describe("Phase 4a — sec-rev carry-forward quick wins (v1.15.1)", () => {
   const FAKE_CTX_BASE: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
   const VALID_START = { dateTime: "2026-06-01T10:00:00Z" };
@@ -10169,7 +10100,6 @@ describe("youtubeChannelUploads (READ tool, v1.16 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -10294,7 +10224,6 @@ describe("youtubeVideoGet (READ tool, v1.16 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -10435,7 +10364,6 @@ describe("youtubeSearch (READ tool, v1.16 Phase 1b — per-session burst-limited
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -10619,7 +10547,6 @@ describe("youtubeVideoCommentsList (READ tool, v1.16 Phase 1b — HIGHEST UGC SU
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
 
@@ -10825,7 +10752,6 @@ describe("youtubeVideoCommentPost (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMA
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ commentPostMeta: (m) => {
       captured = m;
     } }),
@@ -10837,7 +10763,6 @@ describe("youtubeVideoCommentPost (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMA
   const ctxWithEgress = (body: string): ToolContext => ({
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ commentPostMeta: (m) => { captured = m; } }),
     egress: { kind: "youtube-comment", videoId: VALID_VIDEO_ID, body },
   });
@@ -11091,7 +11016,6 @@ describe("youtubeCommentReply (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMANENT
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ commentPostMeta: (m) => {
       captured = m;
     } }),
@@ -11101,7 +11025,6 @@ describe("youtubeCommentReply (WRITE tool, v1.16 Phase 2b — PUBLIC + PERMANENT
   const ctxWithEgress = (body: string): ToolContext => ({
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ commentPostMeta: (m) => { captured = m; } }),
     egress: { kind: "youtube-comment", videoId: VALID_VIDEO_ID, body },
   });
@@ -11356,7 +11279,6 @@ describe("calendarUpdateEvent (WRITE tool, v1.17 Phase 1)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ calendarMutationMeta: (m) => {
       captured = m;
     } }),
@@ -11608,7 +11530,6 @@ describe("calendarUpdateEvent (WRITE tool, v1.17 Phase 1)", () => {
     const CTX: ToolContext = {
       credential: oauthCred("me@example.com", () => FAKE_TOKEN),
       get tier() { return currentTier(); },
-      allowedAccounts: null,
       audit: recorderSink({
         calendarMutationMeta: (m) => {
           captured = m;
@@ -11767,7 +11688,6 @@ describe("calendarDeleteEvent (WRITE tool, v1.17 Phase 1)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ calendarMutationMeta: (m) => {
       captured = m;
     } }),
@@ -11902,7 +11822,6 @@ describe("calendarRespond (WRITE tool, v1.17 Phase 1)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("self@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ calendarMutationMeta: (m) => {
       captured = m;
     } }),
@@ -12225,7 +12144,6 @@ describe("docsModifyStructured (WRITE tool, v1.17 Phase 2)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ docsModifyMeta: (m) => {
       captured = m;
     } }),
@@ -12872,7 +12790,6 @@ describe("youtubeCommentDelete (WRITE tool, v1.17 Phase 3 — PERMANENTLY IRREVE
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ commentDeleteMeta: (m) => {
       captured = m;
     } }),
@@ -12960,7 +12877,6 @@ describe("youtubeCommentDelete (WRITE tool, v1.17 Phase 3 — PERMANENTLY IRREVE
     const MULTI_CTX: ToolContext = {
       credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
       get tier() { return currentTier(); },
-      allowedAccounts: null,
       audit: recorderSink({
         commentDeleteMeta: (m) => {
           captured_delete = m;
@@ -13696,7 +13612,6 @@ describe("tasksCreate (WRITE tool, v1.19 Phase 2b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ tasksMutationMeta: (m) => {
       captured = m;
     } }),
@@ -13968,7 +13883,6 @@ describe("tasksUpdate (WRITE tool, v1.19 Phase 2b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ tasksMutationMeta: (m) => {
       captured = m;
     } }),
@@ -14143,7 +14057,6 @@ describe("tasksDelete (WRITE tool, v1.19 Phase 2b — PERMANENTLY DESTRUCTIVE)",
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ tasksMutationMeta: (m) => {
       captured = m;
     } }),
@@ -14301,7 +14214,6 @@ describe("sheetsGetValues (READ tool, v1.20 Phase 1b-1)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
   // 44-char Sheets-style ID matching ^[a-zA-Z0-9_-]{40,100}$.
@@ -14525,7 +14437,6 @@ describe("sheetsGetMetadata (READ tool, v1.20 Phase 1b-1)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     audit: NOOP_AUDIT,
-    allowedAccounts: null,
     get tier() { return currentTier(); },
   };
   const VALID_SPREADSHEET_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-aBcD";
@@ -14761,7 +14672,6 @@ describe("sheetsCreate (WRITE tool, v1.20 Phase 1b-2)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ sheetsMutationMeta: (m) => {
       captured = m;
       capturedAll.push(m);
@@ -15130,7 +15040,6 @@ describe("sheetsAppendValues (WRITE tool, v1.20 Phase 1b-2)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ sheetsMutationMeta: (m) => {
       captured = m;
     } }),
@@ -15494,7 +15403,6 @@ describe("sheetsUpdateValues (WRITE tool, v1.21 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ sheetsMutationMeta: (m) => {
       captured = m;
     } }),
@@ -15991,7 +15899,6 @@ describe("sheetsBatchUpdate (WRITE tool, v1.21 Phase 1b)", () => {
   const FAKE_CTX: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() { return currentTier(); },
-    allowedAccounts: null,
     audit: recorderSink({ sheetsMutationMeta: (m) => {
       captured = m;
     } }),

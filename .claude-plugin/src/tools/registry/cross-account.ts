@@ -4,7 +4,7 @@
 
 import type { ToolDef } from "./types";
 import * as handlers from "../handlers";
-import type { CrossAccountSentinel, ToolContext } from "../types";
+import type { ToolContext } from "../types";
 import type { WithAllAccountsDeps } from "../with-all-accounts";
 import {
   GMAIL_READONLY,
@@ -13,17 +13,14 @@ import {
   TASKS,
 } from "./scopes";
 
-// v1.74 PR-2c — lift the per-operator confinement (operator id + allowedAccounts)
-// off the cross-account sentinel into the deps the `_all` handlers forward to
-// withAllAccounts. The shim's `ctx` IS the CrossAccountSentinel server.ts built;
-// both fields are null under Model A (byte-identical). Type-only imports → no
-// runtime cycle through with-all-accounts → registry.
-function operatorDeps(ctx: ToolContext): WithAllAccountsDeps {
-  const s = ctx as CrossAccountSentinel;
-  // v1.120 (F6 step 2) — forward the sentinel's ToolContext `tier` (the per-operator
-  // privilege tier under Model B; `currentTier()` under Model A) so each per-account
-  // sub-context gets tier parity with the single-account choke point.
-  return { operator: s.operator, confineToAccounts: s.allowedAccounts, tier: s.tier };
+// Lift the tier off the cross-account sentinel into the deps the `_all` handlers
+// forward to withAllAccounts. The shim's `ctx` IS the sentinel server.ts built.
+// Type-only imports → no runtime cycle through with-all-accounts → registry.
+function sentinelDeps(ctx: ToolContext): WithAllAccountsDeps {
+  // v1.120 (F6 step 2) — forward the sentinel's ToolContext `tier` (`currentTier()`
+  // at the choke point) so each per-account sub-context gets tier parity with the
+  // single-account choke point.
+  return { tier: ctx.tier };
 }
 
 export const crossAccountTools: Record<string, ToolDef> = {
@@ -57,7 +54,7 @@ export const crossAccountTools: Record<string, ToolDef> = {
     requiredScopes: [GMAIL_READONLY],
     // Shim — cross-account handler ignores ctx (proxy passes a sentinel
     // for cross_account tools). See registry.ts ToolDef.cross_account JSDoc.
-    handler: async (ctx, args) => handlers.gmailSearchAll(args, operatorDeps(ctx)),
+    handler: async (ctx, args) => handlers.gmailSearchAll(args, sentinelDeps(ctx)),
     min_tier: "read",
     cross_account: true,
   },
@@ -92,7 +89,7 @@ export const crossAccountTools: Record<string, ToolDef> = {
     requiredScopes: [DRIVE_READONLY],
     // Shim — cross-account handler ignores ctx (proxy passes a sentinel
     // for cross_account tools). See registry.ts ToolDef.cross_account JSDoc.
-    handler: async (ctx, args) => handlers.driveSearchAll(args, operatorDeps(ctx)),
+    handler: async (ctx, args) => handlers.driveSearchAll(args, sentinelDeps(ctx)),
     min_tier: "read",
     cross_account: true,
   },
@@ -124,7 +121,7 @@ export const crossAccountTools: Record<string, ToolDef> = {
     requiredScopes: [YOUTUBE_READONLY],
     // Shim — cross-account handler ignores ctx (proxy passes a sentinel
     // for cross_account tools). See registry.ts ToolDef.cross_account JSDoc.
-    handler: async (ctx, args) => handlers.youtubeSubscriptionsAll(args, operatorDeps(ctx)),
+    handler: async (ctx, args) => handlers.youtubeSubscriptionsAll(args, sentinelDeps(ctx)),
     min_tier: "read",
     cross_account: true,
   },
@@ -168,7 +165,7 @@ export const crossAccountTools: Record<string, ToolDef> = {
     requiredScopes: [TASKS],
     // Shim — cross-account handler ignores ctx (proxy passes a sentinel
     // for cross_account tools). See registry.ts ToolDef.cross_account JSDoc.
-    handler: async (ctx, args) => handlers.tasksSearchAll(args, operatorDeps(ctx)),
+    handler: async (ctx, args) => handlers.tasksSearchAll(args, sentinelDeps(ctx)),
     min_tier: "read",
     cross_account: true,
   },

@@ -76,20 +76,11 @@ export const ENV_OUTBOUND_SECRET_EXTRA = "SAFESPACE_OUTBOUND_SECRET_EXTRA";
 export const ENV_YOUTUBE_ANALYTICS_MONETARY = "SAFESPACE_YOUTUBE_ANALYTICS_MONETARY";
 /** Escape hatch: allow FileBackend key-at-rest under autonomous mode (v1.55 F6). */
 export const ENV_ALLOW_KEYFILE_AT_REST = "SAFESPACE_ALLOW_KEYFILE_AT_REST";
-/** Company-deployment hardening assertion (v1.86). When "true" the bootstrap
- *  REFUSES to start unless the SafeSpace-side hardening knobs hold (autonomous
- *  mode on / non-keyfile token store / non-all-interfaces bind). A typo → false →
- *  today's non-enforced posture (safe direction). See `policy/enforced-mode.ts`. */
-export const ENV_ENFORCED = "SAFESPACE_ENFORCED";
-/** TLS-termination attestation for the plaintext HTTP listener (v1.94 A2). When
- *  "true" it RELAXES the enforced-mode all-interfaces bind gate: the operator
- *  attests an external TLS-terminating proxy fronts the listener (and restricts who
- *  can reach it). SafeSpace's listener is `node:http`/plaintext and CANNOT verify
- *  this — it is the same deployment-external responsibility as the egress lockdown
- *  (docs/SOLE-EGRESS.md). A typo → false → the bind gate stays a hard fail (safe
- *  direction). ONLY relaxes the bind gate; never weakens auth. See
- *  `policy/enforced-mode.ts`. */
-export const ENV_TLS_TERMINATED = "SAFESPACE_TLS_TERMINATED";
+/** Opt-in supervised send-approval (v1.99). When "true", named outbound publishes
+ *  are held until the owner runs `safespace send approve`. Default off =
+ *  byte-identical. See
+ *  `policy/send-approval.ts`. */
+export const ENV_REQUIRE_SEND_APPROVAL = "SAFESPACE_REQUIRE_SEND_APPROVAL";
 
 // ── Family 2: legacy `=== "1"` tier escape hatches (tier.ts ONLY) ──────────
 /** Pre-tier escape hatch — promote to write-tier send. Token is `"1"`, NOT
@@ -204,8 +195,6 @@ export const ENV_FS_READ_ROOTS_EXTRA = "SAFESPACE_FS_READ_ROOTS_EXTRA";
 export const ENV_CONFIG_DIR = "SAFESPACE_CONFIG_DIR";
 /** SecretBackend selector (keychain | file; auto-detected when unset). */
 export const ENV_SECRET_BACKEND = "SAFESPACE_SECRET_BACKEND";
-/** Audit-actor operator id stamped on every audit row (v1.36). */
-export const ENV_OPERATOR_ID = "SAFESPACE_OPERATOR_ID";
 /** Passphrase for the encrypted FileBackend no-key-at-rest mode (v1.37). */
 export const ENV_SECRET_PASSPHRASE = "SAFESPACE_SECRET_PASSPHRASE";
 /** LINE channel access token (v1.66). Resolved env→SecretBackend; set via
@@ -228,17 +217,6 @@ export const ENV_MATTERMOST_BOT_TOKEN = "SAFESPACE_MATTERMOST_BOT_TOKEN";
  *  This is CONFIG, not a secret — an https:// URL the OWNER sets once; the connector
  *  pins egress to its host. NOT agent-controlled. */
 export const ENV_MATTERMOST_SERVER_URL = "SAFESPACE_MATTERMOST_SERVER_URL";
-/** Slack Events webhook SIGNING SECRET (v1.102 W0). The HMAC key the inbound webhook
- *  listener verifies each `POST /webhook/slack` against. Resolved env→SecretBackend;
- *  set via `safespace webhook set-secret slack`, NEVER committed or echoed. Distinct
- *  from the bot token (a different secret, a different reserved key). */
-export const ENV_SLACK_WEBHOOK_SECRET = "SAFESPACE_SLACK_WEBHOOK_SECRET";
-/** LINE Messaging-API webhook CHANNEL SECRET (v1.103 W1). The HMAC key the inbound
- *  webhook listener verifies each `POST /webhook/line` against. Resolved
- *  env→SecretBackend; set via `safespace webhook set-secret line`, NEVER committed or
- *  echoed. DISTINCT from the LINE channel ACCESS TOKEN (`SAFESPACE_LINE_CHANNEL_TOKEN`)
- *  the outbound line_push_message uses — a different LINE credential, a different key. */
-export const ENV_LINE_WEBHOOK_SECRET = "SAFESPACE_LINE_WEBHOOK_SECRET";
 // (v1.77 ENV_NOTION_TOKEN retired in v1.78 — Notion became an OAuth source using
 //  NOTION_CLIENT_ID / NOTION_CLIENT_SECRET, read raw via process.env like GitHub's.)
 
@@ -252,50 +230,7 @@ export const ENV_X_CLIENT_ID = "SAFESPACE_X_CLIENT_ID";
 /** X OAuth 2.0 client secret (optional — set for a confidential client; omit for a public/PKCE-only client). */
 export const ENV_X_CLIENT_SECRET = "SAFESPACE_X_CLIENT_SECRET";
 
-// ── Model B transport (v1.73 — PR-1) ───────────────────────────────────────
-// The opt-in Streamable HTTP transport. Default (unset) = stdio = Model A
-// byte-identical. SECURITY: the HTTP listener binds loopback by default and has
-// NO operator auth yet (PR-2) — do NOT bind beyond loopback / a trusted tailnet.
-/** Transport selector ∈ {stdio (default), http}; any other value → stdio. */
-export const ENV_TRANSPORT = "SAFESPACE_TRANSPORT";
-/** HTTP listener port when `SAFESPACE_TRANSPORT=http` (numeric; required in http mode). */
-export const ENV_HTTP_PORT = "SAFESPACE_HTTP_PORT";
-/** HTTP listener bind address (default `127.0.0.1` — loopback only; NEVER defaults
- *  to `0.0.0.0`. For Model B the operator binds the tailscale interface (`100.x.y.z`)
- *  explicitly; a non-loopback bind is the operator's documented choice). */
-export const ENV_HTTP_BIND = "SAFESPACE_HTTP_BIND";
-/** v1.74 PR-2b — path to the operators.json registry (REQUIRED when
- *  `SAFESPACE_TRANSPORT=http`: maps a verified tailnet login → operator policy).
- *  Default-deny: a login absent from the registry is refused. */
-export const ENV_OPERATORS_FILE = "SAFESPACE_OPERATORS_FILE";
-/** v1.74 PR-2b — override for the `tailscaled` LocalAPI unix socket path (used to
- *  verify a connection's tailnet identity via WhoIs). Defaults to the standard
- *  Linux path; settable for non-default installs. */
-export const ENV_TAILSCALE_SOCKET = "SAFESPACE_TAILSCALE_SOCKET";
-/** v1.93 A1 — the HTTP operator-auth source ∈ {tailscale (default), token}; any
- *  other value (unset, a typo) → tailscale (the safe, byte-identical default). In
- *  `token` mode each request authenticates by an `Authorization: Bearer <token>`
- *  resolved (via its HMAC hash) to a registered login, instead of by Tailscale
- *  WhoIs. LOOPBACK-ONLY for now (the enforced-mode bind gate is unchanged). */
-export const ENV_AUTH = "SAFESPACE_AUTH";
-/** v1.93 A1 — path to the agent-tokens.json store (REQUIRED when
- *  `SAFESPACE_AUTH=token`): maps each bearer token's HMAC hash → a login the
- *  operators registry knows. Default-deny: a token absent from the store (or
- *  expired) is refused. Managed via `safespace agent-token {mint,revoke,list}`. */
-export const ENV_AGENT_TOKENS_FILE = "SAFESPACE_AGENT_TOKENS_FILE";
 
-// ── Inbound webhook listener (v1.102 — W0) ─────────────────────────────────
-// The opt-in PUBLIC listener that receives provider-pushed messages. SEPARATE
-// from the MCP transport (its own port + bind), Model-B only. Unset port = no
-// listener = Model A byte-identical. See docs/v1.102-webhook-listener.md.
-/** Inbound webhook listener port. Presence ENABLES the listener (the only knob);
- *  unset = no webhook listener. A separate `node:http` server from the MCP transport. */
-export const ENV_WEBHOOK_PORT = "SAFESPACE_WEBHOOK_PORT";
-/** Inbound webhook listener bind address (default `127.0.0.1`; NEVER defaults to
- *  `0.0.0.0`). The webhook must be publicly reachable by the provider, so the operator
- *  fronts it with a TLS-terminating reverse proxy and (under enforced mode) attests it
- *  via `SAFESPACE_TLS_TERMINATED` — same rule as the MCP `http_bind` gate. */
-export const ENV_WEBHOOK_BIND = "SAFESPACE_WEBHOOK_BIND";
 
 /** True iff `process.env[name]` is the literal lowercase string `"true"`.
  *

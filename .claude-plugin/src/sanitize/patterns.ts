@@ -150,17 +150,26 @@ export const CONFUSABLES: ReadonlyMap<string, string> = new Map([
  *  `Array.from(text).map(...).join("")` which allocates a full code-point array
  *  for every non-ASCII string leaf (expensive on large Docs/Drive payloads).
  *  Every key is a single BMP code unit, so a `u`-flag char class matches
- *  identically to per-code-point iteration — output is byte-for-byte unchanged.
- *  None of the keys are character-class metacharacters (`] \ ^ -`), so they
- *  need no escaping. */
-const CONFUSABLE_KEYS = Array.from(CONFUSABLES.keys());
-// Build-time invariant: no key may be a character-class metacharacter (`] \ ^ -`),
-// otherwise the unescaped join below would malform the class or silently match
-// the wrong set. Fail loudly at module load rather than mis-normalize at runtime.
-if (CONFUSABLE_KEYS.some((k) => /[\]\\^-]/.test(k))) {
-  throw new Error("CONFUSABLES_RE: a confusable key needs escaping — fix the regex builder");
+ *  identically to per-code-point iteration — output is byte-for-byte unchanged. */
+export const CONFUSABLES_RE: RegExp = buildConfusablesRe(Array.from(CONFUSABLES.keys()));
+
+/** Build the confusables character class, failing loudly at module load on a key
+ *  the class cannot represent. Every key must be exactly one non-ASCII code point:
+ *  a multi-code-point key would be split into separate class members (matching the
+ *  wrong set), and an ASCII key would both conflict with sanitize's ASCII fast path
+ *  and could be a class metacharacter (`] \ ^ -`). Exported for the invariant test. */
+export function buildConfusablesRe(keys: readonly string[]): RegExp {
+  for (const k of keys) {
+    const cps = Array.from(k);
+    const cp = k.codePointAt(0) ?? 0;
+    // A lone surrogate is rejected too: two adjacent ones would join into an astral
+    // code point, matching neither key.
+    if (cps.length !== 1 || cp <= 0x7f || (cp >= 0xd800 && cp <= 0xdfff)) {
+      throw new Error("CONFUSABLES_RE: every confusable key must be one non-ASCII code point");
+    }
+  }
+  return new RegExp(`[${keys.join("")}]`, "gu");
 }
-export const CONFUSABLES_RE: RegExp = new RegExp(`[${CONFUSABLE_KEYS.join("")}]`, "gu");
 
 /** Object key names that hold opaque IDs or structural metadata. Their
  * string values pass through sanitize without being wrapped — wrapping

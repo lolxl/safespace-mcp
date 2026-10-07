@@ -1,5 +1,7 @@
 # SafeSpace as the AI Safety Gateway — thesis + enabling architecture
 
+> **Note (2026-10-06):** the multi-operator HTTP transport (Model B) was removed; SafeSpace is stdio-only. Passages below that describe it are historical.
+
 > **Status:** Thesis / north-star design — **Q1–Q8 LOCKED (owner "all-as-recommended",
 > 2026-06-06) + TWO architecture reviews incorporated (2026-06-06):
 > (1) a seam review that re-cut §4/§6/§10, and (2) a whole-codebase audit that

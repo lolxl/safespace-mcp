@@ -26,7 +26,7 @@ import type { ToolContext } from "./types";
 /** A minimal mock whose `tier` is STATIC — unlike the live getter the regression
  *  mocks use. That is the whole point: it must be able to CONTRADICT the env. */
 function ctxWithTier(tier: Tier): ToolContext {
-  return { allowedAccounts: null, credential: oauthCred("alice@example.com", () => "<unused>"), tier, audit: NOOP_AUDIT };
+  return { credential: oauthCred("alice@example.com", () => "<unused>"), tier, audit: NOOP_AUDIT };
 }
 
 /** Run `fn` with `$SAFESPACE_TIER` forced to `value`, restoring the prior value. */

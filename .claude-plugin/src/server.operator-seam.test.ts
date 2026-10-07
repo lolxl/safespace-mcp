@@ -13,7 +13,7 @@ import type { Tier } from "./tier";
 // the default still mirrors env (Model A byte-identical).
 
 function fixedResolver(tier: Tier): OperatorResolver {
-  const op: OperatorContext = { operatorId: "test-op", tier, allowedAccounts: null };
+  const op: OperatorContext = { tier };
   return { resolve: () => op };
 }
 

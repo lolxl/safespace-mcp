@@ -6,36 +6,21 @@
 // external-reaching write tool must be added here AND wired to its gate; the
 // two sentinels then cross-check membership + call-site presence.
 
-// ── Bucket 1: CENTRALIZED_EGRESS ──────────────────────────────────────────────
-// Reaches an external party AND is gated by `tools/egress.ts` (the F3a
-// secret-shape scan + a recipient / target allowlist), with the gate
-// HANDLER-CALLED (the B3 posture). CENTRALIZED_EGRESS ∪ PIPELINE_EGRESS (bucket
-// 1b below) MUST stay identical to the `direction:"outbound-write"` label set,
-// and the two buckets disjoint — the cross-checks in egress-coverage.test.ts pin
-// both, so none can drift apart.
-//
-// B6.1 wave A (github + notion sweep) — the LAST 10 handler-called egress tools
-// (github_create_issue / _comment / update_issue / create_pull_request /
-// merge_pull_request / create_pull_request_review / set_issue_labels;
-// notion_create_page / _append_blocks / _update_page) MIGRATED to PIPELINE_EGRESS:
-// their handler-called enforceGithub*/enforceNotionWriteEgressGates calls became
-// PIPELINE-FIRED by withToolContext via each write tool's egress descriptor
-// (tools/egress-pipeline.ts). This bucket is now EMPTY — the B3 handler-called
-// posture retired for every OAuth write. The bucket + its sentinels stay (a future
-// connector could reintroduce a handler-called gate); an empty set trivially
-// satisfies every cross-check.
-export const CENTRALIZED_EGRESS: ReadonlySet<string> = new Set([]);
-
-// ── Bucket 1b: PIPELINE_EGRESS (B6.1 wave A1; A2a adds x_post_create) ─────────
+// ── Bucket 1: PIPELINE_EGRESS (B6.1 wave A1; A2a adds x_post_create) ──────────
+// The only bucket for gates in `tools/egress.ts`: the former handler-called
+// bucket (CENTRALIZED_EGRESS, the B3 posture) emptied in B6.1 wave A and was
+// removed. A new external-reaching write goes here (descriptor-carried,
+// choke-point-fired) or, for a bespoke gate, into HANDLER_GATED_EXTERNAL.
 // Reaches an external party AND is gated by `tools/egress.ts`, but the gate is
 // PIPELINE-FIRED: the tool's registry def carries an egress descriptor
 // (tools/egress-pipeline.ts) and the tool's choke point (withNonOAuthContext for
-// the service-token sends; withToolContext for x_post_create) fires
+// the service-token sends; withToolContext for every OAuth write — gmail, GitHub,
+// Notion, X, YouTube) fires
 // extract → gate BEFORE the handler runs. The handler must NOT call the gate
 // itself (anti-double-fire — a double fire would double requireSendApproval + the
 // denial audit rows); the call-site sentinel (egress-callsite.test.ts) enforces
-// both directions, and the coverage sentinel pins CENTRALIZED ∪ PIPELINE == the
-// outbound-write label set with the two disjoint.
+// both directions, and the coverage sentinel pins PIPELINE_EGRESS == the
+// outbound-write label set.
 //   line_push_message       → enforceLineEgressGates       (via lineEgressDescriptor)
 //   telegram_send_message   → enforceTelegramEgressGates   (via telegramEgressDescriptor)
 //   discord_send_message    → enforceDiscordEgressGates    (via discordEgressDescriptor)
@@ -170,7 +155,7 @@ export const OWN_DATA_WRITE: ReadonlySet<string> = new Set([
   // third party. (youtube_playlist_update can set a playlist public, but a
   // playlist holds only video references — no agent text is delivered; the
   // public posting surfaces are youtube_video_comment_post / _comment_reply,
-  // bucket 2.)
+  // in PIPELINE_EGRESS.)
   "youtube_comment_delete",
   "youtube_playlist_create",
   "youtube_playlist_update",

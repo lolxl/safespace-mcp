@@ -9,7 +9,7 @@ import { oauthCred, NOOP_AUDIT } from "./test-audit";
 import { driveCopyFile, driveCreateFile, driveRenameFile } from "./handlers";
 import type { ToolContext } from "./types";
 
-const FAKE_CTX: ToolContext = { allowedAccounts: null,
+const FAKE_CTX: ToolContext = {
   credential: oauthCred("alice@example.com", () => "fake-token"),
   audit: NOOP_AUDIT,
   tier: "write",

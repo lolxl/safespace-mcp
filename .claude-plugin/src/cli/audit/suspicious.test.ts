@@ -450,6 +450,25 @@ describe("audit suspicious — opt-in: tier denials", () => {
     expect(text).toContain("grand total:                        3");
   });
 
+  test("--include-tier-denials counts dispatch-boundary tier_hidden refusals", async () => {
+    const ts = new Date(Date.now() - 60_000).toISOString();
+    await writeAuditLines([
+      { ts, tool: "gmail_send", account: null, args_hash: "1".repeat(64), status: "error",
+        duration_ms: 0, sanitize: "applied", error_code: -32001, refusal_reason: "tier_hidden" },
+      { ts, tool: "<unknown>", account: null, args_hash: "2".repeat(64), status: "error",
+        duration_ms: 0, sanitize: "applied", error_code: -32001, refusal_reason: "unknown" },
+    ]);
+    const { io, out } = captureIO();
+    await runCli(
+      ["audit", "suspicious", "--include-tier-denials", "--threshold", "1"],
+      io,
+    );
+    const text = out.join("\n");
+    expect(text).toContain("denied_tier:");
+    // Only the tier_hidden row is a tier denial; an unknown name is not.
+    expect(text).toContain("grand total:                        1");
+  });
+
   test("tier denials default-EXCLUDED without flag", async () => {
     await writeAuditLines([
       tierDenialRow(1, "commentPost"),

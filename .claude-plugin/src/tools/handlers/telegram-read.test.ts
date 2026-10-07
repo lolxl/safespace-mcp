@@ -7,13 +7,13 @@
 // choke-point WRAP is verified at the source level (TELEGRAM_SKIP_FIELDS in source.test.ts).
 // The Telegram Bot API is mocked at the fetch seam (no network).
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { NOOP_AUDIT, oauthCred, serviceTokenCred } from "../test-audit";
 import type { ToolContext } from "../types";
 import { telegramGetUpdates } from "./telegram";
 
 function ctx(token = "bot-tok"): ToolContext {
-  return { allowedAccounts: null, credential: serviceTokenCred(() => token), tier: "read", audit: NOOP_AUDIT };
+  return { credential: serviceTokenCred(() => token), tier: "read", audit: NOOP_AUDIT };
 }
 
 /** A fetch stub returning `body` (JSON) with `status`; records url + init. */
@@ -186,9 +186,51 @@ describe("telegramGetUpdates — error mapping + no-leak", () => {
   });
 
   test("a non-service-token credential (OAuth) is refused — no fetch", async () => {
-    const oauthCtx: ToolContext = { allowedAccounts: null, credential: oauthCred(), tier: "read", audit: NOOP_AUDIT };
+    const oauthCtx: ToolContext = { credential: oauthCred(), tier: "read", audit: NOOP_AUDIT };
     const f = fetchStub(UPDATES_BODY);
     await expect(telegramGetUpdates(oauthCtx, {}, { fetchImpl: f.impl })).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
+  });
+});
+
+describe("v1.128 Q5-B — autonomous must not ACK the Telegram inbox", () => {
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.SAFESPACE_AUTONOMOUS;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.SAFESPACE_AUTONOMOUS;
+    else process.env.SAFESPACE_AUTONOMOUS = saved;
+  });
+
+  test("autonomous + offset=0 is denied (no fetch; offset value not echoed)", async () => {
+    process.env.SAFESPACE_AUTONOMOUS = "true";
+    const f = fetchStub(UPDATES_BODY);
+    const err = (await telegramGetUpdates(ctx(), { offset: 0 }, { fetchImpl: f.impl }).catch((e) => e)) as {
+      errorName?: string;
+      errorData?: Record<string, unknown>;
+      message?: string;
+    };
+    expect(err).toMatchObject({
+      errorName: "telegram_ack_denied_in_autonomous_mode",
+      errorData: { reason: "offset_present" },
+    });
+    expect(JSON.stringify(err.errorData)).not.toContain("0");
+    expect(f.calls).toHaveLength(0);
+  });
+
+  test("autonomous + offset omitted → current read path", async () => {
+    process.env.SAFESPACE_AUTONOMOUS = "true";
+    const f = fetchStub({ ok: true, result: [] });
+    await telegramGetUpdates(ctx(), {}, { fetchImpl: f.impl });
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]!.url).not.toContain("offset=");
+  });
+
+  test("autonomous off + a real next_offset ACK is allowed (byte-identical query)", async () => {
+    delete process.env.SAFESPACE_AUTONOMOUS;
+    const f = fetchStub(UPDATES_BODY);
+    await telegramGetUpdates(ctx(), { offset: 103 }, { fetchImpl: f.impl });
+    expect(f.calls[0]!.url).toContain("offset=103");
   });
 });

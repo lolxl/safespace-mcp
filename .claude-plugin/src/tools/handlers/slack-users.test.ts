@@ -14,7 +14,7 @@ import { slackUserInfo, slackUsersList } from "./slack";
 const USER = "U0123456789";
 
 function ctx(token = "bot-tok"): ToolContext {
-  return { allowedAccounts: null, credential: serviceTokenCred(() => token), tier: "read", audit: NOOP_AUDIT };
+  return { credential: serviceTokenCred(() => token), tier: "read", audit: NOOP_AUDIT };
 }
 
 /** A fetch stub returning `body` (JSON) with `status`; records url + init. */
@@ -148,7 +148,7 @@ describe("slackUserInfo", () => {
   });
 
   test("an OAuth credential is refused (R6 service-token narrow)", async () => {
-    const oauthCtx: ToolContext = { allowedAccounts: null, credential: oauthCred(), tier: "read", audit: NOOP_AUDIT };
+    const oauthCtx: ToolContext = { credential: oauthCred(), tier: "read", audit: NOOP_AUDIT };
     const f = fetchStub(INFO_BODY);
     await expect(slackUserInfo(oauthCtx, { user: USER }, { fetchImpl: f.impl })).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);

@@ -44,7 +44,7 @@ prefix, and the chain verifies from the first hashed row onward.
 
 **What joins the chain, and what doesn't.** Every `auditEnd` row (the per-call
 record) AND every **server-process** forensic / policy row — share / share-denied,
-recipient-denied, webhook receipt / rejected, the cross-account aggregate, and the
+recipient-denied, the cross-account aggregate, and the
 supervised-send `pending` / `consumed` events — is chained. The owner's **CLI**
 send-approval actions (`safespace send approve` / `deny`, which write
 `send_approval_approved` / `_denied`) are emitted by a **separate process** and are
@@ -82,8 +82,8 @@ token-at-rest hardening.
 ## Assumptions
 
 - **Single writer (the server).** The chain assumes one process appends the *chained*
-  rows to a given `audit.jsonl` (both supported topologies are single-writer: Model A =
-  one stdio process; Model B = one in-process container). Two processes appending
+  rows to a given `audit.jsonl` (the supported topology is single-writer:
+  one stdio process). Two processes appending
   *chained* rows would fork the chain — which `verify` surfaces as a break (correctly:
   it *is* an anomaly). The `safespace` CLI may append **unchained** `event` rows
   (send-approval approve/deny) to the same file from a separate process; those are not

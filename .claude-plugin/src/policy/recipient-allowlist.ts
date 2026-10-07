@@ -118,36 +118,16 @@ export function parseAllowlistTokens(input: string | undefined): ParseResult {
  *    - state.kind === "active" + recipient matches any entry in
  *      allow ∪ extra → true.
  *    - Otherwise → false.
- *    - Malformed recipient (no `@`, or `@` at start/end) → false.
- *
- *  v1.80 PR-3 (`confineSelfTo`, optional — the B5 `sanitize(…, skipFields)`
- *  3rd-param precedent): under Model B the implicit SELF exemption is
- *  partitioned to the calling operator's `allowedAccounts` — "self" means the
- *  OPERATOR's own accounts, not every account the deployment ever consented.
- *  `null` (the default — Model A / an unconfined operator) is byte-identical
- *  to the 2-arg form. The partition narrows ONLY the implicit self exemption,
- *  NEVER the explicit allow/extra entries (membership ⟂ provenance): an
- *  explicitly-allowlisted recipient stays allowed regardless of confinement.
- *  An EMPTY set = zero self exemption (a registry operator with no OAuth
- *  accounts). Matching stays exact case-preserving: `allowedAccounts` entries
- *  and `selfEmails` come from the SAME source strings (`accounts.json`
- *  emails; the registry cross-check guarantees ⊆). */
+ *    - Malformed recipient (no `@`, or `@` at start/end) → false. */
 export function isRecipientAllowed(
   recipient: string,
   state: AllowlistState,
-  confineSelfTo: ReadonlySet<string> | null = null,
 ): boolean {
   if (state.kind === "off") return true;
   if (typeof recipient !== "string" || recipient.length === 0) return false;
 
-  // Self-send implicit (exact case-preserving match on full email),
-  // intersected with the operator's confinement set when one is supplied.
-  if (
-    state.selfEmails.has(recipient) &&
-    (confineSelfTo === null || confineSelfTo.has(recipient))
-  ) {
-    return true;
-  }
+  // Self-send implicit (exact case-preserving match on full email).
+  if (state.selfEmails.has(recipient)) return true;
 
   const atIdx = recipient.indexOf("@");
   if (atIdx < 1 || atIdx === recipient.length - 1) return false;

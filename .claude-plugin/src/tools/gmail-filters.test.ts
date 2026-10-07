@@ -12,12 +12,12 @@ import { gmailCreateFilter, gmailDeleteFilter, gmailListFilters } from "./handle
 import { MCPError } from "../errors";
 import type { ToolContext } from "./types";
 
-const FAKE_CTX: ToolContext = { allowedAccounts: null,
+const FAKE_CTX: ToolContext = {
   credential: oauthCred("alice@example.com", () => "fake-token"),
   audit: NOOP_AUDIT,
   tier: "write",
 };
-const READ_CTX: ToolContext = { allowedAccounts: null,
+const READ_CTX: ToolContext = {
   credential: oauthCred("alice@example.com", () => "fake-token"),
   audit: NOOP_AUDIT,
   tier: "read",

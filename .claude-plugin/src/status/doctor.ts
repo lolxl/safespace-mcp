@@ -17,6 +17,7 @@ import {
 } from "../policy/youtube-comment-targets";
 import { getYoutubeSearchBurstLimit } from "../policy/youtube-search-burst";
 import { readStartupMarker } from "../startup-marker";
+import { retiredSettingsSet } from "../policy/retired-settings";
 import {
   ENV_TIER,
   ENV_YOUTUBE_COMMENT_TARGETS,
@@ -65,6 +66,19 @@ export async function runDoctor(opts: DoctorOptions, io: CliIO): Promise<DoctorR
     value: tierValid
       ? (process.env[ENV_TIER] ?? "unset (defaults to read)")
       : "invalid value (expected: read|write|share|unset)",
+  });
+
+  // Settings of removed features — the server refuses to start while any is set (and
+  // SAFESPACE_OPERATOR_ID also stops the CLI, so this row shows only for the others).
+  // Names only, never values.
+  const retired = retiredSettingsSet();
+  checks.push({
+    name: "retired_settings",
+    status: retired.length === 0 ? "pass" : "fail",
+    value:
+      retired.length === 0
+        ? "none set in this environment (the plugin launcher also loads <config dir>/.env — check it too)"
+        : `server refuses to start until unset: ${retired.join(", ")}`,
   });
 
   // Config dir mode. TOCTOU note (L-1 sec-rev, #61 review): the mode check

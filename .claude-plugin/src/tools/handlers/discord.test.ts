@@ -16,7 +16,7 @@ const CHAN = "123456789012345678";
 const OTHER = "987654321098765432";
 
 function ctx(token = "bot-tok"): ToolContext {
-  return { allowedAccounts: null, credential: serviceTokenCred(() => token), tier: "share", audit: NOOP_AUDIT };
+  return { credential: serviceTokenCred(() => token), tier: "share", audit: NOOP_AUDIT };
 }
 
 /** A fetch stub that records the last call and returns a fixed status. */
@@ -100,7 +100,7 @@ describe("discordSendMessage — input validation (plain Error, fail-fast)", () 
 describe("discordSendMessage — credential narrow (R6)", () => {
   test("throws if the credential is not service-token (an OAuth ctx)", async () => {
     const f = fetchStub(200);
-    const oauthCtx: ToolContext = { allowedAccounts: null, credential: oauthCred(), tier: "share", audit: NOOP_AUDIT };
+    const oauthCtx: ToolContext = { credential: oauthCred(), tier: "share", audit: NOOP_AUDIT };
     await expect(
       discordSendMessage(oauthCtx, { channel_id: CHAN, content: "x" }, { fetchImpl: f.impl }),
     ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });

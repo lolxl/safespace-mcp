@@ -12,6 +12,7 @@ import { toGoogleError } from "../../google-api/errors";
 import { type AncestorFetcher, checkShareAllowed, getAncestorCache, getWhitelistState } from "../../policy/drive-whitelist";
 import { isAutonomousMode } from "../../policy/autonomous-mode";
 import { getAllowlistState, isRecipientAllowed } from "../../policy/recipient-allowlist";
+import { requireSendApproval } from "../../policy/send-approval";
 import { requireGoogle, HEADER_INJECTION_RE } from "./shared";
 import type { ToolContext } from "../types";
 
@@ -334,12 +335,9 @@ export async function driveShareFile(
   if (shareType === "user" && targetEmail !== null) {
     const recipientStartMs = Date.now();
     const allowlistState = await getAllowlistState();
-    // v1.80 PR-3 — partition the implicit SELF exemption to the calling
-    // operator's allowedAccounts (Model B); null (Model A) → no-op. Mirrors
-    // the gmail egress gate so the partition cannot be bypassed via share.
-    const confineSelfTo =
-      ctx.allowedAccounts === null ? null : new Set(ctx.allowedAccounts);
-    if (!isRecipientAllowed(targetEmail, allowlistState, confineSelfTo)) {
+    // Every consented account keeps the implicit self exemption (one operator per
+    // process).
+    if (!isRecipientAllowed(targetEmail, allowlistState)) {
       const hash = await hashTargetEmail(targetEmail).catch(() => null);
       await auditRecipientDeniedEvent({
         tool: "drive_share_file",
@@ -449,6 +447,18 @@ export async function driveShareFile(
     throw new MCPError("share_denied_by_policy", {
       file_id: fileId,
       reason: decision.reason,
+    });
+  }
+
+  // v1.128 Q3-B — supervised approval for share_type=anyone only (user shares stay
+  // on the recipient allowlist). LAST before the SDK so a whitelist miss never
+  // creates a pending. No-op when the flag is off.
+  if (shareType === "anyone") {
+    await requireSendApproval(ctx, {
+      tool: "drive_share_file",
+      recipients: [],
+      body: "",
+      target: { kind: "drive_share", file_id: fileId, share_type: "anyone", role },
     });
   }
 

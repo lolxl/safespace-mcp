@@ -8,6 +8,8 @@ Mode: Builder
 
 > Originally written in Chinese; translated to English 2026-06-11 (content preserved verbatim in meaning).
 
+> **Note (2026-10-06):** the multi-operator HTTP transport (Model B) was removed; SafeSpace is stdio-only. Passages below that describe it are historical.
+
 ## Problem Statement
 
 The user (owner: themselves) holds several Google accounts at once (personal + work + side-project / client accounts) and wants to operate Gmail and Google Drive with AI through Claude Code or another MCP client. 7+ open-source multi-account Gmail MCP servers already exist (`taylorwilsdon/google_workspace_mcp`, `dmorrill/gmail-mcp-multi`, `3vening/gmail-mcp`, …), but none of them simultaneously clears the user's acceptance bar on three specific security dimensions — hence the decision to build one.

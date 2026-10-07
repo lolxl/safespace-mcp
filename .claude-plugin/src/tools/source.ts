@@ -124,15 +124,6 @@ export interface ResolveAccountDeps {
   readonly explicitAccountId?: string;
   /** The choke point's per-source in-memory last-used account (weakest tier). */
   readonly lastUsed: string | null;
-  /** v1.74 PR-2c — the operator's account-confinement set (`OperatorContext
-   *  .allowedAccounts`). `null` = no restriction (Model A — single operator owns
-   *  every account → byte-identical). Model B: a default-selection fallback
-   *  (active-file / last-used) NOT in the set is ignored (a shared global default
-   *  can't poison an operator who lacks it), and a resolved account outside the set
-   *  → `account_not_found` (the SAME error as a nonexistent account — no oracle that
-   *  it exists for another operator). An EMPTY array means "zero accounts" (the
-   *  operator can resolve none), NOT null. */
-  readonly allowedAccounts?: readonly string[] | null;
   /** Test seam; defaults to the real active-account file read. */
   readonly readActiveImpl?: () => Promise<string | null>;
   /** Test seam; defaults to the real accounts.json index load. */
@@ -222,7 +213,7 @@ export type Source = OAuthSource | NonOAuthSource;
  *  silently cross-wire. The produced descriptor's `authorize` is the service-token
  *  no-op (no OAuth scope; tier is proxy-enforced; token PRESENCE is enforced here in
  *  `resolveCredential`, throwing `errorName{no_token}`). NOT used for the OAuth
- *  sources — their `resolveAccount`/confinement logic stays hand-written. */
+ *  sources — their `resolveAccount` logic stays hand-written. */
 function makeServiceTokenSource(opts: {
   readonly id: ServiceName;
   readonly storeKey: ServiceName;
@@ -271,30 +262,11 @@ export const googleWorkspace: OAuthSource = {
     // file (`safespace account-switch`) → 3. the choke point's per-source
     // in-memory last-used; then validate against accounts.json. account_not_found
     // payloads are byte-identical to the pre-lift inline throws.
-    // v1.74 PR-2c — the operator's confinement set, interned ONCE as a Set (O(1)
-    // membership, no repeated O(n) scan); `null` = unrestricted (Model A).
-    const allowSet = deps.allowedAccounts == null ? null : new Set(deps.allowedAccounts);
-    const allowed = (id: string | null): id is string =>
-      id != null && (allowSet == null || allowSet.has(id));
     const explicit = deps.explicitAccountId ?? null;
-    const persistedRaw = explicit ? null : await (deps.readActiveImpl ?? readActive)();
-    // Confine the DEFAULT-SELECTION fallbacks (active-file, last-used): a shared
-    // global default the operator can't use is ignored (skipped), not an error.
-    // Model A (allow == null) → `allowed` is always true → these are byte-identical.
-    const persisted = allowed(persistedRaw) ? persistedRaw : null;
-    const lastUsed = allowed(deps.lastUsed) ? deps.lastUsed : null;
-    const accountId = explicit ?? persisted ?? lastUsed;
+    const persisted = explicit ? null : await (deps.readActiveImpl ?? readActive)();
+    const accountId = explicit ?? persisted ?? deps.lastUsed;
     if (!accountId) {
       throw new MCPError("account_not_found", { reason: "no_active_account" });
-    }
-    // Confinement guard — a resolved account (notably an EXPLICIT out-of-set
-    // `args.account_id`) outside the operator's set → account_not_found, byte-
-    // IDENTICAL to the index-miss throw below (the echoed `email` is the caller's
-    // OWN input, returned the same whether the account exists for another operator
-    // or not at all → no oracle; diverging the two payloads would CREATE one).
-    // Model A: never fires.
-    if (allowSet != null && !allowSet.has(accountId)) {
-      throw new MCPError("account_not_found", { email: accountId });
     }
     const idxLoader = deps.loadIndexImpl ?? loadIndex;
     const idx = await idxLoader();
@@ -378,41 +350,6 @@ export const fsRead: NonOAuthSource = {
   id: "fs-read",
   authModel: "none",
   skipFields: new Set(),
-  authorize() {
-    // keyless — no scope, no token; tier is enforced by the proxy + min_tier.
-  },
-  async resolveCredential(): Promise<Credential> {
-    return { kind: "none" };
-  },
-};
-
-/** v1.102 (W0) — the `webhook` source skipFields, authored against the PERSISTED
- *  NORMALIZED inbox row (docs/v1.102 §4.2), NOT a provider's wire envelope (the v1.98
- *  TELEGRAM_SKIP_FIELDS lesson — a per-source set must match the EXACT keys the handler
- *  emits). The opaque ids/timestamps SKIP; `sender_name` + `text` are OUT → they WRAP
- *  as an untrusted source (inbound message content = the highest injection surface). */
-const WEBHOOK_SKIP_FIELDS: ReadonlySet<string> = new Set([
-  "provider",
-  "event_id",
-  "seq",
-  "received_at",
-  "expires_at",
-  "provider_message_id",
-  "ts",
-  "sender_id",
-  "channel_id",
-]);
-
-/** v1.102 (W0) — the inbound-webhook inbox as a KEYLESS source. `inbox_read` reads a
- *  LOCAL store the listener populated → `authModel:"none"` (no account, no token; the
- *  signing secret is LISTENER infra, not a tool credential — docs/v1.102 §5.0). Routes
- *  through `withNonOAuthContext`; the choke point WRAPS `sender_name`/`text` via
- *  skipFields. The verify/secret machinery lives listener-side (transport/webhook.ts +
- *  webhook/verify/*), deliberately OFF this Source seam. */
-export const webhook: NonOAuthSource = {
-  id: "webhook",
-  authModel: "none",
-  skipFields: WEBHOOK_SKIP_FIELDS,
   authorize() {
     // keyless — no scope, no token; tier is enforced by the proxy + min_tier.
   },
@@ -522,44 +459,28 @@ export const notion: OAuthSource = {
   async resolveAccount(_toolDef, deps): Promise<ResolvedAccount> {
     // v1.79 multi-workspace — mirrors googleWorkspace.resolveAccount: explicit
     // args.account_id (resolved id-OR-name) → active workspace → per-source last-used; then
-    // validate against the notion index + the operator's confinement set. Cross-provider
-    // safety: reads ONLY the notion store, never google accounts.json.
-    const allowSet = deps.allowedAccounts == null ? null : new Set(deps.allowedAccounts);
-    const allowed = (id: string | null): id is string =>
-      id != null && (allowSet == null || allowSet.has(id));
+    // validate against the notion index. Cross-provider safety: reads ONLY the notion
+    // store, never google accounts.json.
     const accounts = await readNotionAccounts();
-    // Confine the LOOKUP SCOPE to the operator's set (sec-rev nit): name/id resolution only
-    // ever sees the operator's own workspaces, so an explicit name can never even resolve to
-    // another operator's workspace (no cross-operator name-match) — and an "ambiguous" name
-    // only reflects the operator's OWN duplicates. Model A (allowSet null) → visible == accounts.
-    const visible = allowSet == null ? accounts : accounts.filter((a) => allowSet.has(a.workspaceId));
-    // Explicit account_id may be a workspace id OR a case-insensitive name → resolve it within
-    // the operator's set. An unknown / ambiguous value → account_not_found echoing the caller's
-    // OWN input (byte-identical to "unknown" → no oracle about which workspaces exist).
+    // Explicit account_id may be a workspace id OR a case-insensitive name. An unknown /
+    // ambiguous value → account_not_found echoing the caller's OWN input (byte-identical to
+    // "unknown" → no oracle about which workspaces exist).
     let explicitId: string | null = null;
     if (deps.explicitAccountId != null) {
-      const match = findNotionWorkspace(deps.explicitAccountId, visible);
+      const match = findNotionWorkspace(deps.explicitAccountId, accounts);
       if (match === "ambiguous" || match == null) {
         throw new MCPError("account_not_found", { email: deps.explicitAccountId });
       }
       explicitId = match.workspaceId;
     }
-    // Default-selection fallbacks (active, last-used) are CONFINED: a shared default the
-    // operator can't use is skipped (not an error). Model A (allow == null) → byte-identical.
-    const activeRaw = explicitId ? null : await readNotionActiveWorkspace();
-    const active = allowed(activeRaw) ? activeRaw : null;
-    const lastUsed = allowed(deps.lastUsed) ? deps.lastUsed : null;
-    const accountId = explicitId ?? active ?? lastUsed;
+    const active = explicitId ? null : await readNotionActiveWorkspace();
+    const accountId = explicitId ?? active ?? deps.lastUsed;
     if (!accountId) {
       throw new MCPError("account_not_found", { reason: "no_active_account" });
     }
-    // The single confinement + index-validation backstop: `accountId` must name a workspace
-    // in the operator's VISIBLE set. This catches an out-of-set explicit (already filtered to
-    // `visible`, so this is belt-and-suspenders for it) AND a stale `lastUsed` pointing at a
-    // deleted workspace. Echoes the caller's OWN input, byte-identical to the unknown throws
-    // above → no oracle. (A separate `allowSet.has(accountId)` guard would be dead: every
-    // accountId here is from `visible` or passed `allowed()`, so it is always in-set.)
-    if (!visible.some((a) => a.workspaceId === accountId)) {
+    // Index validation: `accountId` must name a known workspace (catches a stale `lastUsed`
+    // pointing at a deleted workspace). Echoes the caller's OWN input → no oracle.
+    if (!accounts.some((a) => a.workspaceId === accountId)) {
       throw new MCPError("account_not_found", { email: deps.explicitAccountId ?? accountId });
     }
     return { accountId, scopes: [] };
@@ -614,44 +535,28 @@ export const x: OAuthSource = {
   async resolveAccount(_toolDef, deps): Promise<ResolvedAccount> {
     // Multi-account — mirrors notion.resolveAccount: explicit args.account_id
     // (resolved id-OR-username) → active account → per-source last-used; then
-    // validate against the x index + the operator's confinement set. Cross-provider
-    // safety: reads ONLY the x store, never google accounts.json / notion.
-    const allowSet = deps.allowedAccounts == null ? null : new Set(deps.allowedAccounts);
-    const allowed = (id: string | null): id is string =>
-      id != null && (allowSet == null || allowSet.has(id));
+    // validate against the x index. Cross-provider safety: reads ONLY the x store, never
+    // google accounts.json / notion.
     const accounts = await readXAccounts();
-    // Confine the LOOKUP SCOPE to the operator's set (sec-rev nit): name/id resolution
-    // only ever sees the operator's own accounts, so an explicit name can never even
-    // resolve to another operator's account (no cross-operator name-match) — and an
-    // "ambiguous" name only reflects the operator's OWN duplicates. Model A
-    // (allowSet null) → visible == accounts.
-    const visible = allowSet == null ? accounts : accounts.filter((a) => allowSet.has(a.id));
-    // Explicit account_id may be a user id OR a case-insensitive username → resolve it
-    // within the operator's set. An unknown / ambiguous value → account_not_found
-    // echoing the caller's OWN input (byte-identical to "unknown" → no oracle about
-    // which accounts exist).
+    // Explicit account_id may be a user id OR a case-insensitive username. An unknown /
+    // ambiguous value → account_not_found echoing the caller's OWN input (byte-identical
+    // to "unknown" → no oracle about which accounts exist).
     let explicitId: string | null = null;
     if (deps.explicitAccountId != null) {
-      const match = findXAccount(deps.explicitAccountId, visible);
+      const match = findXAccount(deps.explicitAccountId, accounts);
       if (match === "ambiguous" || match == null) {
         throw new MCPError("account_not_found", { email: deps.explicitAccountId });
       }
       explicitId = match.id;
     }
-    // Default-selection fallbacks (active, last-used) are CONFINED: a shared default
-    // the operator can't use is skipped (not an error). Model A (allow == null) →
-    // byte-identical.
-    const activeRaw = explicitId ? null : await readXActiveAccount();
-    const active = allowed(activeRaw) ? activeRaw : null;
-    const lastUsed = allowed(deps.lastUsed) ? deps.lastUsed : null;
-    const accountId = explicitId ?? active ?? lastUsed;
+    const active = explicitId ? null : await readXActiveAccount();
+    const accountId = explicitId ?? active ?? deps.lastUsed;
     if (!accountId) {
       throw new MCPError("account_not_found", { reason: "no_active_account" });
     }
-    // The single confinement + index-validation backstop: `accountId` must name an
-    // account in the operator's VISIBLE set. Echoes the caller's OWN input,
-    // byte-identical to the unknown throws above → no oracle.
-    if (!visible.some((a) => a.id === accountId)) {
+    // Index validation: `accountId` must name a known account. Echoes the caller's OWN
+    // input → no oracle.
+    if (!accounts.some((a) => a.id === accountId)) {
       throw new MCPError("account_not_found", { email: deps.explicitAccountId ?? accountId });
     }
     return { accountId, scopes: [] };
@@ -716,10 +621,6 @@ export const github: OAuthSource = {
     // override (or the per-source last-used) must MATCH the stored login. G3's consent
     // writes the account; until then readGithubAccount() is null → account_not_found.
     // Cross-provider safety: reads ONLY the github store, never google accounts.json.
-    // v1.74 PR-2c — `deps.allowedAccounts` (the operator confinement set) has NO
-    // effect here by design: github is single-account, so there is at most one login
-    // and confining it would have no semantic value. Revisit if github becomes
-    // multi-account (then mirror google's confinement guard).
     const stored = await readGithubAccount();
     const accountId = deps.explicitAccountId ?? stored?.login ?? deps.lastUsed;
     if (!accountId) {
@@ -754,7 +655,6 @@ const SOURCES: Readonly<Record<string, Source>> = {
   "google-workspace": googleWorkspace,
   "web-fetch": webFetch,
   "fs-read": fsRead,
-  webhook,
   line,
   telegram,
   discord,

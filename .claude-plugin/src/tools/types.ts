@@ -252,12 +252,11 @@ export interface ToolContext {
    *  same oauth variant (with-all-accounts.ts, v1.121 B6.1 wave C). */
   readonly credential: Credential;
   /** v1.38 BLOCKER 3 — the privilege tier for THIS call, resolved ONCE at the
-   *  with-context.ts choke point (next to the operator id). Handlers read
+   *  with-context.ts choke point. Handlers read
    *  `ctx.tier` for their defense-in-depth re-checks instead of re-reading the
-   *  process-global `currentTier()`. Under Model A (each operator = own local
-   *  process) this equals `currentTier()`; the field is where Model B's
-   *  per-session tier will be sourced WITHOUT touching any handler. Required
-   *  (not optional) so no site can silently fall back to the global read. */
+   *  process-global `currentTier()` (one operator per process, so the two
+   *  agree). Required (not optional) so no site can silently fall back to the
+   *  global read. */
   readonly tier: Tier;
   /** v1.64 Phase B (B1 — audit facade) — the per-call forensic sink. REPLACES
    *  the 10 optional `record*` closures (the v1.15 / v1.16 / v1.17 / v1.19 /
@@ -270,14 +269,6 @@ export interface ToolContext {
    *  The cross-account `_all` fan-out hands each per-account sub-call its OWN
    *  accumulator-backed sink (with-all-accounts.ts, v1.121 B6.1 wave C). */
   readonly audit: AuditSink;
-  /** v1.80 PR-3 — the calling operator's account-confinement set (the PR-2c
-   *  `OperatorContext.allowedAccounts`), now carried per call so the egress
-   *  layer can partition the recipient-allowlist SELF-SEND exemption to the
-   *  operator's own accounts (docs/v1.80-model-b-pr3-self-partition-registry-reload.md
-   *  §1). `null` = unrestricted (Model A / an unconfined operator) — the
-   *  partition is a no-op. Required (not optional), the v1.38 `tier`
-   *  precedent: an absent-field default would be a silent fail-OPEN. */
-  readonly allowedAccounts: readonly string[] | null;
   /** v1.116 — set to true by the centralized egress gates (tools/egress.ts) the moment
    *  a composite enforce*EgressGates entry point is INVOKED (before its own checks run,
    *  so a gate that DENIES still counts as fired). Read by the choke points after a
@@ -293,21 +284,14 @@ export interface ToolContext {
    *  its own recomputation, on the wire — the gate's return value IS the vetted
    *  bytes. Absent for void-gate descriptor tools (the 5 A1 service-token sends)
    *  and for every non-descriptor tool. Mutable by design (set once per attempt;
-   *  carried across the 401-retry ctx rebuild, never re-fired). */
+   *  carried across the handler-stage 401-retry ctx rebuild, never re-fired there). */
   egress?: EgressShape;
-}
-
-/** v1.74 PR-2c — the cross-account `_all` dispatch sentinel. These tools bypass
- *  `withToolContext` (they have no single resolved account — they fan out via
- *  `withAllAccounts`) and the registry shim DROPS `ctx`, so the per-operator
- *  identity that the fan-out needs (the operator id for the inner audit rows) rides
- *  on this WIDENED sentinel: `server.ts` builds it from the call's
- *  `OperatorContext`; the `_all` shims read `operator` / `allowedAccounts` off it
- *  and forward them into `withAllAccounts`. Both are null under Model A →
- *  byte-identical. (`allowedAccounts` itself moved onto `ToolContext` in v1.80
- *  PR-3 — the sentinel now only widens with `operator`.) */
-export interface CrossAccountSentinel extends ToolContext {
-  readonly operator: string | null;
+  /** Fingerprint of a send-approval that THIS call already consumed. The 401-retry
+   *  ctx rebuild copies it so a handler-called `requireSendApproval` (drive_share_file
+   *  anyone) does not burn the owner's approval on the transparent refresh retry.
+   *  Pipeline-fired tools do not need this: their gate runs once and is carried via
+   *  `egress`. Mutable; never reset within a call. */
+  sendApprovalConsumedFingerprint?: string;
 }
 
 export type ToolHandler<A = Record<string, unknown>, R = unknown> = (

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildConfusablesRe,
   CONFUSABLES,
+  CONFUSABLES_RE,
   detectCredentialLure,
   PATTERNS,
   SKIP_FIELDS,
@@ -123,6 +125,31 @@ describe("CONFUSABLES", () => {
 
   test("includes the canonical Greek 'α' (U+03B1) → Latin 'a' mapping", () => {
     expect(CONFUSABLES.get("α")).toBe("a");
+  });
+});
+
+describe("buildConfusablesRe — key invariant", () => {
+  test("the shipped key set builds the shipped CONFUSABLES_RE", () => {
+    const re = buildConfusablesRe(Array.from(CONFUSABLES.keys()));
+    expect(re.source).toBe(CONFUSABLES_RE.source);
+    expect(re.flags).toBe(CONFUSABLES_RE.flags);
+  });
+
+  test.each([
+    ["multi-code-point key (would split into separate class members)", "\u026A-"],
+    ["ASCII metacharacter key", "-"],
+    ["ASCII letter key (conflicts with the ASCII fast path)", "a"],
+    ["closing-bracket key", "]"],
+    ["empty key", ""],
+    ["lone high surrogate (would pair with a neighbouring low surrogate)", "\uD800"],
+    ["lone low surrogate", "\uDC00"],
+  ])("rejects a %s", (_label, bad) => {
+    expect(() => buildConfusablesRe(["\u0430", bad])).toThrow(/one non-ASCII code point/);
+  });
+
+  test("accepts a single astral code point", () => {
+    const re = buildConfusablesRe(["\u{1D400}"]);
+    expect(re.test("\u{1D400}")).toBe(true);
   });
 });
 

@@ -38,7 +38,7 @@ function githubCred(token = "gho_SECRET_TOKEN"): Credential {
   return { kind: "oauth", provider: "github", accountId: "octocat", getAccessToken: () => token };
 }
 function ctx(token = "gho_SECRET_TOKEN"): ToolContext {
-  return { allowedAccounts: null, credential: githubCred(token), tier: "read", audit: NOOP_AUDIT };
+  return { credential: githubCred(token), tier: "read", audit: NOOP_AUDIT };
 }
 
 // B6.1 wave A — the github egress gates are now PIPELINE-FIRED (with-context.ts via each
@@ -154,7 +154,7 @@ describe("github read handlers — input validation (path-traversal + clamps)", 
 describe("github read handlers — cross-provider-token backstop (R8)", () => {
   test("a GOOGLE credential handed to a github handler THROWS before any fetch", async () => {
     const f = fetchStub([]);
-    const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("alice@example.com", () => "g-token"), tier: "read", audit: NOOP_AUDIT };
+    const googleCtx: ToolContext = { credential: oauthCred("alice@example.com", () => "g-token"), tier: "read", audit: NOOP_AUDIT };
     await expect(githubListRepos(googleCtx, {}, { fetchImpl: f.impl })).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
     expect(f.calls).toHaveLength(0);
   });
@@ -339,7 +339,7 @@ describe("v1.76 — GitHub READ-deepening handlers", () => {
 
   test("cross-provider backstop: a GOOGLE credential throws before any fetch", async () => {
     const f = fetchStub({});
-    const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("alice@example.com", () => "g-token"), tier: "read", audit: NOOP_AUDIT };
+    const googleCtx: ToolContext = { credential: oauthCred("alice@example.com", () => "g-token"), tier: "read", audit: NOOP_AUDIT };
     for (const call of [
       () => githubGetRepo(googleCtx, { owner: "o", repo: "r" }, { fetchImpl: f.impl }),
       () => githubGetFileContent(googleCtx, { owner: "o", repo: "r", path: "a.ts" }, { fetchImpl: f.impl }),
@@ -472,7 +472,7 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
 
   test("a GOOGLE credential → R8 backstop throws before any gate/fetch", async () => {
     const f = fetchStub({}, 201);
-    const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
+    const googleCtx: ToolContext = { credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubCreateIssue(googleCtx, { owner: "octo", repo: "repo", title: "x" }, { fetchImpl: f.impl }),
     ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
@@ -481,7 +481,7 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
 
   test("interactive (non-autonomous) secret-shape body → the pipeline gate records a flag, does NOT block", async () => {
     const audit = capturingAudit();
-    const ctxFlag: ToolContext = { allowedAccounts: null, credential: githubCred(), tier: "write", audit: audit.sink };
+    const ctxFlag: ToolContext = { credential: githubCred(), tier: "write", audit: audit.sink };
     const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34Gk\n-----END RSA PRIVATE KEY-----";
     // Gate resolves (does NOT throw) — the handler would then proceed to write.
     await fireGate("github_create_issue", ctxFlag, { owner: "octo", repo: "repo", title: "hi", body: pem });
@@ -559,7 +559,7 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
 
   test("create_pull_request: a GOOGLE credential → R8 backstop throws before any gate/fetch", async () => {
     const f = fetchStub({}, 201);
-    const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
+    const googleCtx: ToolContext = { credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubCreatePullRequest(googleCtx, { owner: "octo", repo: "repo", title: "x", head: "f", base: "main" }, { fetchImpl: f.impl }),
     ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
@@ -619,7 +619,7 @@ describe("github WRITE handlers — the public-surface egress slice (v1.71)", ()
 
   test("set_issue_labels: a GOOGLE credential → R8 backstop throws before any gate/fetch", async () => {
     const f = fetchStub([], 200);
-    const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
+    const googleCtx: ToolContext = { credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubSetIssueLabels(googleCtx, { owner: "octo", repo: "repo", number: 7, labels: ["x"] }, { fetchImpl: f.impl }),
     ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
@@ -736,7 +736,7 @@ describe("github MERGE handler — github_merge_pull_request (v1.82, IRREVERSIBL
 
   test("a GOOGLE credential → R8 backstop throws before any gate/fetch", async () => {
     const f = fetchStub({}, 200);
-    const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
+    const googleCtx: ToolContext = { credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubMergePullRequest(googleCtx, { owner: "octo", repo: "repo", number: 7 }, { fetchImpl: f.impl }),
     ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });
@@ -918,7 +918,7 @@ describe("github REVIEW handler — github_create_pull_request_review (v1.90, EV
 
   test("a GOOGLE credential → R8 backstop throws before any gate/fetch", async () => {
     const f = fetchStub({}, 200);
-    const googleCtx: ToolContext = { allowedAccounts: null, credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
+    const googleCtx: ToolContext = { credential: oauthCred("a@b.com", () => "g"), tier: "write", audit: NOOP_AUDIT };
     await expect(
       githubCreatePullRequestReview(googleCtx, { owner: "octo", repo: "repo", number: 7, event: "APPROVE" }, { fetchImpl: f.impl }),
     ).rejects.toMatchObject({ errorName: "internal_routing_error", errorData: { reason: "credential_mismatch" } });

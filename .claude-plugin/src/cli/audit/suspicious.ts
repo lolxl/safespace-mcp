@@ -408,6 +408,8 @@ function classifyRow(row: AuditRow, opts: SuspiciousOptions): Category | null {
   // 3.4 tier denials (cross-channel — any channel's policy_decision)
   if (opts.includeTierDenials) {
     if (pdTop === "denied_tier") return "denied_tier";
+    // A tools/call for a tool above the caller's tier, refused at dispatch.
+    if (row.refusal_reason === "tier_hidden") return "denied_tier";
     // Nested-object forward-compat sweep across the 6 channels.
     for (const ch of [
       "commentPostMeta",

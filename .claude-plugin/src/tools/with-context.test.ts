@@ -1996,7 +1996,7 @@ describe("withToolContext — v1.24 Phase 1 Item 2 error_code stamping", () => {
     expect(records[0]!.error_code).toBe(-32005);
   });
 
-  test("MCPError thrown by scope-mismatch pre-check (BEFORE auditStart) → NO audit row created (documented contract)", async () => {
+  test("MCPError thrown by scope-mismatch pre-check (BEFORE the audited try) → exactly one terminal error row", async () => {
     // Account has scopes = ["gmail.readonly"]; tool registry requires more.
     const fk = makeDeps();
     // Inject account with scopes to trigger scope-mismatch pre-check.
@@ -2025,16 +2025,13 @@ describe("withToolContext — v1.24 Phase 1 Item 2 error_code stamping", () => {
     expect(caught).toBeInstanceOf(MCPError);
     expect((caught as MCPError).errorName).toBe("scope_mismatch");
     await waitForAudit();
-    // NOTE: scope-mismatch pre-check throws BEFORE auditStart, so this
-    // scenario produces ZERO audit rows / NO audit.jsonl file at all.
-    // Documented v1.24 design contract: error_code stamping covers
-    // handler + post-handler throw paths (which sit inside the
-    // auditStart → finally window), NOT pre-handler paths.
-    const exists = await fs
-      .stat(path.join(tmpDir, "audit.jsonl"))
-      .then(() => true)
-      .catch(() => false);
-    expect(exists).toBe(false);
+    // The pre-flight (account → scope → credential) writes its own terminal row,
+    // so a scope refusal is visible in the log. The account was already resolved.
+    const records = await readAuditLines();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.status).toBe("error");
+    expect(records[0]!.error_code).toBe((caught as MCPError).code);
+    expect(records[0]!.account).toBe("alice@example.com");
   });
 });
 
@@ -2386,16 +2383,14 @@ describe("withToolContext — v1.56 F3b tainted_source audit threading", () => {
 });
 
 describe("withToolContext — v1.74 PR-2a OperatorContext threading", () => {
-  // Pins that the explicit `op` (6th arg) drives the audit `operator` + the
-  // handler's ctx.tier, and that OMITTING it falls back to env (byte-identical).
+  // Pins that the explicit `op` (6th arg) drives the handler's ctx.tier, that
+  // OMITTING it falls back to the env tier, and that the row's operator stays null.
   let tmpDir: string;
   let prevConfigDir: string | undefined;
-  let prevOperatorId: string | undefined;
   let prevTier: string | undefined;
 
   beforeEach(async () => {
     prevConfigDir = process.env.SAFESPACE_CONFIG_DIR;
-    prevOperatorId = process.env.SAFESPACE_OPERATOR_ID;
     prevTier = process.env.SAFESPACE_TIER;
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "safespace-v174-op-"));
     process.env.SAFESPACE_CONFIG_DIR = tmpDir;
@@ -2403,8 +2398,6 @@ describe("withToolContext — v1.74 PR-2a OperatorContext threading", () => {
   afterEach(async () => {
     if (prevConfigDir === undefined) delete process.env.SAFESPACE_CONFIG_DIR;
     else process.env.SAFESPACE_CONFIG_DIR = prevConfigDir;
-    if (prevOperatorId === undefined) delete process.env.SAFESPACE_OPERATOR_ID;
-    else process.env.SAFESPACE_OPERATOR_ID = prevOperatorId;
     if (prevTier === undefined) delete process.env.SAFESPACE_TIER;
     else process.env.SAFESPACE_TIER = prevTier;
     await fs.rm(tmpDir, { recursive: true, force: true });
@@ -2416,9 +2409,7 @@ describe("withToolContext — v1.74 PR-2a OperatorContext threading", () => {
     return content.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
   }
 
-  test("explicit op drives the audit operator + ctx.tier, OVERRIDING env", async () => {
-    // env says one thing; the explicit op (the Model-B per-session value) must win.
-    process.env.SAFESPACE_OPERATOR_ID = "envguy";
+  test("explicit op drives ctx.tier, OVERRIDING env; the row's operator is null", async () => {
     process.env.SAFESPACE_TIER = "read";
     const fk = makeDeps();
     let seenTier: string | undefined;
@@ -2432,16 +2423,15 @@ describe("withToolContext — v1.74 PR-2a OperatorContext threading", () => {
       handler,
       fk.deps,
       {},
-      { operatorId: "alice", tier: "write", allowedAccounts: null },
+      { tier: "write" },
     );
     const rows = await readRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.operator).toBe("alice"); // op wins over env "envguy"
+    expect(rows[0]!.operator).toBeNull();
     expect(seenTier).toBe("write"); // handler saw op.tier, not env "read"
   });
 
-  test("omitting op falls back to env (Model A byte-identical)", async () => {
-    process.env.SAFESPACE_OPERATOR_ID = "envguy";
+  test("omitting op falls back to the env tier", async () => {
     process.env.SAFESPACE_TIER = "write";
     const fk = makeDeps();
     let seenTier: string | undefined;
@@ -2457,7 +2447,7 @@ describe("withToolContext — v1.74 PR-2a OperatorContext threading", () => {
     );
     const rows = await readRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.operator).toBe("envguy"); // default op = env, as before
-    expect(seenTier).toBe("write"); // ctx.tier also from env (symmetric with the explicit-op test)
+    expect(rows[0]!.operator).toBeNull();
+    expect(seenTier).toBe("write"); // ctx.tier from env (symmetric with the explicit-op test)
   });
 });

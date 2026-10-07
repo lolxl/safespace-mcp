@@ -63,7 +63,8 @@ export const telegramTools: Record<string, ToolDef> = {
       "Only `message` updates are returned. CURSOR: pass a prior response's `next_offset` " +
       "back as `offset` to fetch the next batch — ⚠️ advancing `offset` PERMANENTLY confirms " +
       "(drops) the earlier updates on Telegram and each update is delivered AT MOST ONCE " +
-      "(Telegram also expires unfetched updates after 24h). `limit` 1–100 (default 50). " +
+      "(Telegram also expires unfetched updates after 24h). Under SAFESPACE_AUTONOMOUS=true, " +
+      "passing offset is denied (the agent must not ACK the inbox). `limit` 1–100 (default 50). " +
       "Requires a bot token configured via `safespace telegram set-token`.",
     inputSchema: {
       type: "object",
@@ -73,7 +74,7 @@ export const telegramTools: Record<string, ToolDef> = {
           description:
             "The update_id cursor — pass a prior response's `next_offset` to acknowledge " +
             "that batch and fetch newer updates. ⚠️ irreversible: confirms/drops earlier " +
-            "updates. Omit on the first poll.",
+            "updates. Denied under SAFESPACE_AUTONOMOUS=true. Omit on the first poll.",
         },
         limit: {
           type: "integer",

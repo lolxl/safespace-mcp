@@ -1,14 +1,13 @@
 // v1.79 — the Notion multi-workspace store: the combined-file store round-trip, the v1.78
 // single-object back-compat read, add/upsert/remove/active, findNotionWorkspace
 // (id/name/ambiguous), token isolation, UUID validation — PLUS the notion Source's
-// resolveAccount resolution (explicit id/name → active → last-used) + Model-B confinement
+// resolveAccount resolution (explicit id/name → active → last-used)
 // + the no-oracle account_not_found, exercised over the real store. File backend + temp dir.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MCPError } from "../../errors";
 import { notion } from "../../tools/source";
 import {
   __resetNotionBackendForTests,
@@ -154,7 +153,7 @@ describe("findNotionWorkspace (pure)", () => {
   });
 });
 
-describe("notion.resolveAccount — resolution + Model-B confinement (over the real store)", () => {
+describe("notion.resolveAccount — resolution (over the real store)", () => {
   async function seed(): Promise<void> {
     await addNotionAccount({ workspaceId: WS_A, workspaceName: "Work" });
     await addNotionAccount({ workspaceId: WS_B, workspaceName: "Personal" }); // active = B
@@ -201,25 +200,5 @@ describe("notion.resolveAccount — resolution + Model-B confinement (over the r
       errorName: "account_not_found",
       errorData: { email: "ghost" },
     });
-  });
-
-  test("Model-B: an explicit out-of-confinement workspace → not_found echoing the input", async () => {
-    await seed();
-    const err = await resolve({ explicitAccountId: WS_B, allowedAccounts: [WS_A] }).catch((e) => e);
-    expect(err).toBeInstanceOf(MCPError);
-    expect((err as MCPError).errorData.email).toBe(WS_B); // the caller's own input, no oracle
-  });
-
-  test("Model-B: an out-of-confinement ACTIVE fallback is skipped (not used)", async () => {
-    await seed(); // active = B; confine to A only, no explicit/last-used → B skipped → no_active_account
-    await expect(resolve({ allowedAccounts: [WS_A] })).rejects.toMatchObject({
-      errorName: "account_not_found",
-      errorData: { reason: "no_active_account" },
-    });
-  });
-
-  test("Model-B: an in-set explicit resolves normally", async () => {
-    await seed();
-    expect((await resolve({ explicitAccountId: WS_A, allowedAccounts: [WS_A] })).accountId).toBe(WS_A);
   });
 });

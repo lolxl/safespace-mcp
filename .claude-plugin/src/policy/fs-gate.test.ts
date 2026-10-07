@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { MCPError } from "../errors";
+import { EMPTY_DENY_INDEX } from "./fs-deny-zones";
 import {
   __internal,
   buildFsRootsState,
@@ -149,9 +150,13 @@ describe("readThroughGate — real filesystem", () => {
 
   test("over the 5 MB cap → too_large (statImpl injected to avoid a huge write)", async () => {
     await fs.writeFile(path.join(root, "big.txt"), "x");
-    const fakeStat = (async () => ({ isFile: () => true, size: __internal.MAX_BYTES + 1 })) as never;
+    const bigOpen = async () => ({
+      stat: async () => ({ isFile: () => true, size: BigInt(__internal.MAX_BYTES) + 1n, dev: 1n, ino: 987654321n }),
+      read: async () => Buffer.from("x"),
+      close: async () => {},
+    });
     const t = await nameOfThrow(
-      readThroughGate(path.join(root, "big.txt"), { state, statImpl: fakeStat }),
+      readThroughGate(path.join(root, "big.txt"), { state, openImpl: bigOpen }),
     );
     expect(t).toEqual({ name: "fs_read_failed", reason: "too_large" });
   });
@@ -225,15 +230,23 @@ describe("parseFsRoots — win32 platform", () => {
 describe("readThroughGate — win32 semantics (mocked fs on the POSIX runner)", () => {
   const winState = (roots: string[]): FsRootsState => ({ kind: "active", roots, platform: "win32" });
   const idRealpath = async (p: string): Promise<string> => p; // identity (preserves case)
-  const fileStat = (async () => ({ isFile: () => true, size: 5 })) as never;
-  const readHello = (async () => Buffer.from("hello")) as never;
+  // Mocked fs: a 5-byte "hello" file with a fixed identity, ancestors with distinct ids,
+  // and no deny zones (the win32 paths below never exist on the POSIX runner).
+  const helloOpen = async () => ({
+    stat: async () => ({ isFile: () => true, size: 5n, dev: 1n, ino: 42n }),
+    read: async () => Buffer.from("hello"),
+    close: async () => {},
+  });
+  let ancestorIno = 1000n;
+  const fakeAncestor = async () => ({ dev: 1n, ino: ++ancestorIno });
 
   test("a file under a drive-absolute root reads", async () => {
     const res = await readThroughGate("C:\\Data\\notes.txt", {
       state: winState(["C:\\Data"]),
       realpathImpl: idRealpath,
-      statImpl: fileStat,
-      readFileImpl: readHello,
+      openImpl: helloOpen,
+      ancestorStatImpl: fakeAncestor,
+      denyIndex: EMPTY_DENY_INDEX,
     });
     expect(res.content).toBe("hello");
     expect(res.path).toBe("C:\\Data\\notes.txt");
@@ -243,8 +256,9 @@ describe("readThroughGate — win32 semantics (mocked fs on the POSIX runner)", 
     const res = await readThroughGate("\\\\server\\share\\notes.txt", {
       state: winState(["\\\\server\\share\\"]), // win32.resolve appends the trailing sep
       realpathImpl: idRealpath,
-      statImpl: fileStat,
-      readFileImpl: readHello,
+      openImpl: helloOpen,
+      ancestorStatImpl: fakeAncestor,
+      denyIndex: EMPTY_DENY_INDEX,
     });
     expect(res.content).toBe("hello"); // the r.endsWith(sep) boundary guard handles the trailing sep
   });
@@ -253,8 +267,9 @@ describe("readThroughGate — win32 semantics (mocked fs on the POSIX runner)", 
     const res = await readThroughGate("c:\\data\\notes.txt", {
       state: winState(["C:\\Data"]), // realpath identity → the case genuinely differs
       realpathImpl: idRealpath,
-      statImpl: fileStat,
-      readFileImpl: readHello,
+      openImpl: helloOpen,
+      ancestorStatImpl: fakeAncestor,
+      denyIndex: EMPTY_DENY_INDEX,
     });
     expect(res.content).toBe("hello"); // only matches because withinRoots folds en-US
   });

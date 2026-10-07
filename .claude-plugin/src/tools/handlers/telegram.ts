@@ -32,6 +32,8 @@ import { TELEGRAM_CHAT_ID_RE } from "../../policy/telegram-recipient-allowlist";
 import type { ToolContext } from "../types";
 import { postServiceTokenJson } from "./service-token-fetch";
 import { assertEgressHost } from "../../policy/egress-destinations";
+import { isAutonomousMode } from "../../policy/autonomous-mode";
+import { MCPError } from "../../errors";
 import { requireServiceToken } from "./shared";
 import { telegramApiGet } from "../../auth/telegram/client";
 
@@ -214,12 +216,21 @@ export async function telegramGetUpdates(
   args: Record<string, unknown>,
   deps: TelegramDeps = {},
 ): Promise<unknown> {
+  const offset = optionalOffset(args);
+  // v1.128 Q5-B — autonomous deployments must not ACK the Telegram inbox. Any
+  // integer offset (including 0) is a confirm-and-drop cursor. Parse FIRST so a
+  // non-integer still throws the existing plain Error (echoes the rule, never the
+  // value) before this gate. Offset omitted remains the current read (batch may
+  // repeat). Does NOT overload F4.
+  if (isAutonomousMode() && offset !== undefined) {
+    throw new MCPError("telegram_ack_denied_in_autonomous_mode", { reason: "offset_present" });
+  }
   const token = requireServiceToken(ctx).token();
   const data = await telegramApiGet({
     token,
     method: "getUpdates",
     query: {
-      offset: optionalOffset(args),
+      offset,
       limit: clampUpdatesLimit(args.limit),
       timeout: 0, // server-fixed: no long-poll (would compete with the abort timer)
       allowed_updates: JSON.stringify(["message"]), // server-fixed: bound the parsed shape

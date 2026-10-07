@@ -29,7 +29,6 @@ import {
 // v1.37 BLOCKER 1: account-revoke reads/deletes tokens via the SecretBackend facade.
 import { deleteToken, getToken } from "./auth/token-store";
 import { revokeRefreshToken } from "./auth/revoke";
-import { runAgentTokenCmd } from "./cli/agent-token";
 import { runSendCmd } from "./cli/send";
 import { runAuditCmd } from "./cli/audit";
 import { runLineCmd } from "./cli/line";
@@ -37,7 +36,6 @@ import { runTelegramCmd } from "./cli/telegram";
 import { runDiscordCmd } from "./cli/discord";
 import { runSlackCmd } from "./cli/slack";
 import { runMattermostCmd } from "./cli/mattermost";
-import { runWebhookCmd } from "./cli/webhook";
 import {
   runNotionAccountList,
   runNotionAccountRevoke,
@@ -55,11 +53,13 @@ import { runWhitelistCmd } from "./cli/whitelist";
 import { migrateV2, MigrationError } from "./migrate";
 import { runDoctor, runPosture, runStatus, tildePath } from "./status";
 import { IMPLEMENTED_TOOLS, TOOL_REGISTRY } from "./tools/registry";
-import { withToolContext } from "./tools/with-context";
+import { dispatchTool, isSingleAccountOAuth } from "./tools/dispatch";
+import { envOperatorContext } from "./identity/operator-context";
+import { retiredCliRefusal } from "./policy/retired-settings";
 
 const EMAIL_RE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
-const USAGE = "usage: safespace <consent|account-list|account-switch|account-revoke|audit|migrate-v2|status|doctor|whitelist|recipient|agent-token|send|line|telegram|discord|slack|mattermost|webhook|exec> ... (notion is an OAuth source: use `consent --provider notion`)";
+const USAGE = "usage: safespace <consent|account-list|account-switch|account-revoke|audit|migrate-v2|status|doctor|whitelist|recipient|send|line|telegram|discord|slack|mattermost|exec> ... (notion is an OAuth source: use `consent --provider notion`)";
 
 export interface CliIO {
   /** stdout sink. Tests override to capture output. */
@@ -86,8 +86,8 @@ export class CliError extends Error {
  *
  * Injection seam for tests — lets test suites stub the handler stack without
  * setting up Keychain + accounts.json + Google API mocks for every CLI
- * dispatch test. Production defaults to the real `withToolContext(handler)`
- * chain so `safespace exec` is semantically identical to an MCP tool call.
+ * dispatch test. Production defaults to `dispatchTool` (tools/dispatch.ts), the
+ * routing the MCP server uses, minus the server's tier and connector gates.
  *
  * `opts.raw` toggles the `--raw` escape hatch (skip sanitize wrap; non-LLM
  * consumers only). Auth / kill-switch / audit / 401-retry still run. */
@@ -100,10 +100,13 @@ export type RunToolFn = (
   opts?: RunToolOptions,
 ) => Promise<unknown>;
 
+// Same routing as the MCP server (tools/dispatch.ts): cross-account, non-OAuth and
+// OAuth tools each reach their own choke point, so every call writes its audit row.
+// `exec` deliberately bypasses the tier and connector gates the server applies.
 const DEFAULT_RUN_TOOL: RunToolFn = async (toolName, args, opts) => {
   const def = TOOL_REGISTRY[toolName];
   if (!def) throw new CliError(`unknown tool: ${toolName}`);
-  return withToolContext(toolName, args, def.handler, {}, { skipSanitize: opts?.raw });
+  return dispatchTool(toolName, args, def, envOperatorContext(), { skipSanitize: opts?.raw });
 };
 
 export interface CliDeps {
@@ -141,6 +144,11 @@ export async function runCli(
   io: CliIO = DEFAULT_IO,
   deps: CliDeps = {},
 ): Promise<void> {
+  // Before any subcommand: a retired setting that changed which stored secrets the
+  // CLI reads (SAFESPACE_OPERATOR_ID) stops every subcommand, `doctor` included.
+  const retired = retiredCliRefusal();
+  if (retired !== null) throw new CliError(retired);
+
   const [subcommand, ...rest] = argv;
 
   if (subcommand === "consent") {
@@ -252,11 +260,6 @@ export async function runCli(
     return;
   }
 
-  if (subcommand === "agent-token") {
-    await runAgentTokenCmd(rest, io);
-    return;
-  }
-
   if (subcommand === "send") {
     await runSendCmd(rest, io);
     return;
@@ -309,11 +312,6 @@ export async function runCli(
 
   if (subcommand === "mattermost") {
     await runMattermostCmd(rest, io);
-    return;
-  }
-
-  if (subcommand === "webhook") {
-    await runWebhookCmd(rest, io);
     return;
   }
 
@@ -400,6 +398,16 @@ async function runExec(rest: string[], io: CliIO, runTool: RunToolFn): Promise<v
     throw new CliError(
       "use the --account flag, not 'account_id' inside --params\n" +
       "       e.g. safespace exec <tool> --account <email> --params '...'",
+    );
+  }
+
+  // `--account` and `--raw` exist only on the single-account OAuth path; refuse them
+  // elsewhere instead of silently ignoring them.
+  const def = TOOL_REGISTRY[toolName]!;
+  if ((account || raw) && !isSingleAccountOAuth(def)) {
+    throw new CliError(
+      `${account ? "--account" : "--raw"} applies only to single-account OAuth tools; ` +
+        `${toolName} is ${def.cross_account ? "a cross-account tool" : "not an OAuth tool"}`,
     );
   }
 
@@ -634,12 +642,12 @@ async function runDoctorCmd(rest: string[], io: CliIO): Promise<void> {
       throw new CliError(
         `unknown flag: ${arg}\n       usage: safespace doctor [--deep] [--json] [--posture]\n` +
           `       --deep:    also pings macOS Keychain per registered account (~50ms each).\n` +
-          `       --posture: report the SAFESPACE_ENFORCED hardening posture (refuse-to-start gates).`,
+          `       --posture: report the hardening posture (hardening settings, connectors, egress allowlists).`,
       );
     }
   }
   const json = rest.includes("--json");
-  // --posture is its own focused report (the enforced-mode gates), not the full
+  // --posture is its own focused report (the hardening posture), not the full
   // diagnostic; --deep is irrelevant to it (no Keychain ping).
   const report = rest.includes("--posture")
     ? await runPosture({ json }, io)
@@ -663,6 +671,9 @@ if (import.meta.main) {
     // paths and internal structure to terminal scrollback. (sec-rev 5.6 LOW)
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`error: ${msg}`);
-    process.exit(1);
+    // exitCode, not exit(): the choke points write their final audit row without
+    // awaiting it, and exit() would kill that write. The success path already ends
+    // by letting the event loop drain.
+    process.exitCode = 1;
   }
 }

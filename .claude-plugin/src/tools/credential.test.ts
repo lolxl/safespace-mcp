@@ -22,7 +22,7 @@ const ROUTING_MISMATCH = {
 type OAuthCred = Extract<Credential, { kind: "oauth" }>;
 
 function ctxWith(credential: Credential): ToolContext {
-  return { allowedAccounts: null, credential, tier: "read", audit: NOOP_AUDIT };
+  return { credential, tier: "read", audit: NOOP_AUDIT };
 }
 
 describe("Credential union + requireOAuth (B2)", () => {

@@ -78,7 +78,7 @@ afterEach(async () => {
 
 function makeCtx(): { ctx: ToolContext; secretShapes: string[] } {
   const secretShapes: string[] = [];
-  const ctx: ToolContext = { allowedAccounts: null,
+  const ctx: ToolContext = {
     credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
     get tier() {
       return currentTier();

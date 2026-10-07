@@ -51,7 +51,7 @@ export GOOGLE_CLIENT_SECRET="GOCSPX-<your-secret>"
 
 # Opens a browser for Google consent; tokens are stored under
 # SAFESPACE_CONFIG_DIR behind the SecretBackend (Keychain on macOS, an encrypted
-# file elsewhere — see docs/DEPLOY.md).
+# file elsewhere).
 npx -y -p safespace-mcp safespace consent you@example.com
 
 # Verify the install + posture (config dir perms, tier, accounts, audit chain).
@@ -135,7 +135,7 @@ above (e.g. Claude Desktop's `claude_desktop_config.json`). Drop the same
   enforced at the `tools/list` boundary, so disallowed tools are invisible to the
   agent. Start at `read`; raise it only for the surface you want the agent to
   write to.
-- **Context cost, and how to cut it (v1.127).** SafeSpace exposes 130 tools; a
+- **Context cost, and how to cut it (v1.127).** SafeSpace exposes 129 tools; a
   client that does not lazy-load tool schemas pays for **all** of them on every
   session (~22k tokens at `read`, ~52k at `share`), and Google Workspace alone is
   ~39k of that. Claude Code defers tool schemas and does not pay this — Codex,
@@ -143,7 +143,7 @@ above (e.g. Claude Desktop's `claude_desktop_config.json`). Drop the same
   **`SAFESPACE_CONNECTORS`**, a comma-separated list of connectors and/or Google
   sub-services: `SAFESPACE_CONNECTORS=gmail,calendar,github` takes a `share`-tier
   session from ~52k to ~15k. Valid tokens: `discord`, `fs-read`, `github`, `line`,
-  `mattermost`, `notion`, `slack`, `telegram`, `web-fetch`, `webhook`, `x`,
+  `mattermost`, `notion`, `slack`, `telegram`, `web-fetch`, `x`,
   `calendar`, `contacts`, `docs`, `drive`, `forms`, `gmail`, `sheets`, `slides`,
   `tasks`, `youtube`, plus `google-workspace` as an alias for all ten Google
   sub-services. **Unset = every connector exposed** (the default). It *intersects*
@@ -152,7 +152,11 @@ above (e.g. Claude Desktop's `claude_desktop_config.json`). Drop the same
   start rather than silently drop a connector, and changing the value (like
   changing the tier) **requires a client restart**, since clients cache
   `tools/list`. It does **not** reduce the OAuth scope union — see
-  [`.env.example`](../.env.example) for the full note.
+  [`.env.example`](../.env.example) for the full note. `safespace doctor --posture`
+  reports the **requested** Google consent size (https scope count) separately
+  from the CONNECTORS surface; that row never reads the stored token. The npx
+  path does **not** auto-load `.env` (see §1) — putting CONNECTORS only in a
+  `.env` file does not change the grant or the MCP client's surface.
 - **One host owns the tokens.** Tokens live on the machine that runs the server,
   under `SAFESPACE_CONFIG_DIR`. Run consent on that same machine (or copy the
   config dir there) so the server can read and refresh them.
@@ -165,6 +169,5 @@ above (e.g. Claude Desktop's `claude_desktop_config.json`). Drop the same
 - **The CLI.** Every subcommand (`consent`, `doctor`, `audit`, `account-list`,
   `whitelist`, `recipient`, …) runs as `npx -y -p safespace-mcp safespace <cmd>`.
 - **Full configuration reference.** Every environment variable — egress
-  allowlists, autonomy hardening, burst caps, transport — is documented in
-  [`.env.example`](../.env.example). For multi-operator / shared-server
-  deployments see [`docs/DEPLOY.md`](DEPLOY.md).
+  allowlists, autonomy hardening, burst caps — is documented in
+  [`.env.example`](../.env.example).

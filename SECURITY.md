@@ -48,42 +48,47 @@ by hostile content it reads (an email, a doc, a comment), the proxy bounds what
 it can do — which tools exist, who it can message, what it can delete, and how
 much damage a single session can cause.
 
-### Deployment model = **Model A** (the trust boundary you must respect)
+### Deployment model = **stdio, one operator per process** (the trust boundary you must respect)
 
-SafeSpace's supported deployment is **Model A: one human operator per local
-process**, speaking MCP over **stdio**.
+SafeSpace's supported deployment is **one human operator per local
+process**, speaking MCP over **stdio**. The former multi-operator HTTP
+transport ("Model B") was removed on 2026-10-06; leftover settings for it refuse
+startup (`policy/retired-settings.ts`).
 
 - **Tokens are per-operator and never shared between operators** — each operator
   runs their own process with their own token store (`SecretBackend`).
-- **Policy and audit are shared by operator _convention_** (e.g. a shared
-  `drive-whitelist.json` or audit directory), not enforced across operators by
-  the proxy.
-- `operatorId` (`$SAFESPACE_OPERATOR_ID`) labels the human actor on every audit
-  row, distinct from the Google account email.
+- **Policy is shared by operator _convention_** (e.g. a shared
+  `drive-whitelist.json`), not enforced across operators by the proxy.
+- **One server and one config dir per operator.** The tamper-evident chain has a
+  single chained writer, the server (`docs/AUDIT-CHAIN.md`); two **server**
+  processes sharing one `SAFESPACE_CONFIG_DIR` fork the chain. That operator's
+  `safespace` CLI uses the same dir (it appends unchained `event` rows and reads the
+  pending-send store there). Collect several operators' logs side by side for
+  analysis — never merge their chains into one file.
+- **Token isolation needs separate OS users.** A `0600` file-backend store and its key
+  file are readable by every process running as that user. Keychain items carry
+  per-application ACLs, but SafeSpace's items trust the runtime interpreter (`bun` /
+  `node`), which any process of that user can launch, so they are no boundary between
+  same-user processes either. Run each operator as their own OS user. Two
+  installs under one OS user also share one Keychain store: Google tokens are keyed
+  by email and each service token by one fixed key, so the last writer wins. If you
+  must run two there, give one the file backend and its own config dir.
 
-**Everything in this document holds under Model A.** Two assumptions are
-**correct under Model A but would become weaknesses under a (currently
-unsupported) multi-tenant "Model B"** — one shared server process loading
-multiple operators' accounts behind an auth gateway. They are documented here as
-explicit, bounded assumptions, each with its Model-B follow-up:
+**Everything in this document holds for that deployment.** Two assumptions are
+**correct there but would become weaknesses in a shared multi-operator server**
+(one process loading multiple operators' accounts behind an auth gateway), which
+SafeSpace does not support:
 
-1. **Self-send implicit allow (`selfEmails`) — partitioned per operator since
-   v1.80.** The recipient allowlist implicitly permits sending to the
-   operator's *own* Google accounts (`policy/recipient-allowlist.ts`). Under
-   Model A every loaded account **is** the operator's, so the global set is
-   correct (and unchanged — `allowedAccounts` is `null`). Under Model B the
-   exemption is **confined to the calling operator's `allowedAccounts`**
-   (v1.80 PR-3): operator A can no longer reach operator B's self address via
-   the implicit route, at BOTH consumers (gmail egress + `drive_share_file`).
-   Explicit allowlist entries are never narrowed by the partition (membership
-   ⟂ provenance).
+1. **Self-send implicit allow (`selfEmails`).** The recipient allowlist
+   implicitly permits sending to the operator's *own* Google accounts
+   (`policy/recipient-allowlist.ts`). With one process per operator every loaded
+   account **is** the operator's, so the global set is correct.
 2. **Per-process = per-operator policy/tier.** The privilege tier and all four
-   allowlists resolve from per-process configuration. Under Model A
-   (process-per-operator) that **is** per-operator. Per-*session* enforcement —
-   one process serving multiple operators at different tiers — is Model B.
+   allowlists resolve from per-process configuration. With process-per-operator
+   that **is** per-operator.
 
-**Model B is not built and not supported.** Do not run one SafeSpace process for
-multiple distinct operators expecting cross-operator isolation.
+Do not run one SafeSpace process for multiple distinct operators expecting
+cross-operator isolation.
 
 ### What SafeSpace does **not** defend against
 
@@ -92,7 +97,7 @@ multiple distinct operators expecting cross-operator isolation.
 - The Google account owner themselves (SafeSpace constrains the *agent*, not the
   human who holds the credentials).
 - Vulnerabilities in Google's APIs or the underlying SDKs/runtime.
-- Model B multi-tenant isolation (above).
+- Multi-tenant isolation (above).
 
 ---
 
@@ -436,8 +441,8 @@ Operational LINE API failures raise `-32038 line_api_failed` with a closed-set
 `reason` (`no_token`/`auth_failed`/`rate_limited`/`invalid_recipient`/`api_error`) —
 no token or recipient id echoed. A 401 (token rejected) has no OAuth re-consent
 recovery: the operator re-runs `safespace line set-token`. **Inbound LINE (webhook)
-is out of scope** — it is a push model (a public HTTPS endpoint + signature
-verification), a separate architecture, deferred.
+is not supported** — the push-model inbound listener (a public HTTPS endpoint +
+signature verification) was removed; SafeSpace exposes no unsolicited public surface.
 
 ### 12. X (Twitter) post egress (`x_post_create`) — v1.113 / v1.115
 
@@ -547,8 +552,7 @@ GitHub's free-text error body. No token is echoed.
   allowlists gate **writes only**. Reading is bounded by the OAuth consent and the tier:
   the position is that the egress gates bound what *leaves* the agent, not what it may
   look at.
-- **Single-account by design.** The GitHub Source is single-login in v1; Model B's
-  per-operator `allowedAccounts` confinement has no effect on it.
+- **Single-account by design.** The GitHub Source is single-login in v1.
 - **A label name is public agent-authored text.** `github_set_issue_labels` **creates** a
   label that does not yet exist on the repo, so label names get the same
   `outboundSanitize` + F3a treatment as issue bodies.
@@ -565,7 +569,7 @@ there is no separate identity call. Tokens live behind `SecretBackend` under a r
 `notion:<workspaceId>` key; the workspace index is `notion-account.json`. Like GitHub, the
 Source is `refreshable: false`. **Multi-workspace** is supported (v1.79): resolution runs
 explicit `account_id` (id, or workspace name case-insensitively) → active pointer →
-per-source last-used, all confined to the operator's `allowedAccounts` under Model B.
+per-source last-used.
 
 **Notion has no scopes.** Every tool declares `requiredScopes: []` and the Source's
 `authorize()` is a deliberate no-op — an integration's capabilities are configured
@@ -732,9 +736,8 @@ Additional guarantees:
   cannot serialize the bearer token (functions are dropped by `JSON.stringify`).
 
 ### Cryptographic algorithm pinning (no algorithm-confusion surface)
-SafeSpace's keyed-MAC / signature surface — the inbound **bearer-token hash**, the
-inbound **webhook signature verification** (Slack/LINE), and the tamper-evident
-**audit MAC chain** — pins **HMAC-SHA256** at compile time (`src/crypto-algorithms.ts`).
+SafeSpace's keyed-MAC surface — the inbound **bearer-token hash** and the
+tamper-evident **audit MAC chain** — pins **HMAC-SHA256** at compile time (`src/crypto-algorithms.ts`).
 The algorithm is **never** read from a request header, a token field, or config; it is
 not caller-controllable. Critically, SafeSpace has **no JWT/JOSE `alg`-header decode
 path** — so there is no HS-vs-RS confusion and no `none` downgrade to defend against;
@@ -821,8 +824,8 @@ Every tool call writes a structured JSONL audit row (`src/audit.ts`):
 - Sensitive targets (recipient emails, document/task/comment IDs) are
   **HMAC-SHA256 hashed** with a per-install salt
   (`~/.config/safespace/audit-salt`, mode `0600`).
-- The human **`operator`** (plaintext, from `$SAFESPACE_OPERATOR_ID`) and the
-  Google `account` email (plaintext by design) identify who acted.
+- The Google `account` email (plaintext by design) identifies which account acted.
+  The row's `operator` field is always null since `SAFESPACE_OPERATOR_ID` was retired.
 - **No plaintext message bodies, comment text, or content payloads** ever reach
   the audit row — only hashes, counts, and policy decisions.
 - `safespace audit {recent,stats,deletes,policy-decisions,suspicious}` surfaces
@@ -832,9 +835,9 @@ Every tool call writes a structured JSONL audit row (`src/audit.ts`):
 
 ## Known limitations / out of scope
 
-- **Model B multi-tenancy** (shared server, auth gateway, non-stdio transport,
-  per-session policy/tier, scoped `selfEmails`) — designed-for but **not built**;
-  see the trust-boundary section.
+- **Multi-tenancy** (shared server, auth gateway, non-stdio transport,
+  per-session policy/tier, scoped `selfEmails`) — **not supported**; the HTTP
+  transport was removed; see the trust-boundary section.
 - **Homoglyph coverage** is a curated map (Latin/Cyrillic/Greek/Armenian).
   Full UTS #39 confusables vendoring and Hebrew look-alikes are deliberately
   deferred (`docs/CARRY-FORWARD.md`) pending a concrete observed bypass.

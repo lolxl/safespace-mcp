@@ -16,7 +16,6 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { resolveOperatorId } from "../../identity/operator-id";
 import { configDir } from "../keychain";
 import type { SecretBackend } from "../secret-backend";
 import { selectBackend } from "../select-backend";
@@ -211,15 +210,15 @@ function reservedKey(workspaceId: string): string {
 
 /** Read the stored Notion token for `workspaceId`, or null if none. */
 export async function readNotionToken(workspaceId: string): Promise<string | null> {
-  return backend().getToken(resolveOperatorId(), reservedKey(workspaceId));
+  return backend().getToken(reservedKey(workspaceId));
 }
 
 /** Persist the Notion token (the consent writer). Opaque to the backend. */
 export async function writeNotionToken(workspaceId: string, token: string): Promise<void> {
-  await backend().setToken(resolveOperatorId(), reservedKey(workspaceId), token);
+  await backend().setToken(reservedKey(workspaceId), token);
 }
 
 /** Remove the stored Notion token (account-revoke; idempotent at the backend). */
 export async function clearNotionToken(workspaceId: string): Promise<void> {
-  await backend().deleteToken(resolveOperatorId(), reservedKey(workspaceId));
+  await backend().deleteToken(reservedKey(workspaceId));
 }

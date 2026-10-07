@@ -27,7 +27,6 @@ function xCred(token = "x-access-SECRET", accountId = USER_ID): Credential {
 }
 function ctx(token = "x-access-SECRET", tier: "read" | "write" = "read"): ToolContext {
   return {
-    allowedAccounts: null,
     credential: xCred(token),
     tier,
     audit: NOOP_AUDIT,
@@ -149,7 +148,6 @@ describe("x read handlers — cross-provider backstop (requireX)", () => {
   test("a NON-x (google) OAuth credential throws before any fetch", async () => {
     const f = fetchStub(ME_BODY);
     const googleCtx: ToolContext = {
-      allowedAccounts: null,
       credential: oauthCred("a@b.com", () => "g-tok"),
       tier: "read",
       audit: NOOP_AUDIT,
@@ -170,7 +168,6 @@ describe("x read handlers — cross-provider backstop (requireX)", () => {
   test("a notion OAuth credential is also rejected", async () => {
     const f = fetchStub(ME_BODY);
     const notionCtx: ToolContext = {
-      allowedAccounts: null,
       credential: {
         kind: "oauth",
         provider: "notion",
@@ -319,7 +316,6 @@ describe("x_post_create — requireX backstop", () => {
   test("a NON-x credential throws before any fetch", async () => {
     const f = fetchStub({}, 201);
     const googleCtx: ToolContext = {
-      allowedAccounts: null,
       credential: oauthCred("a@b.com", () => "g-tok"),
       tier: "write",
       audit: NOOP_AUDIT,

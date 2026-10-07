@@ -15,7 +15,6 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { resolveOperatorId } from "../../identity/operator-id";
 import { configDir } from "../keychain";
 import type { SecretBackend } from "../secret-backend";
 import { selectBackend } from "../select-backend";
@@ -109,15 +108,15 @@ function reservedKey(login: string): string {
  *  SecretBackend (no shell env override this PR; G3 may add one alongside the
  *  GitHub client-id/secret env vars). */
 export async function readGithubToken(login: string): Promise<string | null> {
-  return backend().getToken(resolveOperatorId(), reservedKey(login));
+  return backend().getToken(reservedKey(login));
 }
 
 /** Persist the GitHub token (the G3 consent writer). Opaque to the backend. */
 export async function writeGithubToken(login: string, token: string): Promise<void> {
-  await backend().setToken(resolveOperatorId(), reservedKey(login), token);
+  await backend().setToken(reservedKey(login), token);
 }
 
 /** Remove the stored GitHub token (account-revoke; idempotent at the backend). */
 export async function clearGithubToken(login: string): Promise<void> {
-  await backend().deleteToken(resolveOperatorId(), reservedKey(login));
+  await backend().deleteToken(reservedKey(login));
 }

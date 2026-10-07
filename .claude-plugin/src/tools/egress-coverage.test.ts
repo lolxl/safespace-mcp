@@ -5,11 +5,9 @@
 // one part that is NOT fully applied by a single central choke point. tier +
 // sanitize + audit + burst run universally inside the 3 choke points
 // (with-context / with-nonoauth-context / with-all-accounts), but the recipient /
-// public-surface gates live per-tool — the CENTRALIZED_EGRESS tools call the
-// `tools/egress.ts` gate from their handlers (B3), the PIPELINE_EGRESS tools
-// (B6.1 wave A1) have it fired BY the non-OAuth choke point via an egress
-// descriptor, while drive_share_file + the YouTube comment/video writes carry
-// their own bespoke handler gates. So a future connector tool that reaches an
+// public-surface gates live per-tool — the PIPELINE_EGRESS tools have the
+// `tools/egress.ts` gate fired BY their choke point via an egress descriptor
+// (B6.1), while drive_share_file carries its own bespoke handler gates. So a future connector tool that reaches an
 // external party (a new "send" / "post" / "share") can be added at min_tier:write
 // and ship with ZERO egress protection while *looking* protected — the exact R7
 // trap.
@@ -26,12 +24,7 @@
 // (registry.test.ts) and the v1.52-F1 `cross_account ⇒ min_tier:read` set.
 
 import { describe, expect, test } from "bun:test";
-import {
-  CENTRALIZED_EGRESS,
-  HANDLER_GATED_EXTERNAL,
-  OWN_DATA_WRITE,
-  PIPELINE_EGRESS,
-} from "./egress-coverage.sets";
+import { HANDLER_GATED_EXTERNAL, OWN_DATA_WRITE, PIPELINE_EGRESS } from "./egress-coverage.sets";
 import { TOOL_REGISTRY } from "./registry";
 
 /** Every write/share tool in the registry — the universe the partition covers.
@@ -42,30 +35,24 @@ const allWriteShare = Object.entries(TOOL_REGISTRY)
   .map(([name]) => name);
 
 describe("egress-coverage sentinel — every write/share tool is classified", () => {
-  test("the 4 buckets are pairwise disjoint (no tool double-classified)", () => {
+  test("the 3 buckets are pairwise disjoint (no tool double-classified)", () => {
     const overlap = (a: ReadonlySet<string>, b: ReadonlySet<string>) =>
       [...a].filter((x) => b.has(x));
-    expect(overlap(CENTRALIZED_EGRESS, HANDLER_GATED_EXTERNAL)).toEqual([]);
-    expect(overlap(CENTRALIZED_EGRESS, OWN_DATA_WRITE)).toEqual([]);
     expect(overlap(HANDLER_GATED_EXTERNAL, OWN_DATA_WRITE)).toEqual([]);
-    // B6.1 wave A1 — a tool is EITHER handler-called-centralized OR pipeline-fired,
-    // never both (a double classification would hide a double-fire).
-    expect(overlap(CENTRALIZED_EGRESS, PIPELINE_EGRESS)).toEqual([]);
     expect(overlap(PIPELINE_EGRESS, HANDLER_GATED_EXTERNAL)).toEqual([]);
     expect(overlap(PIPELINE_EGRESS, OWN_DATA_WRITE)).toEqual([]);
   });
 
   test("EVERY write/share tool is classified — a new tool is an orphan until gated", () => {
     const classified = new Set([
-      ...CENTRALIZED_EGRESS,
       ...PIPELINE_EGRESS,
       ...HANDLER_GATED_EXTERNAL,
       ...OWN_DATA_WRITE,
     ]);
     // Orphan: a write/share tool nobody put in a bucket. If this fires for a new
     // tool, decide whether it reaches an external party — if so, gate it and add
-    // it to PIPELINE_EGRESS (preferred for a non-OAuth send: descriptor-carried,
-    // choke-point-fired) or CENTRALIZED_EGRESS / HANDLER_GATED_EXTERNAL; if it
+    // it to PIPELINE_EGRESS (descriptor-carried, choke-point-fired) or, for a
+    // bespoke gate, HANDLER_GATED_EXTERNAL; if it
     // only writes the caller's own data, add it to OWN_DATA_WRITE.
     const unclassified = allWriteShare.filter((t) => !classified.has(t));
     expect(unclassified).toEqual([]);
@@ -75,16 +62,14 @@ describe("egress-coverage sentinel — every write/share tool is classified", ()
     expect(stale).toEqual([]);
   });
 
-  test("CENTRALIZED_EGRESS ∪ PIPELINE_EGRESS is EXACTLY the direction:'outbound-write' label set", () => {
-    // The label and the gated sets must never drift: a tool labeled outbound-write
-    // that is neither handler-called-centralized nor pipeline-fired (or vice-versa)
-    // is the R7 hole this prevents. Disjointness is pinned above, so the union is
-    // a real partition of the label set.
+  test("PIPELINE_EGRESS is EXACTLY the direction:'outbound-write' label set", () => {
+    // The label and the gated set must never drift: a tool labeled outbound-write
+    // that is not pipeline-fired (or vice-versa) is the R7 hole this prevents.
     const labelled = Object.entries(TOOL_REGISTRY)
       .filter(([, def]) => def.direction === "outbound-write")
       .map(([name]) => name)
       .sort();
-    expect(labelled).toEqual([...CENTRALIZED_EGRESS, ...PIPELINE_EGRESS].sort());
+    expect(labelled).toEqual([...PIPELINE_EGRESS].sort());
   });
 
   test("no cross_account tool carries the outbound-write label (the withAllAccounts choke point has NO egress tripwire)", () => {

@@ -13,7 +13,7 @@
 //     whole-directory capture). A loud one-time stderr warning is emitted.
 //
 // CRYPTO (design 4.2.3):
-//   * WHOLE-FILE: decrypt the blob to an in-memory { storageKey: tokenJson } map,
+//   * WHOLE-FILE: decrypt the blob to an in-memory { key: tokenJson } map,
 //     mutate, re-encrypt with a FRESH random 12-byte nonce, atomic tmp+rename.
 //     Re-encrypting the whole file every write gives a fresh (key,nonce) per file
 //     version BY CONSTRUCTION -> GCM nonce reuse is impossible.
@@ -32,7 +32,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { MCPError } from "../errors";
 import { configDir } from "./keychain";
-import { type SecretBackend, storageKey } from "./secret-backend";
+import type { SecretBackend } from "./secret-backend";
 import { ENV_SECRET_PASSPHRASE } from "../config";
 
 // 16-byte fixed magic (all printable ASCII; no literal control byte in source).
@@ -200,41 +200,20 @@ async function atomicWrite(p: string, data: Buffer): Promise<void> {
 }
 
 export class FileBackend implements SecretBackend {
-  async getToken(operatorId: string | null, googleAccount: string): Promise<string | null> {
+  async getToken(key: string): Promise<string | null> {
     const map = await this.loadMap();
-    const key = storageKey(operatorId, googleAccount);
-    if (Object.prototype.hasOwnProperty.call(map, key)) return map[key]!;
-
-    // Lazy re-key (design 4.3.3): only when an operatorId is set and the
-    // namespaced key missed, fall back to the legacy null-key.
-    if (operatorId !== null) {
-      const legacyKey = storageKey(null, googleAccount);
-      if (Object.prototype.hasOwnProperty.call(map, legacyKey)) {
-        const value = map[legacyKey]!;
-        try {
-          map[key] = value;
-          delete map[legacyKey];
-          await this.saveMap(map);
-        } catch {
-          // Persist failed -> still return the token (never lose access). The
-          // legacy entry stays; the next read retries the migration (idempotent).
-        }
-        return value;
-      }
-    }
-    return null;
+    return Object.prototype.hasOwnProperty.call(map, key) ? map[key]! : null;
   }
 
-  async setToken(operatorId: string | null, googleAccount: string, tokenJson: string): Promise<void> {
+  async setToken(key: string, tokenJson: string): Promise<void> {
     const map = await this.loadMap();
-    map[storageKey(operatorId, googleAccount)] = tokenJson;
+    map[key] = tokenJson;
     await this.saveMap(map);
   }
 
-  async deleteToken(operatorId: string | null, googleAccount: string): Promise<void> {
+  async deleteToken(key: string): Promise<void> {
     try {
       const map = await this.loadMap();
-      const key = storageKey(operatorId, googleAccount);
       if (!Object.prototype.hasOwnProperty.call(map, key)) return; // idempotent no-op
       delete map[key];
       await this.saveMap(map);

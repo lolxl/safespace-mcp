@@ -4,19 +4,58 @@
 > authoritative spec for each cycle), detailed status records, and PR-level
 > history live in the private development archive.
 
-**Current footprint:** 130 MCP tools — 11 connectors (Google Workspace 85 · GitHub 18 ·
-Notion 8 · X 3 · web-fetch · fs-read · LINE · Telegram 2 · Discord · Slack 5 · Mattermost 4) + the
-inbound-webhook inbox (`inbox_read`, `source:"webhook"`) · 4 OAuth providers (Google /
-GitHub / Notion / X) · the inbound webhook listener (Slack Events + LINE; a separate public
-`node:http` surface, Model-B) · 54 `MCPError` codes · 8 audit channels · 11 Google SDK
-client factories · 19 CLI subcommands · 4056 tests.
+**Current footprint:** 129 MCP tools — 11 connectors (Google Workspace 85 · GitHub 18 ·
+Notion 8 · X 3 · web-fetch · fs-read · LINE · Telegram 2 · Discord · Slack 5 · Mattermost 4) ·
+4 OAuth providers (Google / GitHub / Notion / X) · 54 `MCPError` codes · 8 audit channels ·
+11 Google SDK client factories · 17 CLI subcommands. (The inbound webhook listener and
+`inbox_read` were removed after v1.127, and the multi-operator HTTP transport ("Model B":
+Tailscale identity, operators registry, agent tokens) after that; SafeSpace is stdio-only.
+Enforced mode (`SAFESPACE_ENFORCED`) was removed too; `doctor --posture` reports autonomous
+mode, the token store and send-approval, and exits 1 when autonomous mode or send-approval is
+off or the tokens are in key-file mode — see the v2.0.0 entry.
+History entries below still describe them.)
 
 > Footprint correction (2026-07-15): the former "38 codes · 18 CLI" line carried a
 > long-standing arithmetic drift — the authoritative counts are the errors.test.ts
 > full-enumeration sentinel (54 names / 54 distinct codes) and the cli.ts dispatcher
-> (19 subcommands incl. `exec`).
+> (19 subcommands incl. `exec` at the time; 17 since v2.0.0).
 
 ## Release history
+
+- **v2.0.0** — **Single-operator, stdio-only: the multi-operator stack and its scaffolding are removed (breaking), plus envelope fixes.**
+  **Removed (breaking):** the inbound webhook listener, `inbox_read` (`-32051`), the `webhook`
+  connector token and `safespace webhook`; the multi-operator HTTP transport (Model B — Tailscale
+  identity, the operators registry, `safespace agent-token`, the Docker/Compose deployment and
+  `docs/DEPLOY.md`); the per-operator secret-store namespace and `SAFESPACE_OPERATOR_ID` (audit rows
+  keep an always-null `operator` field); enforced mode (`SAFESPACE_ENFORCED`). A leftover setting from any of them refuses startup
+  and names itself (`policy/retired-settings.ts`); `SAFESPACE_OPERATOR_ID` also stops every CLI
+  subcommand. **Upgrade:** unset `SAFESPACE_WEBHOOK_PORT` / `_BIND` / `_LISTEN_WITHOUT_AGENT`,
+  `SAFESPACE_TRANSPORT=http`, `SAFESPACE_HTTP_PORT` / `_BIND`, `SAFESPACE_AUTH`,
+  `SAFESPACE_AGENT_TOKENS_FILE`, `SAFESPACE_OPERATORS_FILE`, `SAFESPACE_TAILSCALE_SOCKET`,
+  `SAFESPACE_TLS_TERMINATED` and `SAFESPACE_ENFORCED=true` (keep its checks with
+  `SAFESPACE_AUTONOMOUS=true` and a Keychain or passphrase-mode token store; its HTTP-bind check
+  went with the transport). `safespace doctor --posture` now also fails — exit 1 — while
+  supervised send-approval (`SAFESPACE_REQUIRE_SEND_APPROVAL`, opt-in, holds outbound publishes for
+  owner approval) is off, so a script gating on it must turn that on or stop gating on the exit
+  code; drop `webhook` from
+  `SAFESPACE_CONNECTORS` if listed. Unset `SAFESPACE_OPERATOR_ID` whatever its value; if it held a
+  valid id, secrets saved under it are no longer read — revoke/rotate the old grants at each
+  provider, then re-authorize (`docs/CARRY-FORWARD.md` item 13). Cleanup of leftover webhook and
+  transport files: items 6 and 11.
+  **Security / envelope:** `fs_read` never reads SafeSpace's own stores, MCP-client config, `/proc`
+  or `/dev`, whatever the roots allow (path + (dev, ino) identity deny zones, descriptor-based read);
+  every tool call — refusals and pre-flight failures included — writes a terminal audit row
+  (refusal rows carry `refusal_reason` and `tool_name_hmac`, also in the CEF export; approval rows
+  carry `target_hash`); `doctor` reports a `retired_settings` row;
+  supervised send-approval also covers Mattermost and the irretractable public writes (YouTube
+  comments, `x_post_create`, `drive_share_file share_type=anyone`); under `SAFESPACE_AUTONOMOUS`,
+  `telegram_get_updates` with an offset is denied (`-32057`); `doctor --posture` reports the requested
+  Google consent beside the connector surface.
+  **Fixes:** `safespace exec` routes every tool to its real choke point (web_fetch, fs_read, the
+  service-token sends and `*_all` tools no longer fail with `internal_routing_error`) and keeps its
+  final audit row on a failing run; it refuses `--raw` / `--account` for tools that are not
+  single-account OAuth. Known limitation: running `exec` beside a server on the same
+  config dir can fork the audit chain (CARRY-FORWARD item 14).
 
 - **v1.127.0** — **`SAFESPACE_CONNECTORS`: a second exposure axis, to cut the context cost on clients that do not lazy-load tool schemas.** New `src/policy/connector-toggle.ts` — a comma-separated set of connector / Google-sub-service tokens that narrows `tools/list` and is **re-checked at `tools/call`**, INTERSECTED with the tier (narrowing-only; naming `gmail` can never carry `gmail_send` past a `read` tier — proven by a subset assertion across all three tiers). **UNSET = every connector exposed = byte-identical to v1.126** (69/125/130 tools per tier, registry order preserved on the wire), a DELIBERATE inversion of the repo's default-deny egress allowlists: unset-means-deny would silently strip every tool from an existing install on upgrade, the failure direction `tier.ts` names as the dangerous one. Token namespace = the 11 non-Google `SOURCES` ids ∪ 10 Google sub-services (by tool-name prefix, because google-workspace is ONE `source` worth ~39k of the ~52k share-tier total, making an all-or-nothing switch on the flagship a useless knob) ∪ `google-workspace` as an alias for all ten; `_`→`-` folded and case-insensitive so `web_fetch` is accepted. The prefix contract is implicit in 85 tool names, so it is **doubly enforced**: a sentinel test asserts every implemented tool maps to exactly one token and that the constants equal the live registry/`SOURCES`, while at runtime an UNMAPPED tool is **fail-safe (always exposed)** — a future mapping gap turns CI red instead of making a tool unreachable in every configuration. An unrecognized token makes the server **refuse to start** (`validateConnectors()` in the guarded `proxy.ts` startup sequence — deliberately NOT at module evaluation, where a throw reaches the client as a bare "server disconnected" and makes `server.ts` unimportable by tests). The `tools/list` projection stays memoized but is now keyed on tier + selection and reads env per request like `currentTier()` — a module-load snapshot would freeze the selection for the whole `bun test` run, which shares one process and one module cache. `doctor --posture` gains a plain `connectors` row that deliberately does NOT route through `classifyEgress` (which would render an unset variable as a false `OPEN … warn` and, under autonomous mode, a false `deny-all`). **Honest non-coverage — the axis gates the AGENT'S TOOL SURFACE and nothing else; all four gaps documented in the module header, `.env.example`, `docs/DEPLOY.md` and CARRY-FORWARD 5–7:** `safespace exec` bypasses it exactly as it bypasses the tier (the local operator's recovery path); it does **not** shrink the OAuth scope union (`computeScopeUnion` still unions over the whole registry — this narrows the agent's reach, not the token's); it does **not** close the inbound webhook listener (that is `SAFESPACE_WEBHOOK_PORT` alone — omitting the `webhook` token hides `inbox_read` but the public port stays bound and callbacks still reach the durable inbox; the widest gap, since that is SafeSpace's only unsolicited public surface); and it does **not** stop the internal contacts name→email lookup used by `gmail_send` / `calendar_*` under the separate `SAFESPACE_RECIPIENT_ALLOW_CONTACTS` opt-in (the `contacts_*` TOOLS are hidden and blocked; the helper call is not). **ZERO new tool / scope / error code / audit channel** (a blocked call collapses into the existing `tool_not_found`, indistinguishable from an unknown tool — no config-state oracle). 4056 tests (+26). Independent security review: **SOUND-WITH-FINDINGS — all 6 invariants PASS, zero BLOCKER/HIGH in the dispatch path**; the parse path was attacked directly (prototype pollution via `__proto__`/`constructor`, `|`/`,` cache-key forgery, ReDoS, fullwidth + Turkish-dotless case-folding) and holds, and the whole codebase has exactly two `setRequestHandler` calls, so no second tool-name dispatch route exists. The two HIGH/MED findings were the webhook + contacts gaps above (documented, no code change — both are outside the tool-dispatch path by construction); two LOW hygiene items were fixed in-cycle: the refusal message now dedupes and length-caps the echoed operator input (it reaches the client's server log, a different retention domain than `.env`), and a set-but-whitespace-only value now warns instead of silently exposing everything. DESIGN.md's "fourth-config-pattern" consolidation trigger fired and is recorded as deliberately deferred (same pattern as the tier; per-client-config by nature).
 

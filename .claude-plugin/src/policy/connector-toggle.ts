@@ -22,16 +22,6 @@
 //     The token this deployment holds is unchanged; only the agent's reach through
 //     SafeSpace is narrowed. Feeding the connector set into the scope union is a
 //     separate, larger change (deliberately deferred — see docs/CARRY-FORWARD.md).
-//   - It does NOT stop the INBOUND WEBHOOK LISTENER. `proxy.ts` starts the public
-//     `node:http` listener on `webhookEnabled()` (SAFESPACE_WEBHOOK_PORT) alone.
-//     Omitting the `webhook` token hides `inbox_read` from the agent and refuses it
-//     at tools/call — but SafeSpace still binds the socket, still accepts signed
-//     Slack/LINE callbacks, and still persists that third-party content to the
-//     durable inbox. This is the widest of the four gaps because it is SafeSpace's
-//     ONLY unsolicited public surface: "the webhook connector is off" is FALSE. To
-//     actually stop it, unset SAFESPACE_WEBHOOK_PORT. (Not an exfil path — the
-//     agent cannot read the inbox — but it is a listening socket the operator
-//     believes is closed.)
 //   - It does NOT stop the CONTACTS connector being exercised INTERNALLY. The
 //     People-API name→email lookup is a Source strategy (`resolveRecipients`,
 //     tools/source.ts) and is also called directly by calendar.ts; none consult
@@ -41,8 +31,8 @@
 //     hidden and blocked, so the agent cannot browse contacts; bounded further by
 //     that opt-in defaulting off.
 //
-// The rule behind all four: this axis gates the AGENT'S TOOL SURFACE. It does not
-// gate the operator's own CLI, the OAuth consent breadth, inbound listeners, or
+// The rule behind all three: this axis gates the AGENT'S TOOL SURFACE. It does not
+// gate the operator's own CLI, the OAuth consent breadth, or
 // internal helper calls between connectors. Anything outside `server.ts`'s two
 // request handlers is out of its reach BY CONSTRUCTION, not by oversight.
 //
@@ -112,7 +102,6 @@ export const NON_GOOGLE_CONNECTOR_TOKENS: readonly string[] = [
   "slack",
   "telegram",
   "web-fetch",
-  "webhook",
   "x",
 ];
 
@@ -231,6 +220,12 @@ function summarizeUnknown(unknown: readonly string[]): string {
  *  throw during `import` surfaces to an MCP client as a bare "server disconnected"
  *  with no message, and would make `server.ts` unimportable by any test that has
  *  not pre-set the env. */
+/** Tokens that named a connector which has since been removed, with the reason —
+ *  appended to the unknown-token refusal so an upgrade failure explains itself. */
+const RETIRED_CONNECTOR_TOKENS: Readonly<Record<string, string>> = {
+  webhook: "the inbound webhook listener and inbox_read were removed",
+};
+
 export function validateConnectors(): void {
   const raw = process.env[ENV_CONNECTORS];
   if (raw === undefined) return;
@@ -249,8 +244,13 @@ export function validateConnectors(): void {
   }
   const { tokens, unknown } = parseConnectors(raw);
   if (unknown.length > 0) {
+    const retired = unknown
+      .map((u) => u.trim().toLowerCase().replace(/_/g, "-"))
+      .filter((u) => u in RETIRED_CONNECTOR_TOKENS)
+      .map((u) => ` "${u}" is retired: ${RETIRED_CONNECTOR_TOKENS[u]}.`)
+      .join("");
     throw new Error(
-      `${ENV_CONNECTORS} contains unrecognized connector token(s): ${summarizeUnknown(unknown)}. ` +
+      `${ENV_CONNECTORS} contains unrecognized connector token(s): ${summarizeUnknown(unknown)}.${retired} ` +
         `Valid tokens: ${CONNECTOR_TOKENS.join(", ")}. ` +
         `("${GOOGLE_ALIAS}" is an alias for all 10 Google sub-services; unset the ` +
         `variable entirely to expose every connector.)`,
@@ -274,3 +274,4 @@ export function connectorPostureValue(): string {
   }
   return `restricted to ${enabled.size} of ${CONNECTOR_TOKENS.length - 1}: ${[...enabled].sort().join(", ")}`;
 }
+

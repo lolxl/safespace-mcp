@@ -35,7 +35,7 @@ async function gmailCreateDraftVia(ctx: ToolContext, args: Record<string, unknow
   if (out !== undefined) ctx.egress = out;
   return gmailCreateDraft(ctx, args);
 }
-const FAKE_CTX: ToolContext = { allowedAccounts: null,
+const FAKE_CTX: ToolContext = {
   credential: oauthCred("alice@example.com", () => FAKE_TOKEN),
   audit: NOOP_AUDIT,
   get tier() {

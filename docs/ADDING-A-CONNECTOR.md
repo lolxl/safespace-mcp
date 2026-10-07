@@ -85,11 +85,23 @@ an external party — is the one thing a connector must wire itself**, and the p
 naive connector ships dangerous-but-looking-safe. So it is **machine-enforced**:
 
 `src/tools/egress-coverage.test.ts` partitions **every** `write`/`share`-tier tool into
-exactly one bucket, and **fails CI if your new tool is unclassified**:
+exactly one bucket (the buckets live in `src/tools/egress-coverage.sets.ts`), and **fails
+CI if your new tool is unclassified**:
 
-- **`CENTRALIZED_EGRESS`** — it reaches an external party; gate it through
+- **`PIPELINE_EGRESS`** — it reaches an external party; write its gate in
   `src/tools/egress.ts` (a default-deny recipient/target allowlist + the F3a
-  secret-shape scan) and label it `direction: "outbound-write"`.
+  secret-shape scan), attach it to the tool as an `egress` descriptor
+  (`src/tools/egress-pipeline.ts`) so the choke point fires it before the handler runs,
+  and label it `direction: "outbound-write"`. The handler must not call the gate itself.
+  If the gate transforms the content (e.g. `outboundSanitize` rewrites the text), the
+  handler must send the gate's result — `requireEgressResult(ctx, "<kind>")` — never the
+  raw args (see the gmail / X / YouTube handlers); a check-only gate (accept or reject,
+  as for GitHub, Notion and the service-token sends) leaves the handler to build the body
+  from the validated args. Only the OAuth choke point (`with-context.ts`) stores a gate's
+  result on `ctx.egress` today; a transforming gate for a service-token connector first
+  needs `with-nonoauth-context.ts` to store it too. Add the tool's `PIPELINE_TABLE` row (handler file + gate wrapper) in
+  `egress-callsite.test.ts`, which checks the descriptor calls the gate and the handler
+  does not.
 - **`HANDLER_GATED_EXTERNAL`** — it reaches an external party but the gate is bespoke
   (e.g. `drive_share_file`); name where the gate lives.
 - **`OWN_DATA_WRITE`** — it only writes the caller's own data (no external recipient);
