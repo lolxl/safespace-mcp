@@ -1,0 +1,6 @@
+# Bun test runner config for runs started from the repo root. The suite lives in
+# .claude-plugin (run it there, as CI does); this file loads the same preloads so a
+# root-directory run of a test file still mocks gaxios and stays out of the real
+# config dir (see .claude-plugin/bunfig.toml).
+[test]
+preload = ["./.claude-plugin/src/google-api/test-utils.ts", "./.claude-plugin/src/test-preload-audit.ts"]

@@ -7,7 +7,7 @@ import { saveIndex } from "./auth/keychain";
 // platform default as production: KeychainBackend on macOS, FileBackend else).
 import { deleteToken, setToken } from "./auth/token-store";
 import { CliError, runCli, type CliIO } from "./cli";
-import { __resetChainState } from "./audit";
+import { __resetChainState, __drainAuditWrites } from "./audit";
 import { MCPError } from "./errors";
 import { __resetServiceTokenBackendForTests } from "./auth/service-token-store";
 
@@ -704,19 +704,16 @@ describe("runCli exec — routes like the server (non-OAuth, cross-account)", ()
     __resetServiceTokenBackendForTests();
   });
 
-  /** The non-OAuth choke point writes its row without awaiting it; poll briefly. */
+  /** The non-OAuth choke point writes its row without awaiting it: wait for the queued
+   *  write (it is queued before the refusal propagates), then read the CLI chain file. */
   async function auditRows(): Promise<Array<Record<string, unknown>>> {
-    for (let i = 0; i < 50; i++) {
-      try {
-        const text = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
-        const rows = text.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
-        if (rows.length > 0) return rows;
-      } catch {
-        // not written yet
-      }
-      await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
+    try {
+      const text = await fs.readFile(path.join(tmpDir, "audit-cli.jsonl"), "utf8");
+      return text.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
+    } catch {
+      return [];
     }
-    return [];
   }
 
   test("web_fetch reaches the non-OAuth choke point: its own refusal + an audit row", async () => {
@@ -778,7 +775,7 @@ describe("runCli exec — routes like the server (non-OAuth, cross-account)", ()
       { env: { ...process.env, SAFESPACE_CONFIG_DIR: tmpDir }, stdout: "pipe", stderr: "pipe" },
     );
     expect(await proc.exited).toBe(1);
-    const text = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
+    const text = await fs.readFile(path.join(tmpDir, "audit-cli.jsonl"), "utf8");
     expect(text).toContain('"tool":"web_fetch"');
   });
 });

@@ -26,7 +26,7 @@
 // per-row content (no recipient, no secret bytes, no hash values are printed).
 
 import { CliError, type CliIO } from "../../cli";
-import { strictParseInt, streamAuditRows, type AuditRow } from "./reader";
+import { strictParseInt, type AuditRow, streamAuditSources } from "./reader";
 import { classifyDestructive } from "./deletes";
 
 const USAGE =
@@ -161,7 +161,7 @@ function aggregate(row: AuditRow, sessions: Map<string, SessionAgg>): void {
 export async function runAuditSessions(args: string[], io: CliIO): Promise<void> {
   const opts = parseFlags(args);
   const sessions = new Map<string, SessionAgg>();
-  for await (const row of streamAuditRows(undefined, { warn: (m) => io.err(m) })) {
+  for await (const { row } of streamAuditSources({ warn: (m) => io.err(m) })) {
     aggregate(row, sessions);
   }
 

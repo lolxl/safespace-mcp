@@ -7,4 +7,7 @@
 #
 # v1.11 Phase 1b — added when the googleapis SDK migration started.
 [test]
-preload = ["./src/google-api/test-utils.ts"]
+# `./src/test-preload-audit.ts` resets the audit chain state and role before every test
+# (a `runCli` test switches the process to the CLI chain; Bun shares module state across
+# files).
+preload = ["./src/google-api/test-utils.ts", "./src/test-preload-audit.ts"]

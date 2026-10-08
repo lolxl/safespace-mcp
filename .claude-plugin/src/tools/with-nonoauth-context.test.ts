@@ -10,6 +10,7 @@ import { MCPError } from "../errors";
 import { requireOAuth } from "./handlers/shared";
 import type { ToolContext } from "./types";
 import { withNonOAuthContext } from "./with-nonoauth-context";
+import { __drainAuditWrites } from "../audit";
 
 describe("withNonOAuthContext (web-fetch keyless path — byte-identical to v1.65)", () => {
   let tmpDir: string;
@@ -31,7 +32,7 @@ describe("withNonOAuthContext (web-fetch keyless path — byte-identical to v1.6
     return content.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
   }
   async function waitForAudit(): Promise<void> {
-    await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
   }
 
   test("ctx is keyless: credential {kind:'none'}, no account, requireOAuth throws", async () => {
@@ -170,7 +171,7 @@ describe("withNonOAuthContext (LINE service-token route — v1.66 Phase C PR 2)"
   });
 
   async function readRows(): Promise<Array<Record<string, unknown>>> {
-    await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
     const content = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
     return content.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
   }

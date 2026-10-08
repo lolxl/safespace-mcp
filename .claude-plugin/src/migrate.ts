@@ -20,6 +20,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { countRows } from "./audit/cli-chain";
 import type { AccountEntry, AccountsIndex } from "./auth/keychain";
 import {
   deriveTierFromLegacyEnv,
@@ -286,10 +287,10 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
+/** Rows of an audit file as the audit readers count them (`countRows`); 0 when unreadable. */
 async function countLines(p: string): Promise<number> {
   try {
-    const content = await fs.readFile(p, "utf8");
-    return content.split("\n").filter((l) => l.length > 0).length;
+    return await countRows(p);
   } catch {
     return 0;
   }

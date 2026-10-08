@@ -16,6 +16,7 @@ import {
   type WithContextDeps,
 } from "./with-context";
 import { __resetWriteBurstForTests } from "../policy/write-burst";
+import { __drainAuditWrites } from "../audit";
 
 const ENV_BACKUP = {
   id: process.env.GOOGLE_CLIENT_ID,
@@ -1094,10 +1095,10 @@ describe("withToolContext — v1.15 Phase 3 resolvedRecipientHash threading", ()
       .map((l) => JSON.parse(l) as Record<string, unknown>);
   }
 
-  // auditEnd is fire-and-forget (void) — small wait gives the append a chance
-  // to flush before the test reads the file.
+  // auditEnd is fire-and-forget (void): wait for the queued append to land before the
+  // test reads the file.
   async function waitForAudit(): Promise<void> {
-    await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
   }
 
   test("handler calling ctx.recordResolvedRecipientHash → field appears on audit row", async () => {
@@ -1827,7 +1828,7 @@ describe("withToolContext — v1.24 Phase 1 Item 2 error_code stamping", () => {
   }
 
   async function waitForAudit(): Promise<void> {
-    await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
   }
 
   test("handler throws MCPError('scope_mismatch') → audit row carries error_code: -32004 (real ErrorName→code mapping)", async () => {
@@ -2079,7 +2080,7 @@ describe("withToolContext — v1.52 F1 write/delete burst guard wiring", () => {
   }
 
   async function waitForAudit(): Promise<void> {
-    await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
   }
 
   test("write-tier tool past the cap throws -32032 AT THE CHOKE POINT (handler never reached) + audit row carries the code", async () => {
@@ -2190,7 +2191,7 @@ describe("withToolContext — v1.54 F4 autonomous permanent-delete deny wiring",
   }
 
   async function waitForAudit(): Promise<void> {
-    await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
   }
 
   test("autonomous ON + permanent-delete tool → -32033 AT THE CHOKE POINT (handler never reached) + audit row carries the code", async () => {
@@ -2295,7 +2296,7 @@ describe("withToolContext — v1.56 F3b tainted_source audit threading", () => {
   });
 
   async function readRows(): Promise<Array<Record<string, unknown>>> {
-    await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
     const content = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
     return content.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
   }
@@ -2404,7 +2405,7 @@ describe("withToolContext — v1.74 PR-2a OperatorContext threading", () => {
   });
 
   async function readRows(): Promise<Array<Record<string, unknown>>> {
-    await new Promise((r) => setTimeout(r, 20));
+    await __drainAuditWrites();
     const content = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
     return content.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
   }

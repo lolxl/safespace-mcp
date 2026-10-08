@@ -21,7 +21,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AUDIT_META_CHANNELS } from "../audit";
+import { AUDIT_META_CHANNELS, __drainAuditWrites } from "../audit";
 import type { TokenSet } from "../auth/refresh";
 import type { AuditChannel, ToolContext } from "./types";
 import {
@@ -142,8 +142,8 @@ describe("v1.64 Phase B (B1) — ctx.audit is the single recording surface", () 
           },
           makeDeps(),
         );
-        // auditEnd is fire-and-forget (`void auditEnd(...)`); let the append flush.
-        await new Promise((r) => setTimeout(r, 20));
+        // auditEnd is fire-and-forget (`void auditEnd(...)`); wait for the queued append.
+        await __drainAuditWrites();
         const content = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
         const rows = content.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
         const row = rows[rows.length - 1]! as Record<string, unknown>;
@@ -173,7 +173,7 @@ describe("v1.64 Phase B (B1) — ctx.audit is the single recording surface", () 
         },
         makeDeps(),
       );
-      await new Promise((r) => setTimeout(r, 20));
+      await __drainAuditWrites();
       const content = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
       const rows = content.split("\n").filter((l) => l.length > 0).map((l) => JSON.parse(l));
       const row = rows[rows.length - 1]! as Record<string, unknown>;

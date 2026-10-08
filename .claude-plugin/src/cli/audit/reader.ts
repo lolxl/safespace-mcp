@@ -3,8 +3,8 @@
 // Why streaming (not readFile + split): the audit.jsonl file is append-only
 // and can grow large (10MB+ ceiling per design §8 Q3 before stats becomes
 // slow). Loading the whole file into memory would OOM on long-running
-// installs. Use Node `readline` over `createReadStream` — line-by-line, O(1)
-// memory regardless of file size.
+// installs. Lines are streamed with the audit writers' own splitter (`rawLines`) —
+// line-by-line, memory bounded by the longest line.
 //
 // Malformed-line policy (sec-rev hook #5 alignment): a broken JSON line is
 // SKIPPED with a one-line stderr warning. We do NOT echo the raw line — it
@@ -12,11 +12,10 @@
 // `audit recent` output. Skipping preserves the "audit reader is read-only,
 // never crashes" invariant.
 
-import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createInterface } from "node:readline";
 import { configDir } from "../../auth/keychain";
+import { auditCliPath, rawLines } from "../../audit/cli-chain";
 
 /** Path to audit.jsonl in the active config dir. Centralized so all 4
  *  sub-subcommands read from the same place. */
@@ -57,46 +56,40 @@ export async function* streamAuditRows(
   filePath: string = auditFilePath(),
   sink: ReaderSink = DEFAULT_SINK,
 ): AsyncGenerator<AuditRow> {
-  // Pre-check: avoid createReadStream error when file is missing. fs/promises
-  // stat returns ENOENT cleanly; the readline path would surface a less
-  // helpful "ENOENT, open ..." async stack to stderr.
+  // Pre-check: a missing file yields nothing (the stream would throw ENOENT).
   try {
     await fs.access(filePath);
   } catch {
     return;
   }
 
-  const stream = createReadStream(filePath, { encoding: "utf8" });
-  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  // The audit writers' own splitter (lines end at "\r\n", "\n" or a lone "\r" only), not
+  // `node:readline`: newer runtimes' readline also ends a line at U+2028 / U+2029, which
+  // JSON.stringify leaves raw inside strings, so readline would cut such a row in two
+  // while the writers see one row. One splitter keeps every reader and both writers
+  // agreeing on the rows, whatever the runtime.
   let lineNo = 0;
-  try {
-    for await (const raw of rl) {
-      lineNo++;
-      if (raw.length === 0) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch (e) {
-        // sec hook #5: NEVER echo the raw line; reference only the line
-        // number so an operator can investigate via `sed -n 'Np' audit.jsonl`.
-        sink.warn(
-          `[safespace audit] skipped malformed JSON at line ${lineNo}: ${e instanceof Error ? e.message : String(e)}`,
-        );
-        continue;
-      }
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        sink.warn(
-          `[safespace audit] skipped non-object row at line ${lineNo}`,
-        );
-        continue;
-      }
-      yield parsed as AuditRow;
+  for await (const { text: raw } of rawLines(filePath)) {
+    lineNo++;
+    if (raw.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      // sec hook #5: NEVER echo the raw line; reference only the line
+      // number so an operator can investigate via `sed -n 'Np' audit.jsonl`.
+      sink.warn(
+        `[safespace audit] skipped malformed JSON at line ${lineNo}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      continue;
     }
-  } finally {
-    // readline closes the underlying stream on `for await` exit, but be
-    // explicit in case of early break.
-    rl.close();
-    stream.close();
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      sink.warn(
+        `[safespace audit] skipped non-object row at line ${lineNo}`,
+      );
+      continue;
+    }
+    yield parsed as AuditRow;
   }
 }
 
@@ -114,6 +107,57 @@ export async function collectAuditRows(
     if (predicate(row)) out.push(row);
   }
   return out;
+}
+
+/** Which chain file a row was read from: "server" = audit.jsonl, "cli" =
+ *  audit-cli.jsonl (rows written by `safespace` CLI processes). Provenance is the FILE,
+ *  never a field inside the row. */
+export type AuditSource = "server" | "cli";
+
+/** True when audit-cli.jsonl exists (only then do the readers change their output). */
+export async function hasCliAuditFile(): Promise<boolean> {
+  try {
+    await fs.access(auditCliPath());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Every audit row of both chain files, each tagged with its source: audit.jsonl's rows
+ *  in file order, then audit-cli.jsonl's. Streaming (O(1) memory) — for readers whose
+ *  result does not depend on row order. With no CLI file it yields exactly
+ *  `streamAuditRows()`. */
+export async function* streamAuditSources(
+  sink: ReaderSink = DEFAULT_SINK,
+): AsyncGenerator<{ row: AuditRow; source: AuditSource }> {
+  for await (const row of streamAuditRows(auditFilePath(), sink)) yield { row, source: "server" };
+  for await (const row of streamAuditRows(auditCliPath(), sink)) yield { row, source: "cli" };
+}
+
+/** Collect matching rows of both files in time order, for `audit recent`. With no CLI
+ *  file: audit.jsonl's rows in file order (today's behaviour). With one: sorted by `ts`
+ *  (a string compare — toISOString is fixed-width, so it is chronological), stable
+ *  (audit.jsonl first, then line order); a row without a string `ts` takes the key of
+ *  the row before it in the same file. Rows are never dropped. */
+export async function collectAuditRowsBothFiles(
+  predicate: (row: AuditRow) => boolean,
+  sink: ReaderSink = DEFAULT_SINK,
+): Promise<Array<{ row: AuditRow; source: AuditSource }>> {
+  if (!(await hasCliAuditFile())) {
+    return (await collectAuditRows(predicate, auditFilePath(), sink)).map((row) => ({ row, source: "server" }));
+  }
+  const keyed: Array<{ row: AuditRow; source: AuditSource; key: string; seq: number }> = [];
+  let seq = 0;
+  for (const [source, file] of [["server", auditFilePath()], ["cli", auditCliPath()]] as const) {
+    let key = "";
+    for await (const row of streamAuditRows(file, sink)) {
+      if (typeof row.ts === "string") key = row.ts;
+      if (predicate(row)) keyed.push({ row, source, key, seq: seq++ });
+    }
+  }
+  keyed.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.seq - b.seq));
+  return keyed.map(({ row, source }) => ({ row, source }));
 }
 
 /** Truncate a hash string to 12 hex characters + ellipsis for display.

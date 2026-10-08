@@ -76,10 +76,10 @@ import { AUDIT_META_CHANNELS, type SuspiciousClassification } from "../../audit/
 import { CliError, type CliIO } from "../../cli";
 import {
   parseWindow,
-  streamAuditRows,
   strictParseInt,
   strictParseIso8601,
   type AuditRow,
+  streamAuditSources,
 } from "./reader";
 import { renderJson, renderTable } from "./suspicious-render";
 
@@ -542,7 +542,7 @@ export async function runAuditSuspicious(args: string[], io: CliIO): Promise<voi
     invisible_other: 0,
   };
 
-  for await (const row of streamAuditRows(undefined, { warn: (m) => io.err(m) })) {
+  for await (const { row } of streamAuditSources({ warn: (m) => io.err(m) })) {
     if (typeof row.ts !== "string") continue;
     const t = Date.parse(row.ts);
     if (Number.isNaN(t) || t < cutoffMs) continue;

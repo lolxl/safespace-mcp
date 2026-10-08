@@ -1,7 +1,7 @@
 {
   "name": "safespace-mcp",
   "description": "The AI safety gateway for an agent's external surface — a provider-agnostic safety envelope between an AI agent and any source it touches. 129 tools across Google Workspace (the flagship connector), GitHub (read + allowlist-gated writes), Notion (read + sanitize-gated writes), X, a keyless SSRF-gated web_fetch, a default-deny path-gated fs_read, and LINE / Telegram / Discord / Slack / Mattermost messaging. Tier-based tool exposure (read|write|share) plus a per-connector toggle, tokens behind a SecretBackend (Keychain / encrypted file), MCP-layer untrusted-content tagging, tamper-evident audit trail.",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": { "name": "lolxl" },
   "homepage": "https://github.com/lolxl/safespace-mcp",
   "license": "Apache-2.0",

@@ -3,18 +3,17 @@
 // send-approval / cross-account aggregate).
 // Extracted VERBATIM from audit.ts (the chain WRITER) as a sibling leaf. Each
 // appender builds its payload then routes through the chain writer's
-// `appendChainedRow` (server-process rows join the v1.89 tamper-evident chain) or
-// `appendBareRow` (the CLI send-approval approved/denied rows, a separate writer
-// process). Output is byte-identical to the pre-split inline appenders.
+// `appendChainedRow`, which picks the chain file from the process role (the server's
+// audit.jsonl, or audit-cli.jsonl for a `safespace` CLI process).
 //
-// RUNTIME-SAFE CYCLE: this module imports appendChainedRow / appendBareRow /
-// hashTargetEmail / getRunId from ../audit, which re-exports this module (the
-// barrel). The cycle is safe because (a) those four are FUNCTION DECLARATIONS in
+// RUNTIME-SAFE CYCLE: this module imports appendChainedRow / hashTargetEmail /
+// getRunId from ../audit, which re-exports this module (the
+// barrel). The cycle is safe because (a) those three are FUNCTION DECLARATIONS in
 // audit.ts (hoisted — initialized before any statement runs) and (b) this module
 // only CALLS them inside appender bodies (at runtime), never at module-eval time.
 // Same documented pattern as tools/with-all-accounts.ts <-> tools/registry.
 
-import { appendBareRow, appendChainedRow, getRunId, hashTargetEmail } from "../audit";
+import { appendChainedRow, getRunId, hashTargetEmail } from "../audit";
 import { canonicalizeTarget, type ApprovalTarget } from "../auth/send-approval-store";
 
 export interface AuditShareEventContext {
@@ -173,17 +172,10 @@ export async function auditSendApprovalEvent(ctx: AuditSendApprovalContext): Pro
     const th = await hashTargetEmail(JSON.stringify(canonicalizeTarget(ctx.target))).catch(() => null);
     if (th !== null) payload.target_hash = th;
   }
-  // Process-scoped chaining (v1.89 single-writer): the SERVER emits the blocked
-  // (`pending`) + approved-send-went-through (`consumed`) events and joins them to
-  // the tamper-evident chain; the owner's CLI actions (`approved` / `denied`) are
-  // emitted by a SEPARATE process (cli/send.ts) and MUST stay unchained — a second
-  // writer extending the chain would fork it. `verify` tolerates these unchained
-  // `event:` rows.
-  if (ctx.event === "pending" || ctx.event === "consumed") {
-    await appendChainedRow(payload, "audit send-approval");
-  } else {
-    await appendBareRow(payload, "audit send-approval");
-  }
+  // The writing process picks the chain: the server's `pending` / `consumed` rows join
+  // audit.jsonl; the owner's CLI `approved` / `denied` (cli/send.ts) — and the rows of a
+  // `safespace exec` send — join audit-cli.jsonl.
+  await appendChainedRow(payload, "audit send-approval");
 }
 
 // v1.14 Phase 1: cross-account aggregate audit row.

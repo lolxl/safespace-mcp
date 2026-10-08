@@ -230,23 +230,35 @@ v1.35**, n/h gap shut, Devanagari formally closed).
     `alice@…` or `line:…` can share that prefix. A value that was never a valid id was
     ignored (secrets stayed under the plain key), so only unsetting it is needed.
 
-14. **`safespace exec` is a second chained-audit writer — concurrent use with a running
-    server is unsupported.** The hash chain assumes one appending process (`audit.ts`,
-    `docs/AUDIT-CHAIN.md`), but `exec` writes its per-call rows through the same
-    `auditEnd` → `appendChainedRow` path from a separate process. With a server running
-    on the same config dir, server row A → `exec` row B → server row C (C chained to A,
-    from the server's cached tip): `safespace audit verify` reports a break at C even
-    though every row is present, AND deleting B restores a valid A → C chain without the
-    salt — the `exec` rows written during such an overlap are not tamper-evident.
-    Pre-existing for OAuth tools; since `exec` routes every tool to its real choke point,
-    any tool can trigger it. A naive fix (re-read the file tip whenever another process
-    appended) would also chain onto a truncated tail and hide the truncation that a later
-    server write exposes today; a fix must at least refuse a tip below the last offset
-    this process wrote, or keep `exec` rows out of the chain as tolerated `event` rows, or
-    take a cross-process writer lock. Needs its own design. `exec` also skips the server's
-    refuse-to-start checks and the per-tool `min_tier` gate (handlers' own tier re-checks
-    still run), and the F1 burst window is per process, so it never spans `exec` runs; F4,
-    the egress allowlists, send approval and sanitize still apply per call.
+14. ~~**`safespace exec` is a second chained-audit writer**~~ — **CLOSED**: CLI processes
+    (`exec`, `send approve/deny`) write their own chain, `audit-cli.jsonl`; `audit.jsonl` has
+    the server as its only writer, and each server start anchors the CLI chain's verified
+    tip so deleting or cutting the CLI file is detected. Remaining limits (rows after the
+    last anchor, overlapping CLI processes, a server row followed by an offline `exec`, both
+    files rolled back together) are listed in `docs/AUDIT-CHAIN.md`. `exec` still skips the
+    server's refuse-to-start checks and the per-tool `min_tier` gate (handlers' own tier
+    re-checks run), and the F1 burst window is per process; F4, the egress allowlists, send
+    approval and sanitize apply per call.
+
+15. ~~**`audit verify` tolerates unchained `event` rows anywhere in `audit.jsonl`**~~ —
+    **CLOSED**: a fresh `audit.jsonl` chains from a strict genesis (v2) and every line must
+    be chained; an older (v1) chain gets one chained `audit_chain_strict` marker from the
+    server and is strict from it on. The server restart no longer re-seeds at genesis on an
+    unchained row, so an older log ending in an unchained approve/deny row no longer breaks.
+    A write-once commitment beside the salt (`audit-chain.json`) records each strict
+    chain's first row before it is written, so stripping every row's MAC, emptying the log
+    or cutting it back past that row is detected.
+    Residual (documented in `docs/AUDIT-CHAIN.md`): the part of an upgraded chain before
+    its marker keeps the old tolerance for good.
+
+16. ~~**`canonicalJson` drops an own `"__proto__"` member**~~ — **CLOSED**: `sortKeysDeep`
+    builds the canonical object with a null prototype, so an own `__proto__` key (what
+    `JSON.parse` yields) is part of the MAC input and adding one to a past row breaks
+    verify. Rows already written keep their MAC as long as they carry no own `__proto__`
+    key. Every writer builds rows from literal keys, and the one path that copies values
+    from an error (the forensic gap-fill) only ever held strings or `true`; it now copies
+    scalar values only, so no row can carry one. A golden-vector test pins an existing row's
+    MAC. A row that did carry such a key would report `mac_mismatch` under the new code.
 
 > **CLOSED in v1.34:** the recursive-AST / nested-formula bypass (v1.21 §3.3)
 > that occupied this list through v1.33 — closed via a string-literal-aware

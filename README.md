@@ -258,7 +258,7 @@ safespace audit sessions [--json]
 
 ### `safespace exec` — call tools from any non-Claude client
 
-Runs a tool through the same choke points the MCP server uses (auth / sanitize / egress gates / audit), emitting one JSON line on stdout. Useful for cron jobs and scripts. Unlike the server it skips the per-tool `min_tier` gate (handlers' own tier re-checks still read `SAFESPACE_TIER`), `SAFESPACE_CONNECTORS`, and the server's refuse-to-start checks; the F1 burst cap does not span separate `exec` runs. Do not run `exec` while a server is running on the same config dir: two processes appending to the audit hash chain is unsupported (see `docs/CARRY-FORWARD.md` item 14).
+Runs a tool through the same choke points the MCP server uses (auth / sanitize / egress gates / audit), emitting one JSON line on stdout. Useful for cron jobs and scripts. Unlike the server it skips the per-tool `min_tier` gate (handlers' own tier re-checks still read `SAFESPACE_TIER`), `SAFESPACE_CONNECTORS`, and the server's refuse-to-start checks; the F1 burst cap does not span separate `exec` runs. Its audit rows go to their own chain, `audit-cli.jsonl`, sealed by the server's anchors (see `docs/AUDIT-CHAIN.md`); running it beside a server is fine, two `exec` runs at the same moment fork that chain.
 
 ```bash
 safespace exec gmail_search \

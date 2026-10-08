@@ -19,6 +19,7 @@
 //   - --json output replaces $HOME prefix with `~/` to avoid leaking the OS
 //     username via paths (H-2). Human-readable text output keeps full paths.
 
+import * as path from "node:path";
 import { readActive } from "./auth/active";
 import { configDir } from "./auth/keychain";
 import {
@@ -29,6 +30,9 @@ import {
   readTier,
   readAccountsSummary,
   tailReadLastAuditEntry,
+  AUDIT_FILE,
+  AUDIT_CLI_FILE,
+  safeStat,
 } from "./status/shared";
 
 // ----- public surface (the status/ split is internal; importers use `./status`) -----
@@ -53,15 +57,28 @@ export async function runStatus(opts: StatusOptions, io: CliIO): Promise<StatusR
   const tier = readTier();
   const accountsSummary = await readAccountsSummary();
   const activeAccount = await readActive(); // H-3: EMAIL_RE-validated
-  const audit = await tailReadLastAuditEntry();
+  // With audit-cli.jsonl present, compare both files' latest real call (64 KB tails,
+  // skipping anchor/event lines); without it, today's single-file read.
+  const hasCli = (await safeStat(path.join(cfg, AUDIT_CLI_FILE))).exists;
+  const audit = hasCli
+    ? await tailReadLastAuditEntry({ file: AUDIT_FILE, tailBytes: 65536, scanBack: true })
+    : await tailReadLastAuditEntry();
+  const cliAudit = hasCli
+    ? await tailReadLastAuditEntry({ file: AUDIT_CLI_FILE, tailBytes: 65536, scanBack: true })
+    : null;
+  const lastEntry =
+    cliAudit?.lastEntry && (!audit.lastEntry || cliAudit.lastEntry.ts > audit.lastEntry.ts)
+      ? cliAudit.lastEntry
+      : audit.lastEntry;
 
   const report: StatusReport = {
     configDir: cfg,
     tier,
     accountCount: accountsSummary.count ?? 0,
     activeAccount,
-    lastAuditEntry: audit.lastEntry,
+    lastAuditEntry: lastEntry,
     auditLineCount: audit.lineCount,
+    ...(cliAudit ? { auditCliLineCount: cliAudit.lineCount } : {}),
   };
 
   if (opts.json) {
@@ -75,6 +92,7 @@ export async function runStatus(opts: StatusOptions, io: CliIO): Promise<StatusR
         active_account: report.activeAccount,
         last_audit_entry: report.lastAuditEntry, // {ts, tool} only — L-3
         audit_line_count: report.auditLineCount,
+        ...(report.auditCliLineCount !== undefined ? { audit_cli_line_count: report.auditCliLineCount } : {}),
       }),
     );
   } else {
@@ -87,7 +105,11 @@ export async function runStatus(opts: StatusOptions, io: CliIO): Promise<StatusR
     } else {
       io.out(`last call:  (no audit entries)`);
     }
-    io.out(`audit log:  ${report.auditLineCount} entries`);
+    io.out(
+      report.auditCliLineCount === undefined
+        ? `audit log:  ${report.auditLineCount} entries`
+        : `audit log:  ${report.auditLineCount} entries (audit.jsonl) + ${report.auditCliLineCount} (audit-cli.jsonl)`,
+    );
   }
 
   return report;

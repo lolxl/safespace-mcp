@@ -21,7 +21,7 @@
 // v1.89 chain WRITER (audit.ts) off this CLI reader's import path (the edge break).
 import { AUDIT_META_CHANNELS } from "../../audit/meta-channels";
 import { CliError, type CliIO } from "../../cli";
-import { strictParseIso8601, streamAuditRows, type AuditRow } from "./reader";
+import { strictParseIso8601, type AuditRow, streamAuditSources } from "./reader";
 
 const USAGE = "usage: safespace audit policy-decisions [--since YYYY-MM-DD] [--json]";
 
@@ -101,7 +101,7 @@ export async function runAuditPolicyDecisions(args: string[], io: CliIO): Promis
   grouped.set("unknown", new Map()); // future-drift bucket
   const unknownChannelsWarned = new Set<string>();
 
-  for await (const row of streamAuditRows(undefined, { warn: (m) => io.err(m) })) {
+  for await (const { row } of streamAuditSources({ warn: (m) => io.err(m) })) {
     if (typeof row.policy_decision !== "string") continue;
     if (opts.since) {
       if (typeof row.ts !== "string") continue;

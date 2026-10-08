@@ -7,12 +7,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
+import { countRows } from "../audit/cli-chain";
 import { configDir } from "../auth/keychain";
 import { ENV_TIER } from "../config";
 
 export const ACCOUNTS_FILE = "accounts.json";
 export const ENV_FILE = ".env";
 export const AUDIT_FILE = "audit.jsonl";
+export const AUDIT_CLI_FILE = "audit-cli.jsonl";
 export const SALT_FILE = "audit-salt";
 export const SALT_SIZE_BYTES = 32;
 const AUDIT_TAIL_BYTES = 512; // M-2: tail-read window; covers ~3 typical audit lines
@@ -42,6 +44,8 @@ export interface StatusReport {
   activeAccount: string | null;
   lastAuditEntry: { ts: string; tool: string } | null;
   auditLineCount: number;
+  /** Lines in audit-cli.jsonl; present only when that file exists. */
+  auditCliLineCount?: number;
 }
 
 export interface CliIO {
@@ -156,11 +160,17 @@ export async function readAccountsSummary(): Promise<AccountsSummary> {
 
 // ----- audit.jsonl tail-read (M-2, L-3) -----
 
-export async function tailReadLastAuditEntry(): Promise<{
+export async function tailReadLastAuditEntry(
+  /** Defaults reproduce the original single-file read (audit.jsonl, 512-byte tail,
+   *  last line only). `scanBack` keeps the LAST tail line that has a string `ts` and
+   *  `tool` (skipping e.g. an anchor or event row) — used when two files are compared. */
+  opts: { file?: string; tailBytes?: number; scanBack?: boolean } = {},
+): Promise<{
   lineCount: number;
   lastEntry: { ts: string; tool: string } | null;
 }> {
-  const p = path.join(configDir(), AUDIT_FILE);
+  const p = path.join(configDir(), opts.file ?? AUDIT_FILE);
+  const tailBytes = opts.tailBytes ?? AUDIT_TAIL_BYTES;
   const stat = await safeStat(p);
   if (!stat.exists || stat.size === 0) return { lineCount: 0, lastEntry: null };
 
@@ -168,15 +178,20 @@ export async function tailReadLastAuditEntry(): Promise<{
   try {
     fh = await fs.open(p, "r");
     // M-2: read only the last AUDIT_TAIL_BYTES, not the full file.
-    const start = Math.max(0, stat.size - AUDIT_TAIL_BYTES);
+    const start = Math.max(0, stat.size - tailBytes);
     const len = stat.size - start;
     const buf = Buffer.alloc(len);
     await fh.read(buf, 0, len, start);
     const text = buf.toString("utf8");
-    const lines = text.split("\n").filter((l) => l.length > 0);
-    const lastLine = lines[lines.length - 1];
+    // Lines end where the audit readers end them ("\r\n", "\n" or a lone "\r").
+    const lines = text.split(/\r\n|\n|\r/).filter((l) => l.length > 0);
+    // Only the original read takes the raw last line; scanBack walks back through the tail
+    // and skips an unterminated final segment (a write in progress).
+    const complete = opts.scanBack && !/[\r\n]$/.test(text) ? lines.slice(0, -1) : lines;
+    const candidates = opts.scanBack ? [...complete].reverse() : lines.slice(-1);
     let lastEntry: { ts: string; tool: string } | null = null;
-    if (lastLine) {
+    for (const lastLine of candidates) {
+      if (lastEntry !== null) break;
       try {
         const obj = JSON.parse(lastLine) as unknown;
         // L-3: extract ONLY ts + tool. Ignore account / argsHash / args.
@@ -197,25 +212,8 @@ export async function tailReadLastAuditEntry(): Promise<{
       }
     }
 
-    // Line count via newline-byte scan; doesn't buffer parsed JSON objects.
-    let lineCount = 0;
-    const counterBuf = Buffer.alloc(8192);
-    let pos = 0;
-    while (pos < stat.size) {
-      const remaining = stat.size - pos;
-      const toRead = Math.min(remaining, counterBuf.length);
-      await fh.read(counterBuf, 0, toRead, pos);
-      for (let i = 0; i < toRead; i++) {
-        if (counterBuf[i] === 0x0a) lineCount++;
-      }
-      pos += toRead;
-    }
-    // Final line without trailing newline still counts.
-    if (stat.size > 0) {
-      const lastByteBuf = Buffer.alloc(1);
-      await fh.read(lastByteBuf, 0, 1, stat.size - 1);
-      if (lastByteBuf[0] !== 0x0a) lineCount++;
-    }
+    // Row count as the audit readers see the file (non-empty lines, streamed).
+    const lineCount = await countRows(p);
 
     return { lineCount, lastEntry };
   } catch {

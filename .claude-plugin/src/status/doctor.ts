@@ -33,6 +33,7 @@ import {
   ACCOUNTS_FILE,
   ENV_FILE,
   AUDIT_FILE,
+  AUDIT_CLI_FILE,
   SALT_FILE,
   SALT_SIZE_BYTES,
   safeStat,
@@ -131,6 +132,13 @@ export async function runDoctor(opts: DoctorOptions, io: CliIO): Promise<DoctorR
       status: auditMode.ok ? "pass" : "fail",
       value: auditMode.value,
     });
+  }
+
+  // audit-cli.jsonl (the CLI processes' chain) — only when it exists.
+  const auditCliStat = await safeStat(path.join(cfg, AUDIT_CLI_FILE));
+  if (auditCliStat.exists) {
+    const mode = modeVerdict(auditCliStat.mode, 0o600, platform);
+    checks.push({ name: "audit_cli_jsonl", status: mode.ok ? "pass" : "fail", value: mode.value });
   }
 
   // audit-salt: mode + size 32 bytes (if exists; missing is OK — created lazily)

@@ -42,8 +42,8 @@ import { CliError, type CliIO } from "../../cli";
 import {
   parseWindow,
   strictParseInt,
-  streamAuditRows,
   type AuditRow,
+  streamAuditSources,
 } from "./reader";
 
 const USAGE =
@@ -205,7 +205,7 @@ export async function runAuditDeletes(args: string[], io: CliIO): Promise<void> 
   let countTasks = 0;
   let countPlaylist = 0;
 
-  for await (const row of streamAuditRows(undefined, { warn: (m) => io.err(m) })) {
+  for await (const { row } of streamAuditSources({ warn: (m) => io.err(m) })) {
     if (typeof row.ts !== "string") continue;
     const t = Date.parse(row.ts);
     if (Number.isNaN(t) || t < cutoffMs) continue;

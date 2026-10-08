@@ -24,6 +24,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { configDir } from "./auth/keychain";
 import { AUDIT_HMAC_ALG } from "./crypto-algorithms";
+import { auditCliPath, cliChainGenesis, endsMidLine, resumeServerChain, resumeTip, walkStrictChain } from "./audit/cli-chain";
 // The per-channel forensic metadata registry was extracted to ./audit/meta-channels
 // (a PURE leaf) to break the reader -> writer import edge — the read-side CLI
 // consumers now import the registry without pulling this chain writer onto their
@@ -43,7 +44,7 @@ import {
 } from "./audit/meta-channels";
 export * from "./audit/meta-channels";
 // The bare forensic/policy appenders live in ./audit/events (a sibling leaf). They
-// call appendChainedRow / appendBareRow (exported below) — a RUNTIME-SAFE cycle:
+// call appendChainedRow (exported below) — a RUNTIME-SAFE cycle:
 // those are hoisted function declarations used only inside the appender bodies
 // (see audit/events.ts). Re-exported so external `from "../audit"` imports of the
 // appenders stay unchanged (audit.ts is the barrel).
@@ -72,6 +73,174 @@ function auditPath(): string {
 
 function auditSaltPath(): string {
   return path.join(configDir(), AUDIT_SALT_FILE);
+}
+
+/** The strict-chain commitment for audit.jsonl, kept beside the salt (outside the log):
+ *  `{"strict":"v2"}` or `{"strict":"v1","marker_mac":…}`. Written ONCE (exclusive create)
+ *  by the server, once the chain it commits to is on disk; never overwritten. `audit
+ *  verify` holds the log to it, so stripping every row's MAC (which would otherwise read
+ *  as a pre-chain prefix) or cutting the log back past the marker is a break.
+ *  docs/AUDIT-CHAIN.md. */
+export type StrictCommitment = {
+  strict: "v1" | "v2";
+  /** The MAC of the chain's marker row, which `verify` requires to be in the log. */
+  marker_mac: string;
+  /** The marker row and its predecessor, so a marker whose append failed can be
+   *  re-appended exactly (same content, same MAC). */
+  prev_mac?: string;
+  marker_row?: Record<string, unknown>;
+  /** How many JSON rows followed `prev_mac` in the log when the row was committed (an
+   *  older log may end in unchained rows): the row is re-appended only while that is
+   *  still the case. */
+  rows_after_prev?: number;
+};
+const AUDIT_CHAIN_COMMITMENT_FILE = "audit-chain.json";
+
+export function auditChainCommitmentPath(): string {
+  return path.join(configDir(), AUDIT_CHAIN_COMMITMENT_FILE);
+}
+
+/** True when the committed row's landing has been recorded (`audit verify` warns when a
+ *  commitment exists without it). */
+export async function strictCommitmentLanded(): Promise<boolean> {
+  return landedExists();
+}
+
+/** Created (once) after the committed row is on disk. Until it exists a restart may
+ *  re-append the committed row (its append may have failed); once it exists it never does,
+ *  so a log emptied or cut back later cannot get its first row back and pass verify. */
+function auditChainLandedPath(): string {
+  return `${auditChainCommitmentPath()}.landed`;
+}
+
+/** The commitment, null when there is none, or "invalid" when the file exists but is not
+ *  one (verify treats that as a break; the writer leaves it alone). */
+export async function readStrictCommitment(): Promise<StrictCommitment | null | "invalid"> {
+  let text: string;
+  try {
+    text = await fs.readFile(auditChainCommitmentPath(), "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return "invalid"; // unreadable: the writer treats it as committed, verify reports it
+  }
+  try {
+    const v = JSON.parse(text) as Record<string, unknown>;
+    if (v && (v.strict === "v1" || v.strict === "v2") && typeof v.marker_mac === "string") {
+      const c: StrictCommitment = { strict: v.strict, marker_mac: v.marker_mac };
+      if (typeof v.prev_mac === "string") c.prev_mac = v.prev_mac;
+      if (v.marker_row && typeof v.marker_row === "object" && !Array.isArray(v.marker_row)) {
+        c.marker_row = v.marker_row as Record<string, unknown>;
+      }
+      if (typeof v.rows_after_prev === "number") c.rows_after_prev = v.rows_after_prev;
+      return c;
+    }
+  } catch {
+    // fall through
+  }
+  return "invalid";
+}
+
+async function writeStrictCommitmentOnce(c: StrictCommitment): Promise<void> {
+  if (!(await publishOnce(auditChainCommitmentPath(), JSON.stringify(c) + "\n"))) {
+    // Another commitment is already there (a concurrent writer, or an earlier attempt):
+    // abandon this write; the next one re-reads the file and follows that commitment.
+    throw new Error("a strict commitment already exists; resuming from it on the next write");
+  }
+}
+
+/** fsync a file; errors propagate (a row that may not be durable must not be recorded as
+ *  landed). */
+async function syncFile(p: string): Promise<void> {
+  const fh = await fs.open(p, "r");
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+}
+
+/** fsync a directory, best-effort (not every platform can sync a directory). */
+async function syncDir(p: string): Promise<void> {
+  let fh: fs.FileHandle | null = null;
+  try {
+    fh = await fs.open(p, "r");
+    await fh.sync();
+  } catch {
+    // best-effort
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+async function landedExists(): Promise<boolean> {
+  try {
+    await fs.access(auditChainLandedPath());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Write `text` to `target` once: in full (and synced) to a private temp file, then
+ *  published with link(2), which never replaces an existing file — a crash leaves either
+ *  no file or a complete one — and the directory synced. An existing file is left alone.
+ *  True when this call created it. */
+async function publishOnce(target: string, text: string): Promise<boolean> {
+  const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  const fh = await fs.open(tmp, "wx", 0o600);
+  try {
+    await fh.writeFile(text);
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  let created = true;
+  try {
+    await fs.link(tmp, target);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") created = false;
+    else if (code === "ENOTSUP" || code === "EPERM" || code === "EXDEV" || code === "ENOSYS" || code === "EOPNOTSUPP") {
+      // A filesystem without hard links: exclusive-create the target itself (one server
+      // writes this config dir; a crash mid-write leaves a partial file, which verify
+      // reports and the writer leaves alone).
+      created = await publishByRename(tmp, target);
+    } else throw e;
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => {}); // a leftover temp file is harmless
+  }
+  await syncDir(path.dirname(target));
+  return created;
+}
+
+/** The no-hard-link fallback: rename the complete, synced temp file into place, but only if
+ *  the target does not exist yet (one server writes this config dir; two at once is the
+ *  documented anomaly). The content still appears atomically — never a partial file. */
+async function publishByRename(tmp: string, target: string): Promise<boolean> {
+  try {
+    await fs.access(target);
+    return false;
+  } catch {
+    await fs.rename(tmp, target);
+    return true;
+  }
+}
+
+/** Record that the committed row reached the log (the log synced first). A failure here
+ *  is logged and retried by every later write (and the next start); it never stops audit
+ *  rows. */
+async function recordLanded(logPath: string): Promise<void> {
+  try {
+    await syncFile(logPath);
+    await publishOnce(auditChainLandedPath(), "");
+    landedDue = false;
+  } catch (e) {
+    landedDue = true;
+    if (!landedFailureReported) {
+      landedFailureReported = true;
+      console.error(`[safespace] audit chain: recording that the committed row landed failed (retried by each later write): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 }
 
 /** Read the install-time HMAC salt for email hashing in audit logs, creating
@@ -146,19 +315,67 @@ export async function hashTargetEmail(email: string | null): Promise<string | nu
 // consistent) — truncation detection needs the tip MAC recorded out-of-band, which
 // `verify` prints for exactly that purpose.
 //
-// SINGLE-WRITER assumption: the running `lastMac` is per-process, and the only
-// supported topology is one stdio server process per config dir. Two server processes
-// appending to the same file would fork the chain — which `verify` would surface as a break (correctly: it IS an anomaly).
+// ONE WRITER PER CHAIN FILE: the running `lastMac` is per-process. audit.jsonl is
+// written only by the stdio server; rows from a `safespace` CLI process go to
+// audit-cli.jsonl, a separate chain (audit/cli-chain.ts). Two server processes on one
+// config dir, or two CLI processes writing at once, fork that file's chain — which
+// `verify` surfaces as a break (correctly: it IS an anomaly).
 
-/** The prev-mac seed for the FIRST chained row (and the restart point when the file
- *  has no chained tail). A fixed, non-secret label — the salt provides the secrecy. */
+/** The prev-mac seed for the FIRST chained row. Fixed, non-secret labels — the salt
+ *  provides the secrecy. v2 marks a STRICT chain (every line chained; a fresh audit.jsonl
+ *  starts here); v1 is a chain begun before strict chains, which `audit verify` tolerates
+ *  unchained event rows in until its first chained `STRICT_MARKER_EVENT` row. */
 const CHAIN_GENESIS = "safespace-audit-chain/genesis/v1";
+const CHAIN_GENESIS_STRICT = "safespace-audit-chain/genesis/v2";
+/** The event of the row the server writes once into a v1 chain: from it on, the chain is
+ *  strict. docs/AUDIT-CHAIN.md. */
+export const STRICT_MARKER_EVENT = "audit_chain_strict";
 
 let cachedSalt: Buffer | null = null;
+/** True while this server process still owes a v1 audit.jsonl its strict marker row. */
+let strictMarkerDue = false;
+/** True while this server process still owes the `.landed` record of its committed row. */
+let landedDue = false;
+/** Whether this process already reported a failing `.landed` record (reported once). */
+let landedFailureReported = false;
+/** JSON rows after the resumed tip (recorded in the commitment as `rows_after_prev`). */
+let rowsAfterTip = 0;
+/** Which strict chain this server process's log is (or becomes, with its marker). */
+let strictKind: "v1" | "v2" = "v2";
+/** The committed marker row this server process must re-append (its earlier append failed
+ *  after the commitment was written), or null. */
+let committedMarkerRow: Record<string, unknown> | null = null;
 /** The current chain tip (this process's last written row_mac). `undefined` until
  *  the first write lazily reads the file tail (continues an existing chain across a
  *  restart; CHAIN_GENESIS when the file is empty / has no chained tail). */
 let lastMac: string | undefined;
+/** The CLI chain's tip in this process (audit-cli.jsonl), resumed from that file's
+ *  VERIFIED prefix on the first CLI write. */
+let cliLastMac: string | undefined;
+/** True until this server process has anchored the CLI chain's tip (or found nothing to
+ *  anchor). See `serverCliAnchor`. */
+let cliAnchorDue = true;
+/** The CLI tip this server process last sealed, and how many anchor walks it has spent
+ *  while the CLI file's tail was unfinished (bounded so a planted partial line cannot make
+ *  every server write walk the file). */
+let lastAnchoredCliTip: string | null = null;
+let cliAnchorRetries = 0;
+const CLI_ANCHOR_MAX_RETRIES = 20;
+/** True once this process has checked audit.jsonl for a partial final line. */
+let serverTailChecked = false;
+
+/** Which chain file this process writes. "server" (the default) = audit.jsonl; "cli"
+ *  = audit-cli.jsonl. `runCli` sets "cli" first thing; a process keeps one role. */
+export type AuditChainRole = "server" | "cli";
+let chainRole: AuditChainRole = "server";
+
+export function setAuditChainRole(role: AuditChainRole): void {
+  chainRole = role;
+}
+
+export function auditChainRole(): AuditChainRole {
+  return chainRole;
+}
 
 async function chainSalt(): Promise<Buffer> {
   if (cachedSalt === null) cachedSalt = await getOrCreateAuditSalt();
@@ -177,7 +394,9 @@ function sortKeysDeep(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(sortKeysDeep);
   if (v !== null && typeof v === "object") {
     const src = v as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
+    // Null prototype: an own key named "__proto__" (what JSON.parse yields for one) must be
+    // stored as data, not hit the prototype setter and vanish from the MAC input.
+    const out: Record<string, unknown> = Object.create(null);
     for (const k of Object.keys(src).sort()) out[k] = sortKeysDeep(src[k]);
     return out;
   }
@@ -205,6 +424,10 @@ export function chainGenesis(): string {
   return CHAIN_GENESIS;
 }
 
+export function strictChainGenesis(): string {
+  return CHAIN_GENESIS_STRICT;
+}
+
 // A per-process write mutex: the chain needs SERIAL writes (each row folds in the
 // previous row's MAC), so concurrent auditEnd calls (async tools) must not
 // race to read-tip-then-append. Each call awaits its own segment, so a caller that
@@ -224,59 +447,62 @@ function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
   return result;
 }
 
-/** Read the chain tip (last row's `row_mac`) from the file tail — once per process,
- *  to continue an existing chain across a restart. Bounded tail read (rows are ~1 KB;
- *  16 KB covers the last row with huge margin). Missing file / unparseable tail / no
- *  `row_mac` (empty or all-legacy file) → CHAIN_GENESIS (the chain (re)starts here). */
-async function readChainTip(targetPath: string): Promise<string> {
-  try {
-    const stat = await fs.stat(targetPath);
-    if (stat.size === 0) return CHAIN_GENESIS;
-    // 64 KB tail — audit rows are ~1 KB (bounded metadata: hashes, counts, enums,
-    // whitelisted forensic fields), so this is a ~64× margin over a single row. A
-    // (pathological, unreached-in-practice) row LARGER than the window would make
-    // the last line parse fail → genesis re-seed on the next write → which `verify`
-    // surfaces as a break, not a silent hole.
-    const TAIL = 65536;
-    const start = Math.max(0, stat.size - TAIL);
-    const fh = await fs.open(targetPath, "r");
-    try {
-      const buf = Buffer.alloc(stat.size - start);
-      await fh.read(buf, 0, buf.length, start);
-      // The file ends with "\n"; the LAST non-empty segment is the complete last row
-      // (a leading partial segment from the window boundary is ignored).
-      const lines = buf.toString("utf8").split("\n").filter((l) => l.length > 0);
-      const last = lines[lines.length - 1];
-      if (last !== undefined) {
-        const parsed = JSON.parse(last) as Record<string, unknown>;
-        if (typeof parsed.row_mac === "string") return parsed.row_mac;
-      }
-    } finally {
-      await fh.close();
-    }
-  } catch {
-    // ENOENT / parse failure / read error → start a fresh chain at genesis.
-  }
-  return CHAIN_GENESIS;
-}
-
-/** Reset the in-memory chain state. TEST-ONLY (the per-process `lastMac` would
- *  otherwise leak across tests that share the module). */
+/** Reset the in-memory chain state and the role. TEST-ONLY (the per-process state
+ *  would otherwise leak across tests that share the module). Await
+ *  `__drainAuditWrites()` first when a write may still be in flight. */
 export function __resetChainState(): void {
   cachedSalt = null;
   lastMac = undefined;
+  cliLastMac = undefined;
+  cliAnchorDue = true;
+  lastAnchoredCliTip = null;
+  cliAnchorRetries = 0;
+  strictMarkerDue = false;
+  committedMarkerRow = null;
+  landedDue = false;
+  landedFailureReported = false;
+  rowsAfterTip = 0;
+  strictKind = "v2";
+  serverTailChecked = false;
+  chainRole = "server";
   writeTail = Promise.resolve();
 }
 
-/** Append one row to audit.jsonl as a link in the v1.89 tamper-evident chain:
- *  serialized through the per-process write mutex, folding in the previous chained
+/** Resolve once every queued audit write has finished. TEST-ONLY. */
+export function __drainAuditWrites(): Promise<void> {
+  return writeTail;
+}
+
+/** The server's anchor of the CLI chain: on the first chained server write in a process,
+ *  seal the CLI chain's VERIFIED tip into audit.jsonl so deleting, emptying or cutting
+ *  audit-cli.jsonl is detectable (`verify` checks every anchor's MAC is still present).
+ *  `anchor` is the row to append (null when nothing new to seal: no CLI file, nothing
+ *  verifiable, or the tip already sealed). `done` is false while the file's final line is
+ *  unfinished or it cannot be read: the verified prefix is sealed NOW (an appended partial
+ *  line cannot suppress sealing) and later writes retry, bounded, to seal the completed
+ *  tail. A file in which nothing verifies is not anchored — junk alone protects nothing,
+ *  and the strict walk already fails verify while it is there. */
+async function serverCliAnchor(salt: Buffer): Promise<{ anchor: Record<string, unknown> | null; done: boolean }> {
+  const walk = await walkStrictChain(auditCliPath(), salt, cliChainGenesis());
+  if (!walk.exists) return { anchor: null, done: true };
+  const unfinished = walk.reason === "read_error" || walk.reason === "incomplete_tail";
+  // A file that cannot be read at all stays due without a cap: the cap must not let a
+  // temporarily unreadable file go unsealed for good.
+  const unreadable = walk.reason === "read_error" && walk.tipMac === null;
+  const done = !unfinished || (!unreadable && ++cliAnchorRetries >= CLI_ANCHOR_MAX_RETRIES);
+  if (walk.tipMac === null || walk.tipMac === lastAnchoredCliTip) return { anchor: null, done };
+  return {
+    anchor: { ts: new Date().toISOString(), run_id: RUN_ID, event: "cli_chain_anchor", cli_tip_mac: walk.tipMac },
+    done,
+  };
+}
+
+/** Append one row as a link in this process's tamper-evident chain: audit.jsonl in
+ *  the "server" role, audit-cli.jsonl in the "cli" role (see `setAuditChainRole`).
+ *  Serialized through the per-process write mutex, folding in the previous chained
  *  row's MAC and stamping `row_mac`. Best-effort — any error is logged (with
- *  `label`) and swallowed so a broken audit file never fails a tool call.
- *
- *  SERVER-PROCESS callers ONLY. The single-writer chain assumes ONE appending
- *  process; the `safespace` CLI is a SEPARATE writer, so its rows must stay
- *  unchained (see `appendBareRow`) — a second writer extending the chain would
- *  fork it. `verify` tolerates the CLI's unchained `event:` rows.
+ *  `label`) and swallowed so a broken audit file never fails a tool call. Every audit
+ *  row goes through here; nothing is appended unchained.
  *
  *  MUTATES `payload` (adds `row_mac`). The MAC is computed over the payload
  *  BEFORE `row_mac` is added (a MAC can't hash itself); on a successful append
@@ -286,37 +512,140 @@ export function __resetChainState(): void {
  *  changed in the meantime (it never does in production; this keeps concurrent
  *  tests with per-test dirs from cross-contaminating). */
 export async function appendChainedRow(payload: Record<string, unknown>, label: string): Promise<void> {
+  // Role, directory and path are resolved at CALL time (not inside the mutex), so a
+  // queued write never lands in the other chain file.
+  const role = chainRole;
   const targetDir = configDir();
-  const targetPath = auditPath();
+  const targetPath = role === "cli" ? auditCliPath() : auditPath();
   try {
     await runExclusive(async () => {
       const salt = await chainSalt();
-      if (lastMac === undefined) lastMac = await readChainTip(targetPath);
-      const rowMac = computeRowMac(salt, lastMac, payload);
-      payload.row_mac = rowMac;
-      const line = JSON.stringify(payload) + "\n";
       await fs.mkdir(targetDir, { recursive: true, mode: 0o700 });
-      await fs.appendFile(targetPath, line, { mode: 0o600 });
-      lastMac = rowMac;
+      if (role === "cli") {
+        // Resume from the tip of the chain traced forward from genesis (forged, replayed,
+        // junk and losing-fork lines are skipped), so after a break later rows keep chaining
+        // one after another and removing the one bad row repairs the chain.
+        if (cliLastMac === undefined) cliLastMac = await resumeTip(targetPath, salt, cliChainGenesis());
+        const rowMac = computeRowMac(salt, cliLastMac, payload);
+        payload.row_mac = rowMac;
+        // Never glue onto a partial final line.
+        const sep = (await endsMidLine(targetPath)) ? "\n" : "";
+        await fs.appendFile(targetPath, sep + JSON.stringify(payload) + "\n", { mode: 0o600 });
+        cliLastMac = rowMac;
+        return;
+      }
+      // Continue the chain across a restart from the tip traced forward from its genesis
+      // (forged, replayed, junk and unchained lines are skipped; `resumeServerChain`).
+      if (lastMac === undefined) {
+        const commitment = await readStrictCommitment();
+        const valid = commitment !== null && commitment !== "invalid" ? commitment : null;
+        const r = await resumeServerChain(
+          targetPath, salt, CHAIN_GENESIS, CHAIN_GENESIS_STRICT, STRICT_MARKER_EVENT, valid?.marker_mac,
+        );
+        // Every strict chain holds one committed row (beside the salt, written BEFORE the row
+        // is appended): in a fresh log its first row (chained from the v2 genesis); in an
+        // older log a marker row after the existing chain. The commitment is never re-made
+        // and never answered with a second marker: if the log no longer matches it, verify
+        // reports it.
+        strictMarkerDue = commitment === null && r.markerMac === null;
+        if (commitment === null && r.markerMac !== null) {
+          // A marker on disk without its commitment (written by an earlier build): adopt it,
+          // and record that it landed (it is in the log).
+          await writeStrictCommitmentOnce({ strict: r.version === 2 ? "v2" : "v1", marker_mac: r.markerMac });
+          await recordLanded(targetPath);
+        }
+        const landed = await landedExists();
+        if (valid !== null && !landed && r.committedSeen) {
+          // The committed row is in the log but its landing was never recorded: record it now
+          // (the log is synced first), so a later emptied log cannot regain the row.
+          await recordLanded(targetPath);
+        }
+        // A committed row whose append failed: re-append that exact row when it never landed
+        // and the log still ends where it was to go.
+        // Re-append only when the log ends exactly where the row was to go: the same rows after
+        // that tip as when it was committed. Anything else means the log moved on or was
+        // rewritten — then nothing is re-appended and verify reports the missing row.
+        committedMarkerRow =
+          valid !== null && !landed && !r.committedSeen && valid.marker_row !== undefined &&
+          valid.prev_mac === r.tip &&
+          // records from builds before `rows_after_prev` carry no count: no count check
+          (valid.rows_after_prev === undefined || r.rowsAfterTip === valid.rows_after_prev)
+            ? valid.marker_row
+            : null;
+        // Under a v2 commitment a log with no chained row is never read as a pre-chain
+        // prefix: the chain restarts at v2 (verify reports the missing marker).
+        lastMac =
+          commitment !== null && commitment !== "invalid" && commitment.strict === "v2" && r.version === null
+            ? CHAIN_GENESIS_STRICT
+            : r.tip;
+        strictKind = r.tip === CHAIN_GENESIS_STRICT || r.version === 2 ? "v2" : "v1";
+        rowsAfterTip = r.rowsAfterTip;
+      }
+      // Never glue onto a partial final line (checked once per server process: it is the
+      // only writer of this file afterwards).
+      let sep = serverTailChecked ? "" : (await endsMidLine(targetPath)) ? "\n" : "";
+      // Each append advances the chain only once its row is on disk, so a failed append
+      // is retried by the next write.
+      const append = async (row: Record<string, unknown>): Promise<void> => {
+        const rowMac = computeRowMac(salt, lastMac as string, row);
+        row.row_mac = rowMac;
+        await fs.appendFile(targetPath, sep + JSON.stringify(row) + "\n", { mode: 0o600 });
+        sep = "";
+        lastMac = rowMac;
+      };
+      // A committed row whose append failed earlier goes first, exactly as committed.
+      if (committedMarkerRow !== null) {
+        const row = { ...committedMarkerRow };
+        await append(row);
+        committedMarkerRow = null;
+        await recordLanded(targetPath);
+        if (row.event === "cli_chain_anchor") lastAnchoredCliTip = row.cli_tip_mac as string;
+      }
+      // The CLI anchor (and a v1 log's marker) are written BEFORE the row that triggered
+      // them, so the server's last line stays a real call (and the marker is never the tail).
+      let anchor: Record<string, unknown> | null = null;
+      let anchorDone = true;
+      if (cliAnchorDue) ({ anchor, done: anchorDone } = await serverCliAnchor(salt));
+      const queue: Array<Record<string, unknown>> = anchor !== null ? [anchor, payload] : [payload];
+      if (strictMarkerDue) {
+        // Commit the chain's first strict row BEFORE appending it: in a fresh log that is the
+        // first row itself (chained from the v2 genesis); in an older log, a marker row.
+        const prev = lastMac as string;
+        const first =
+          strictKind === "v2" && prev === CHAIN_GENESIS_STRICT
+            ? queue.shift()!
+            : { ts: new Date().toISOString(), run_id: RUN_ID, event: STRICT_MARKER_EVENT };
+        const committed = { ...first };
+        await writeStrictCommitmentOnce({
+          strict: strictKind,
+          marker_mac: computeRowMac(salt, prev, committed),
+          prev_mac: prev,
+          marker_row: committed,
+          rows_after_prev: rowsAfterTip,
+        });
+        strictMarkerDue = false;
+        committedMarkerRow = committed; // re-appended by the next write if this append fails
+        await append(first);
+        committedMarkerRow = null;
+        await recordLanded(targetPath);
+      }
+      for (const row of queue) await append(row);
+      if (landedDue) await recordLanded(targetPath);
+      if (anchor !== null) lastAnchoredCliTip = anchor.cli_tip_mac as string;
+      if (anchorDone) cliAnchorDue = false;
+      serverTailChecked = true;
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[safespace] ${label} append failed: ${msg}`);
-  }
-}
-
-/** Append one row to audit.jsonl WITHOUT chaining it (no `row_mac`). For rows
- *  written by a process that is NOT the single chain writer — today only the
- *  `safespace` CLI's send-approval approved/denied actions (cli/send.ts). These
- *  rows carry an `event` field, which `verify` uses to tolerate them as
- *  legitimately-unchained (rather than a chain break). Same best-effort
- *  swallow-errors contract as `appendChainedRow`. */
-export async function appendBareRow(payload: Record<string, unknown>, label: string): Promise<void> {
-  const line = JSON.stringify(payload) + "\n";
-  try {
-    await fs.mkdir(configDir(), { recursive: true, mode: 0o700 });
-    await fs.appendFile(auditPath(), line, { mode: 0o600 });
-  } catch (e) {
+    // A failed append may have left a partial line, or may even have written its row:
+    // re-check the tail and re-walk the file on the next write, so it continues from the
+    // file's real tip (and re-derives any committed row still owed).
+    serverTailChecked = false;
+    if (role === "cli") cliLastMac = undefined;
+    else {
+      lastMac = undefined;
+      committedMarkerRow = null;
+      strictMarkerDue = false;
+    }
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[safespace] ${label} append failed: ${msg}`);
   }
@@ -656,9 +985,14 @@ export async function auditEnd(ctx: AuditEndContext): Promise<void> {
   // BYTE-IDENTICAL to v1.32. Defends future drift (a new handler that throws
   // formula_rejected without recording the meta). See
   // docs/v1.33-audit-cli-forensics.md §4.4 + sec-rev hooks #5 + #6.
+  // Scalar values only: the whitelisted fields are strings / `true`, and a scalar cannot
+  // carry object keys into the row (so no written row holds an own "__proto__" member
+  // whose MAC the canonical form would have to change for).
   if (ctx.errorForensics) {
     for (const [k, v] of Object.entries(ctx.errorForensics)) {
-      if (!(k in payload)) payload[k] = v;
+      if (!(k in payload) && (typeof v === "string" || typeof v === "number" || typeof v === "boolean")) {
+        payload[k] = v;
+      }
     }
   }
   // v1.89 — append as a link in the tamper-evident chain (each MAC folds in the

@@ -25,7 +25,7 @@
 //          exactly as audit.jsonl already stores them (export adds NO new exposure).
 
 import { CliError, type CliIO } from "../../cli";
-import { streamAuditRows, strictParseIso8601, type AuditRow } from "./reader";
+import { streamAuditSources, strictParseIso8601, type AuditRow, type AuditSource } from "./reader";
 // Single-source the product version for the CEF Device Version header field,
 // same JSON-import pattern as server.ts's SERVER_VERSION (kills drift).
 import pkg from "../../../package.json" with { type: "json" };
@@ -114,6 +114,7 @@ const CEF_FIELDS: ReadonlyArray<readonly [string, string]> = [
   ["total_recipients", "safespaceTotalRecipients"],
   ["rejected_formula_function", "safespaceFormulaFunction"],
   ["rejected_formula_nested", "safespaceFormulaNested"],
+  ["cli_tip_mac", "safespaceCliTipMac"],
 ];
 
 /** Build the CEF extension string from the vetted field allowlist. Only
@@ -130,12 +131,15 @@ function cefExtension(row: AuditRow): string {
 }
 
 /** One CEF record (CEF:0 header, 7 pipe fields, then the extension). */
-function toCefLine(row: AuditRow): string {
+function toCefLine(row: AuditRow, source: AuditSource): string {
   const { sig, name } = cefSignature(row);
+  // Provenance comes from the file the row was read from; only CLI rows carry it, so a
+  // deployment with no audit-cli.jsonl gets exactly today's lines.
+  const origin = source === "cli" ? " safespaceSourceFile=cli" : "";
   return (
     `CEF:0|SafeSpace|safespace-mcp|${cefEscapeHeader(PRODUCT_VERSION)}|` +
     `${cefEscapeHeader(sig)}|${cefEscapeHeader(name)}|${cefSeverity(row)}|` +
-    cefExtension(row)
+    cefExtension(row) + origin
   );
 }
 
@@ -178,10 +182,12 @@ export async function runAuditExport(args: string[], io: CliIO): Promise<void> {
 
   let emitted = 0;
   // Stream (O(1) memory) — audit.jsonl can be large. Malformed-line warnings go
-  // to stderr via the reader sink, never polluting the stdout SIEM stream.
-  for await (const row of streamAuditRows(undefined, { warn: (msg) => io.err(msg) })) {
+  // to stderr via the reader sink, never polluting the stdout SIEM stream. Rows are
+  // emitted UNCHANGED (JSONL rows are MAC-covered); audit-cli.jsonl's follow
+  // audit.jsonl's.
+  for await (const { row, source } of streamAuditSources({ warn: (msg) => io.err(msg) })) {
     if (sinceMs !== null && !rowOnOrAfter(row, sinceMs)) continue;
-    io.out(format === "cef" ? toCefLine(row) : JSON.stringify(row));
+    io.out(format === "cef" ? toCefLine(row, source) : JSON.stringify(row));
     emitted++;
   }
   // Nothing matched → emit nothing on stdout (clean for piping); a one-line

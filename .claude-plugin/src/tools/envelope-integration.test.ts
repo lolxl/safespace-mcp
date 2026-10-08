@@ -9,7 +9,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __resetChainState } from "../audit";
+import { __resetChainState, __drainAuditWrites } from "../audit";
 import { writeActive } from "../auth/active";
 import { saveIndex } from "../auth/keychain";
 import { _resetTokenCacheForTests } from "../auth/refresh";
@@ -70,7 +70,7 @@ afterEach(async () => {
 });
 
 async function readAuditRows(): Promise<Array<Record<string, unknown>>> {
-  await new Promise((r) => setTimeout(r, 30));
+  await __drainAuditWrites();
   try {
     const content = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");
     return content.split("\n").filter(Boolean).map((l) => JSON.parse(l));

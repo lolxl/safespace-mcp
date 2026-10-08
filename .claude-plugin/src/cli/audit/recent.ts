@@ -13,7 +13,7 @@
 
 import { CliError, type CliIO } from "../../cli";
 import {
-  collectAuditRows,
+  collectAuditRowsBothFiles,
   truncateHash,
   type AuditRow,
   strictParseInt,
@@ -205,11 +205,12 @@ function toJsonRow(row: AuditRow): Record<string, unknown> {
 export async function runAuditRecent(args: string[], io: CliIO): Promise<void> {
   const opts = parseFlags(args);
   const predicate = opts.includeEvents ? () => true : defaultPredicate;
-  const rows = await collectAuditRows(predicate, undefined, {
+  // Both chain files (audit.jsonl, then audit-cli.jsonl rows merged in by ts); with no
+  // CLI file, audit.jsonl in file order — today's view.
+  const rows = await collectAuditRowsBothFiles(predicate, {
     warn: (msg) => io.err(msg),
   });
-  // Tail N: take the last `limit` rows. JSONL is append-only chronological,
-  // so slicing the tail is the recency view.
+  // Tail N: take the last `limit` rows — the recency view.
   const tailed = rows.slice(Math.max(0, rows.length - opts.limit));
 
   if (tailed.length === 0) {
@@ -221,8 +222,11 @@ export async function runAuditRecent(args: string[], io: CliIO): Promise<void> {
   if (opts.json) {
     // Single line per row — readable + grep-friendly. Truncation applied
     // identically to table mode (sentinel hook #9).
-    for (const row of tailed) {
-      io.out(JSON.stringify(toJsonRow(row)));
+    for (const { row, source } of tailed) {
+      // Provenance from the FILE, on the display projection only (never the signed row).
+      const out = toJsonRow(row);
+      if (source === "cli") out.source_file = "cli";
+      io.out(JSON.stringify(out));
     }
     return;
   }
@@ -236,8 +240,9 @@ export async function runAuditRecent(args: string[], io: CliIO): Promise<void> {
     `${ts.padEnd(TS_W).slice(0, TS_W)} ${tool.padEnd(TOOL_W).slice(0, TOOL_W)} ${account.padEnd(ACCOUNT_W).slice(0, ACCOUNT_W)} ${status.padEnd(STATUS_W).slice(0, STATUS_W)} ${ms.padStart(MS_W).slice(0, MS_W)} ${policy.padEnd(POLICY_W).slice(0, POLICY_W)}`;
 
   io.out(formatRow("ts", "tool", "account", "status", "ms", "policy"));
-  for (const row of tailed) {
+  for (const { row, source } of tailed) {
     const d = toDisplayRow(row);
+    if (source === "cli") d.tool = `[cli] ${d.tool}`;
     // Truncate account to 16 chars for table; if it's an email, slice
     // simply, no hash here. Long emails (>16) get the suffix cut — the
     // first 16 chars are sufficient for visual scan. Hash columns elsewhere

@@ -79,6 +79,9 @@ describe("drift sentinels", () => {
   for (const rel of new Glob("**/*.ts").scanSync(SRC)) {
     if (rel.endsWith(".test.ts")) continue;
     if (rel === "config.ts") continue;
+    // The audit test preload (registered in bunfig.toml) is test infrastructure, not
+    // product code: it points a run without SAFESPACE_CONFIG_DIR at a temp dir.
+    if (rel === "test-preload-audit.ts") continue;
     files.push(rel);
   }
 

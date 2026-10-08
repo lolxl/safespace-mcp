@@ -56,6 +56,7 @@ import { IMPLEMENTED_TOOLS, TOOL_REGISTRY } from "./tools/registry";
 import { dispatchTool, isSingleAccountOAuth } from "./tools/dispatch";
 import { envOperatorContext } from "./identity/operator-context";
 import { retiredCliRefusal } from "./policy/retired-settings";
+import { setAuditChainRole } from "./audit";
 
 const EMAIL_RE = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
@@ -144,6 +145,11 @@ export async function runCli(
   io: CliIO = DEFAULT_IO,
   deps: CliDeps = {},
 ): Promise<void> {
+  // A CLI process writes its own audit chain (audit-cli.jsonl); the server's chain
+  // (audit.jsonl) has one writer. Set first so every row this process writes — including
+  // the choke points' final rows that land after runCli returns — goes there.
+  setAuditChainRole("cli");
+
   // Before any subcommand: a retired setting that changed which stored secrets the
   // CLI reads (SAFESPACE_OPERATOR_ID) stops every subcommand, `doctor` included.
   const retired = retiredCliRefusal();

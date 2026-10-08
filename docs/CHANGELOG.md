@@ -22,6 +22,36 @@ History entries below still describe them.)
 
 ## Release history
 
+- **v2.1.0** — **Audit: one writer per chain file, strict chains, and a commitment beside the salt.**
+  **CLI chain:** `safespace exec` and `send approve/deny` write their own chain,
+  `audit-cli.jsonl`; `audit.jsonl` is written only by the server, so an `exec` beside a
+  running server no longer forks it. At its first audit write after each start, the server
+  seals the CLI chain's verified tip (`cli_chain_anchor`); `audit verify` walks the CLI file
+  strictly and fails if it was deleted, emptied or cut (`cli_anchor_missing`). `recent`,
+  the CEF export and `status` show which file a row came from, and `doctor` checks the CLI
+  file's mode; with no `audit-cli.jsonl` every report is unchanged. CARRY-FORWARD 14 closed.
+  **Strict chains:** a fresh `audit.jsonl` chains from a new strict genesis, and an existing
+  chain gets one chained `audit_chain_strict` marker at the server's next audit write; from there
+  verify treats any unchained row as a break (`unhashed_in_strict_chain`). A write-once
+  `audit-chain.json` beside the salt commits to each strict chain's first row before it is
+  written, so stripping every MAC, emptying the log or cutting it back past that row is a
+  break (`strict_commitment_broken`). Both writers resume from the last row that chains back
+  to the genesis, so stray or planted lines cannot pick the resume point; the restart no
+  longer re-seeds at genesis, so an older log ending in an unchained approve/deny row no
+  longer breaks. CARRY-FORWARD 15 closed.
+  **Fixes:** an own `"__proto__"` member is now part of the MAC input (it could be added to a
+  past row unnoticed; rows already written keep their MAC: no writer emits such a key, and
+  the error-forensics gap-fill now copies scalar values only) — CARRY-FORWARD 16 closed;
+  `status` and `migrate-v2` count audit rows the way the readers do; the readers split lines
+  the same way on every runtime (U+2028/U+2029 inside a row no longer cut it).
+  **Upgrade notes:** new files in the config dir — `audit-cli.jsonl`, `audit-chain.json`,
+  `audit-chain.json.landed`; to rotate `audit.jsonl`, move both `audit-chain.json*` files
+  with it, and never delete `audit-cli.jsonl` on its own. Going back: v2.0.0's chained
+  writes continue a v2.1.0 log, but its `send approve`/`deny` write an unchained row, which
+  now breaks verify (`unhashed_in_strict_chain`). A log an earlier version already
+  forked or re-seeded stays BROKEN at that row (history is not repaired). Limits and the
+  threat model: `docs/AUDIT-CHAIN.md`. 3950 tests.
+
 - **v2.0.0** — **Single-operator, stdio-only: the multi-operator stack and its scaffolding are removed (breaking), plus envelope fixes.**
   **Removed (breaking):** the inbound webhook listener, `inbox_read` (`-32051`), the `webhook`
   connector token and `safespace webhook`; the multi-operator HTTP transport (Model B — Tailscale

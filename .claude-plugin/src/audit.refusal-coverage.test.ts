@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { UNKNOWN_TOOL_LABEL } from "./audit";
+import { UNKNOWN_TOOL_LABEL, __drainAuditWrites } from "./audit";
 import { MCPError } from "./errors";
 import type { OperatorContext, OperatorResolver } from "./identity/operator-context";
 import { createMcpServer } from "./server";
@@ -39,8 +39,8 @@ afterEach(async () => {
 });
 
 async function auditRows(): Promise<Array<Record<string, unknown>>> {
-  // auditEnd is fire-and-forget; let the append flush.
-  await new Promise((r) => setTimeout(r, 30));
+  // auditEnd is fire-and-forget; wait for the queued append.
+  await __drainAuditWrites();
   let content = "";
   try {
     content = await fs.readFile(path.join(tmpDir, "audit.jsonl"), "utf8");

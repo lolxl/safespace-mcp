@@ -24,6 +24,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { TokenSet } from "../auth/refresh";
 import type { ToolContext } from "./types";
+import { __drainAuditWrites } from "../audit";
 import {
   _resetLastUsedForTests,
   withToolContext,
@@ -102,7 +103,7 @@ async function readAuditLines(): Promise<Array<Record<string, unknown>>> {
 }
 
 async function waitForAudit(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 20));
+  await __drainAuditWrites();
 }
 
 describe("v1.27 Phase 2 Item 2 (NEW-10) — mutex warn-not-throw contract (Q2 LOCKED Option C)", () => {

@@ -9,7 +9,7 @@
 //   #5 — no row content echoed; only aggregate counts + group keys.
 
 import { CliError, type CliIO } from "../../cli";
-import { strictParseIso8601, streamAuditRows } from "./reader";
+import { strictParseIso8601, streamAuditSources } from "./reader";
 
 const USAGE = "usage: safespace audit stats [--since YYYY-MM-DD] [--json]";
 
@@ -67,7 +67,7 @@ export async function runAuditStats(args: string[], io: CliIO): Promise<void> {
   const counts = emptyCounts();
   const sinceMs = opts.since ? opts.since.getTime() : -Infinity;
 
-  for await (const row of streamAuditRows(undefined, { warn: (m) => io.err(m) })) {
+  for await (const { row } of streamAuditSources({ warn: (m) => io.err(m) })) {
     // --since filter: rows with no parseable ts are EXCLUDED when --since is
     // set (defensive — they can't be proven to be in the window).
     if (opts.since) {

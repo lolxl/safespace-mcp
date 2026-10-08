@@ -13,6 +13,7 @@ import {
 // runPosture's egress section loads the cached allowlist singletons; reset them
 // around those tests so a populated cache can't leak into another test file.
 import { __internal as recipientInternal } from "./policy/recipient-allowlist";
+import { streamAuditRows } from "./cli/audit/reader";
 import { createPending, pendingSendsPath } from "./auth/send-approval-store";
 import { __internal as tasksInternal } from "./policy/tasks-delete-targets";
 import { __internal as ytInternal } from "./policy/youtube-comment-targets";
@@ -137,6 +138,22 @@ describe("tildePath", () => {
 // ----- runStatus -----
 
 describe("runStatus", () => {
+  test("the audit count matches the rows the audit readers see (CRLF, lone CR, blank lines)", async () => {
+    const CR = String.fromCharCode(13);
+    const row = (tool: string) => JSON.stringify({ ts: "2026-05-10T00:00:00.000Z", tool });
+    await fs.writeFile(
+      path.join(tmpDir, "audit.jsonl"),
+      row("a") + CR + "\n" + row("b") + CR + "\n" + row("c") + CR + row("d") + "\n" + row("e"),
+      { mode: 0o600 },
+    );
+    const report = await runStatus({}, captureIO().io);
+    const seen: unknown[] = [];
+    for await (const r of streamAuditRows(path.join(tmpDir, "audit.jsonl"), { warn: () => {} })) seen.push(r);
+    expect(seen).toHaveLength(5);
+    expect(report.auditLineCount).toBe(5);
+    expect(report.lastAuditEntry).toEqual({ ts: "2026-05-10T00:00:00.000Z", tool: "e" });
+  });
+
   test("text output shows config dir, tier, account count, audit count", async () => {
     await setup({
       accounts: { version: 2, accounts: [ENTRY_ALICE, ENTRY_BOB] },
