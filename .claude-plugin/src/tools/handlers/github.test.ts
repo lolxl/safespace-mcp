@@ -275,6 +275,8 @@ describe("v1.76 — GitHub READ-deepening handlers", () => {
   test("github_get_file_content rejects a directory / non-base64 / binary / non-UTF-8 / oversized", async () => {
     // directory → an ARRAY response
     await expect(githubGetFileContent(ctx(), { owner: "o", repo: "r", path: "src" }, { fetchImpl: fetchStub([{ name: "a", type: "file" }]).impl })).rejects.toThrow(/directory/);
+    // a submodule entry (API 2026-03-10 returns type:"submodule", no content) → not a readable file
+    await expect(githubGetFileContent(ctx(), { owner: "o", repo: "r", path: "vendor/sub" }, { fetchImpl: fetchStub({ type: "submodule", name: "sub", path: "vendor/sub", sha: "abc", submodule_git_url: "https://github.com/x/y.git" }).impl })).rejects.toThrow(/readable text file/);
     // a >1 MB file: GitHub returns encoding:"none"
     await expect(githubGetFileContent(ctx(), { owner: "o", repo: "r", path: "big.bin" }, { fetchImpl: fetchStub({ type: "file", encoding: "none", content: "" }).impl })).rejects.toThrow(/readable text file/);
     // a NUL byte ⇒ binary

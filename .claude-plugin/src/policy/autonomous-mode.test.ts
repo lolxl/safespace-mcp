@@ -116,6 +116,7 @@ describe("enforceAutonomousDeleteDeny — F4 permanent-delete hard-deny (v1.54)"
     "gmail_delete_filter", // recreate
     "drive_create_file",
     "drive_unshare_file", // recovery action
+    "drive_trash_file", // 30-day Drive trash, recoverable
     "tasks_clear", // hides completed, recoverable
     "tasks_update",
     "youtube_playlist_item_remove", // re-add
@@ -145,11 +146,12 @@ describe("enforceAutonomousDeleteDeny — F4 permanent-delete hard-deny (v1.54)"
     }
   });
 
-  test("the denied set is EXACTLY F1's PERMANENT_DELETE_TOOLS (canonical 5, no drift)", () => {
+  test("the denied set is EXACTLY F1's PERMANENT_DELETE_TOOLS (canonical 6, no drift)", () => {
     // F4 reuses F1's set verbatim (locked Q5a) — pin the membership so a future
     // change to either feature's set is a deliberate, reviewed edit.
     expect([...PERMANENT_DELETE_TOOLS].sort()).toEqual([
       "calendar_delete_event",
+      "drive_delete_file",
       "gmail_delete_draft",
       "tasks_delete",
       "youtube_comment_delete",

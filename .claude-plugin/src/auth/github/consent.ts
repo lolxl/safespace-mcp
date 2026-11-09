@@ -24,6 +24,7 @@ import * as crypto from "node:crypto";
 import { acquireConsentLock } from "../consent";
 import { startCallbackServer } from "../oauth-callback";
 import { openUrl } from "../open-url";
+import { GITHUB_API_VERSION } from "./client";
 import {
   GITHUB_LOGIN_RE,
   clearGithubAccount,
@@ -138,7 +139,7 @@ async function fetchLogin(fetchImpl: typeof fetch, token: string): Promise<strin
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
+      "X-GitHub-Api-Version": GITHUB_API_VERSION,
     },
   });
   if (!res.ok) {

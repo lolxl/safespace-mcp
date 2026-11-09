@@ -26,6 +26,10 @@ import {
   summarizeTasksDeleteAllowlist,
 } from "./tasks-delete-targets";
 import {
+  getDriveDeleteAllowlistState,
+  summarizeDriveDeleteAllowlist,
+} from "./drive-delete-targets";
+import {
   getCommentTargetAllowlistState,
   summarizeCommentTargetAllowlist,
 } from "./youtube-comment-targets";
@@ -126,6 +130,7 @@ export async function evaluateEgressPosture(): Promise<EgressRow[]> {
   // every other connector's state read is synchronous.
   const recipient = summarizeAllowlist(await getAllowlistState());
   const tasksDelete = summarizeTasksDeleteAllowlist(getTasksDeleteAllowlistState());
+  const driveDelete = summarizeDriveDeleteAllowlist(getDriveDeleteAllowlistState());
   const ytComment = summarizeCommentTargetAllowlist(getCommentTargetAllowlistState());
   const ytVideo = summarizeVideoTargetAllowlist(getVideoTargetAllowlistState());
   // The 5 service-token rows (line, telegram, discord, slack, mattermost) — derived from
@@ -150,6 +155,7 @@ export async function evaluateEgressPosture(): Promise<EgressRow[]> {
       auto,
     ),
     classifyEgress("tasks-delete", tasksDelete.kind === "active", tasksDelete.count, "allow", auto),
+    classifyEgress("drive-delete", driveDelete.kind === "active", driveDelete.count, "allow", auto),
     classifyEgress("youtube-comment", ytComment.kind === "active", ytComment.count, "deny", auto),
     classifyEgress("youtube-video", ytVideo.kind === "active", ytVideo.count, "deny", auto),
     ...serviceTokenRows,

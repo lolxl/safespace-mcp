@@ -6,8 +6,8 @@ threat model and trust boundary — and [`docs/DESIGN.md`](DESIGN.md), the locke
 design decisions. **Read `SECURITY.md` first** for the threat model; this document
 focuses on the structure that implements it.
 
-> **Status:** 129 MCP tools across 11 connectors (Google Workspace 85 ·
-> GitHub 18 · Notion 8 · X 3 · web-fetch 1 · fs-read 1 · LINE 1 · Telegram 2 ·
+> **Status:** 135 MCP tools across 11 connectors (Google Workspace 89 ·
+> GitHub 18 · Notion 10 · X 3 · web-fetch 1 · fs-read 1 · LINE 1 · Telegram 2 ·
 > Discord 1 · Slack 5 · Mattermost 4). Deployment: one human operator
 > per local process, MCP over stdio.
 
@@ -81,7 +81,7 @@ keyless / service-token · `with-all-accounts.ts` cross-account fan-out):
 
 ### Tool surface & multi-account
 
-- **129 MCP tools across 11 connectors:** Gmail 17 / Drive 11 / Docs 4 / Calendar 8 / Contacts 5 / YouTube 17 / Tasks 9 / Sheets 6 / Slides 3 / Forms 5 (= Google Workspace 85) · GitHub 18 · Notion 8 · X 3 · web-fetch 1 · fs-read 1 · LINE 1 · Telegram 2 · Discord 1 · Slack 5 · Mattermost 4.
+- **135 MCP tools across 11 connectors:** Gmail 17 / Drive 13 / Docs 4 / Calendar 8 / Contacts 5 / YouTube 17 / Tasks 9 / Sheets 6 / Slides 3 / Forms 7 (= Google Workspace 89) · GitHub 18 · Notion 10 · X 3 · web-fetch 1 · fs-read 1 · LINE 1 · Telegram 2 · Discord 1 · Slack 5 · Mattermost 4.
 - **Multi-account:** `accounts.json` (schema v2, mode `0600`, metadata only — never tokens) plus a per-account token store; Notion mirrors the same model per workspace. `gmail_search_all` / `drive_search_all` / `tasks_search_all` / `youtube_subscriptions_all` use the `withAllAccounts` middleware to fan a query across accounts in parallel — each account gets a fresh sanitize nonce and its own audit row, plus one aggregate row.
 
 ---
@@ -178,7 +178,7 @@ verdict).
 
 ### Error-code taxonomy
 
-54 `MCPError` codes. The security-relevant ones: `-32027` outbound sanitize
+55 `MCPError` codes. The security-relevant ones: `-32027` outbound sanitize
 rejected, `-32029` formula rejected, `-32030` tasks-delete denied by policy,
 `-32031` secret store corrupt, `-32032` write-burst limit, `-32033` destructive
 denied in autonomous mode, `-32034`/`-32035` tainted-recipient / outbound-secret

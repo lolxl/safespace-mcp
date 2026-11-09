@@ -40,6 +40,7 @@
  *   });
  */
 
+import { dirname, join } from "node:path";
 import { beforeEach, mock } from "bun:test";
 // refresh.ts holds a process-level in-memory TokenSet cache (per-call hot-path
 // optimization). Reset it before EVERY test so a token cached by one test cannot
@@ -87,10 +88,64 @@ let currentHandler: GaxiosHandler = () => {
 // any googleapis-touching code get the mock applied first. Bun's mock.module
 // patches the resolved module registry; later imports of 'gaxios' get the
 // mocked version.
-mock.module("gaxios", () => ({
+const fakeGaxiosModule = {
   Gaxios: class FakeGaxios {
-    async request(opts: GaxiosRequestOptions) {
-      const response = await currentHandler(opts);
+    // googleapis-common >= gaxios 7 calls the static `Gaxios.mergeHeaders`
+    // and then `.set()`s on the result — it must be a WHATWG `Headers`.
+    static mergeHeaders(base?: ConstructorParameters<typeof Headers>[0], ...more: ConstructorParameters<typeof Headers>[0][]): Headers {
+      const merged = new Headers(base ?? {});
+      for (const extra of more) {
+        new Headers(extra ?? {}).forEach((v, k) => merged.set(k, v));
+      }
+      return merged;
+    }
+    // AuthClient registers a request interceptor on its transporter at
+    // construction; the fake never runs interceptors, it only needs `.add`.
+    interceptors = { request: new Set<unknown>(), response: new Set<unknown>() };
+    async request(rawOpts: GaxiosRequestOptions) {
+      // Handlers see headers as a plain object (the contract the tests were
+      // written against), whatever shape gaxios hands in. `Headers` lower-cases
+      // names, so lookups go through a case-insensitive proxy to keep
+      // `headers["Content-Type"]`-style reads working.
+      const opts: GaxiosRequestOptions =
+        rawOpts.headers &&
+        typeof (rawOpts.headers as unknown as Headers).forEach === "function"
+          ? {
+              ...rawOpts,
+              headers: new Proxy(
+                Object.fromEntries(
+                  (rawOpts.headers as unknown as Headers).entries(),
+                ),
+                {
+                  get: (t, k) =>
+                    typeof k === "string" ? t[k.toLowerCase()] : undefined,
+                },
+              ),
+            }
+          : rawOpts;
+      // Real gaxios hands back the body in the REQUESTED shape: a raw STRING for
+      // `responseType: "text"` (gmail batch), and for a non-2xx `"stream"` it
+      // buffers the stream into a string before building the GaxiosError. The
+      // handlers' fixtures speak objects, so serialise here to keep the mock
+      // faithful (errors.ts must parse the string; an object would hide that).
+      const asRequestedShape = (v: unknown): unknown =>
+        (rawOpts.responseType === "text" || rawOpts.responseType === "stream") &&
+        v !== null &&
+        typeof v === "object" &&
+        !(v instanceof Uint8Array) &&
+        typeof (v as { pipe?: unknown }).pipe !== "function"
+          ? JSON.stringify(v)
+          : v;
+      let response: GaxiosMockResponse;
+      try {
+        response = await currentHandler(opts);
+      } catch (e) {
+        const r = (e as { response?: { data?: unknown } } | null)?.response;
+        if (r && typeof r === "object" && "data" in r) {
+          r.data = asRequestedShape(r.data);
+        }
+        throw e;
+      }
       return {
         ...response,
         config: opts,
@@ -113,7 +168,20 @@ mock.module("gaxios", () => ({
       this.code = opts?.code;
     }
   },
-}));
+};
+
+// gaxios >= 7 ships separate CJS and ESM builds behind `exports`; googleapis'
+// CJS code `require()`s the CJS build while ESM importers get the ESM build,
+// and Bun's mock.module keys on the RESOLVED path. Mock the bare specifier and
+// both builds so every importer gets the same fake.
+const gaxiosDir = dirname(require.resolve("gaxios"));
+for (const spec of [
+  "gaxios",
+  join(gaxiosDir, "index.js"),
+  join(gaxiosDir, "../../esm/src/index.js"),
+]) {
+  mock.module(spec, () => fakeGaxiosModule);
+}
 
 /** Set the per-test gaxios mock handler. */
 export function setGaxiosHandler(handler: GaxiosHandler): void {

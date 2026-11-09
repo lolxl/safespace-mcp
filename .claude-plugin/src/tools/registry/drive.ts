@@ -335,4 +335,51 @@ export const driveTools: Record<string, ToolDef> = {
     handler: handlers.driveRenameFile,
     min_tier: "write",
   },
+  drive_trash_file: {
+    name: "drive_trash_file",
+    description:
+      "Move a Drive file or folder to the Drive TRASH via files.update trashed=true (WRITE OPERATION — RECOVERABLE: trashed items stay in the Drive trash ~30 days and can be restored from the Drive UI; nothing is permanently destroyed). Requires SAFESPACE_TIER=write (or share). ALWAYS ask the user for explicit confirmation before calling this tool. Folders are allowed (trashing a folder trashes its contents too, still recoverable). 'file_id' is required (^[a-zA-Z0-9_-]{20,}$, NOT a URL). Opt-in allowlist: when SAFESPACE_DRIVE_DELETE_TARGETS (+ _EXTRA) is set (`folder:<id>` / `file:<id>` entries), only a listed file or one inside a listed folder is permitted — anything else, or an ancestry that cannot be fully verified, is denied with -32060 drive_delete_denied_by_policy (no id echoed) — NEVER move a file (drive_move_file) into a listed folder in order to delete it; a denial means ask the user; default unset = allowed (tier still gates; under SAFESPACE_AUTONOMOUS an unset allowlist denies everything). Fields outside {file_id, account_id} are REJECTED (additionalProperties:false). Returns {file_id, trashed: true}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_id: {
+          type: "string",
+          description: "Drive file/folder id to trash (20+ url-safe chars). NOT a URL.",
+        },
+        account_id: {
+          type: "string",
+          description: "Email of the account; defaults to the most recently used account.",
+        },
+      },
+      required: ["file_id"],
+      additionalProperties: false,
+    },
+    requiredScopes: [DRIVE],
+    handler: handlers.driveTrashFile,
+    min_tier: "write",
+  },
+  drive_delete_file: {
+    name: "drive_delete_file",
+    description:
+      "PERMANENTLY DESTRUCTIVE — permanently deletes a Drive file via files.delete, BYPASSING the trash (unrecoverable from the Drive UI). ALWAYS ask the user for explicit confirmation before calling this tool; prefer drive_trash_file (recoverable) unless the user explicitly wants permanent deletion. Requires SAFESPACE_TIER=write (or share). FOLDERS ARE REFUSED (a permanent folder delete removes the whole subtree — unbounded blast radius): use drive_trash_file for folders. DENIED outright in autonomous mode (SAFESPACE_AUTONOMOUS=true, -32033) and counted in the tighter delete burst bucket (SAFESPACE_DELETE_BURST_LIMIT). Opt-in allowlist: when SAFESPACE_DRIVE_DELETE_TARGETS (+ _EXTRA) is set (`folder:<id>` / `file:<id>` entries), only a listed file or one inside a listed folder is permitted — anything else, or an ancestry that cannot be fully verified, is denied with -32060 drive_delete_denied_by_policy (no id echoed) — NEVER move a file (drive_move_file) into a listed folder in order to delete it; a denial means ask the user; default unset = allowed (tier still gates). Per-call only (no bulk delete). 'file_id' is required (^[a-zA-Z0-9_-]{20,}$, NOT a URL). Fields outside {file_id, account_id} are REJECTED (additionalProperties:false). Returns {file_id, deleted: true}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_id: {
+          type: "string",
+          description:
+            "Drive file id to PERMANENTLY delete (20+ url-safe chars). NOT a URL. Folders are refused — use drive_trash_file.",
+        },
+        account_id: {
+          type: "string",
+          description: "Email of the account; defaults to the most recently used account.",
+        },
+      },
+      required: ["file_id"],
+      additionalProperties: false,
+    },
+    requiredScopes: [DRIVE],
+    handler: handlers.driveDeleteFile,
+    min_tier: "write",
+  },
 };

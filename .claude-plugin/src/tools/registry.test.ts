@@ -25,6 +25,7 @@ describe("TOOL_REGISTRY", () => {
       "drive_copy_file",
       "drive_create_file",
       "drive_create_folder",
+      "drive_delete_file",
       "drive_get_file_content",
       "drive_list_permissions",
       "drive_move_file",
@@ -32,12 +33,15 @@ describe("TOOL_REGISTRY", () => {
       "drive_search",
       "drive_search_all",
       "drive_share_file",
+      "drive_trash_file",
       "drive_unshare_file",
       "forms_create",
       "forms_get",
       "forms_get_response",
       "forms_list_responses",
       "forms_modify",
+      "forms_publish",
+      "forms_unpublish",
       "fs_read",
       "github_create_issue",
       "github_create_issue_comment",
@@ -82,8 +86,10 @@ describe("TOOL_REGISTRY", () => {
       "notion_append_blocks",
       "notion_create_page",
       "notion_get_block_children",
+      "notion_get_data_source",
       "notion_get_database",
       "notion_get_page",
+      "notion_query_data_source",
       "notion_query_database",
       "notion_search",
       "notion_update_page",
@@ -1387,6 +1393,33 @@ describe("Forms write tools (v1.63)", () => {
     expect(modifySchema.additionalProperties).toBe(false);
   });
 
+  test("forms_publish is share-tier, forms_unpublish write-tier (recovery); both forms.body, form_id only, additionalProperties:false", () => {
+    expect(TOOL_REGISTRY.forms_publish?.min_tier).toBe("share");
+    expect(TOOL_REGISTRY.forms_unpublish?.min_tier).toBe("write");
+    // forms_publish also declares drive: its whitelist gate walks ancestry via files.get.
+    expect(TOOL_REGISTRY.forms_publish?.requiredScopes).toEqual([
+      "https://www.googleapis.com/auth/forms.body",
+      "https://www.googleapis.com/auth/drive",
+    ]);
+    expect(TOOL_REGISTRY.forms_unpublish?.requiredScopes).toEqual([
+      "https://www.googleapis.com/auth/forms.body",
+    ]);
+    for (const t of ["forms_publish", "forms_unpublish"] as const) {
+      expect(TOOL_REGISTRY[t]?.cross_account).toBeFalsy();
+      expect(TOOL_REGISTRY[t]?.direction).toBeUndefined();
+      const schema = TOOL_REGISTRY[t]?.inputSchema as {
+        required?: string[];
+        properties?: Record<string, unknown>;
+        additionalProperties?: boolean;
+      };
+      expect(schema.required).toEqual(["form_id"]);
+      expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["account_id", "form_id"]);
+      expect(schema.additionalProperties).toBe(false);
+      expect(IMPLEMENTED_TOOLS.has(t)).toBe(true);
+    }
+    expect(TOOL_REGISTRY.forms_create?.description).toContain("forms_publish");
+  });
+
   test("both Forms write tools in IMPLEMENTED_TOOLS", () => {
     expect(IMPLEMENTED_TOOLS.has("forms_create")).toBe(true);
     expect(IMPLEMENTED_TOOLS.has("forms_modify")).toBe(true);
@@ -1600,8 +1633,8 @@ describe("v1.97 — Slack READ tools (the first service-token READ)", () => {
     expect(TOOL_REGISTRY.slack_users_list!.inputSchema.required).toBeUndefined();
   });
 
-  test("129 implemented tools (v1.107 +4 Mattermost; v1.114 +2 X read; v1.115 +1 X post; inbox_read retired)", () => {
-    expect(IMPLEMENTED_TOOLS.size).toBe(129);
+  test("135 implemented tools (+2 notion data-source reads; +2 forms publish/unpublish; +2 drive trash/delete;v1.107 +4 Mattermost; v1.114 +2 X read; v1.115 +1 X post; inbox_read retired)", () => {
+    expect(IMPLEMENTED_TOOLS.size).toBe(135);
   });
 });
 
@@ -1653,9 +1686,11 @@ describe("v1.77/v1.78 — Notion read tools (the 3rd OAuth source as of v1.78)",
     "notion_get_block_children",
     "notion_query_database",
     "notion_get_database",
+    "notion_get_data_source",
+    "notion_query_data_source",
   ] as const;
 
-  test("all 5 notion tools are registered + implemented", () => {
+  test("all 7 notion read tools are registered + implemented", () => {
     for (const t of NOTION_TOOLS) {
       expect(TOOL_REGISTRY[t]).toBeDefined();
       expect(IMPLEMENTED_TOOLS.has(t)).toBe(true);

@@ -30,7 +30,7 @@ describe("githubApiGet — request construction + success", () => {
     expect(h.Authorization).toBe("Bearer gho_TOK");
     expect(h.Accept).toBe("application/vnd.github+json");
     expect(h["User-Agent"]).toBe("safespace-mcp");
-    expect(h["X-GitHub-Api-Version"]).toBe("2022-11-28");
+    expect(h["X-GitHub-Api-Version"]).toBe("2026-03-10");
   });
 });
 

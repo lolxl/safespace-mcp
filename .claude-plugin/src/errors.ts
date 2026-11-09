@@ -72,7 +72,8 @@ export type ErrorName =
   | "x_post_denied_by_policy"
   | "egress_destination_blocked"
   | "internal_routing_error"
-  | "telegram_ack_denied_in_autonomous_mode";
+  | "telegram_ack_denied_in_autonomous_mode"
+  | "drive_delete_denied_by_policy";
 
 /** B6.1-B — the FROZEN `*_api_failed` brand set as a TYPE, derived from the union
  *  above by suffix (template-literal Extract) so it can NEVER drift from ErrorName:
@@ -318,6 +319,12 @@ export const ERROR_CODES: Record<ErrorName, Spec> = {
   // (at-most-once). Do NOT overload F4's delete-bucket. The offset value is
   // NEVER echoed. min_tier stays read.
   telegram_ack_denied_in_autonomous_mode: { code: -32057, recovery: "telegram_get_updates with an offset is denied in autonomous mode (SAFESPACE_AUTONOMOUS=true): advancing the cursor permanently ACKs the Telegram inbox (at-most-once). Omit offset to re-read the current batch without confirming it, or run this call from an interactive (non-autonomous) session. errorData.reason=offset_present. The offset value is not echoed." },
+  // Drive trash/delete target allowlist (opt-in tightening ABOVE the tier gate; default
+  // OFF = allow, the tasks_delete posture). Gates BOTH drive_trash_file and
+  // drive_delete_file. The file id is NEVER echoed (PII-oracle defense).
+  // errorData.reason ∈ {not_in_allowlist, ancestry_unverifiable}. -32058/-32059 are
+  // reserved by an in-flight cycle; this takes -32060.
+  drive_delete_denied_by_policy: { code: -32060, recovery: "This Drive trash/delete target is not permitted by the SAFESPACE_DRIVE_DELETE_TARGETS allowlist (errorData.reason: not_in_allowlist = the file is neither listed nor inside a listed folder; ancestry_unverifiable = the file's parent chain could not be fully resolved within the depth limit, so it fails closed). Add `folder:<folder-id>` or `file:<file-id>` to SAFESPACE_DRIVE_DELETE_TARGETS (persistent) or SAFESPACE_DRIVE_DELETE_TARGETS_EXTRA (shell-only), or trash/delete via the Google Drive UI. Default unset = all trash/deletes allowed (tier still gates); the allowlist is opt-in tightening." },
 };
 
 export class MCPError extends Error {

@@ -2,7 +2,7 @@
 
 import type { ToolDef } from "./types";
 import * as handlers from "../handlers";
-import { FORMS_BODY, FORMS_BODY_READONLY, FORMS_RESPONSES_READONLY } from "./scopes";
+import { DRIVE, FORMS_BODY, FORMS_BODY_READONLY, FORMS_RESPONSES_READONLY } from "./scopes";
 
 export const formsTools: Record<string, ToolDef> = {
   forms_get: {
@@ -96,7 +96,7 @@ export const formsTools: Record<string, ToolDef> = {
   forms_create: {
     name: "forms_create",
     description:
-      "Create a new (empty) Google Form with the given title (WRITE OPERATION; forms.create). Returns the new Form resource (formId + the default info). The Forms API accepts ONLY the title at create — items + description are added afterward via forms_modify. title is type-checked + trimmed (must be non-empty), rejected for CR/LF/NUL/NEL/U+2028/U+2029 (HEADER_INJECTION_RE), and capped at 1000 UTF-8 bytes. NO idempotency check (the formId is the only identity). Requires the forms.body scope.",
+      "Create a new (empty) Google Form with the given title (WRITE OPERATION; forms.create). Returns the new Form resource (formId + the default info). The Forms API accepts ONLY the title at create — items + description are added afterward via forms_modify. title is type-checked + trimmed (must be non-empty), rejected for CR/LF/NUL/NEL/U+2028/U+2029 (HEADER_INJECTION_RE), and capped at 1000 UTF-8 bytes. NO idempotency check (the formId is the only identity). New forms are UNPUBLISHED and accept no responses: call forms_publish (share tier) before they can be filled. Requires the forms.body scope.",
     inputSchema: {
       type: "object",
       properties: {
@@ -145,6 +145,52 @@ export const formsTools: Record<string, ToolDef> = {
     },
     requiredScopes: [FORMS_BODY],
     handler: handlers.formsModify,
+    min_tier: "write",
+  },
+  forms_publish: {
+    name: "forms_publish",
+    description:
+      "PUBLISH a Google Form so it is visible to and accepts responses from respondents (SHARE OPERATION; forms.setPublishSettings). Forms created via the API are unpublished and cannot be filled until published. Sets publishState {isPublished:true, isAcceptingResponses:true} with updateMask publish_state — the request body is allowlist-constructed (nothing else is forwarded). Publishing exposes the form to anyone who can reach its link, so it follows the drive_share_file anyone-link path: share tier (re-checked in the handler), the drive-whitelist.json folder/file allowlist (the form id is checked as a Drive file id; denial = share_denied_by_policy), and supervised send-approval when SAFESPACE_REQUIRE_SEND_APPROVAL is on — all BEFORE the API call. Returns {form_id, published, accepting_responses}. Reverse with forms_unpublish. form_id MUST match /^[a-zA-Z0-9_-]{1,200}$/ (validated handler-side). Requires the forms.body scope (plus drive for the whitelist ancestry check).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        form_id: {
+          type: "string",
+          description: "Google Form ID (url-safe; /^[a-zA-Z0-9_-]{1,200}$/).",
+        },
+        account_id: {
+          type: "string",
+          description: "Email of the account to use; defaults to the most recently used account.",
+        },
+      },
+      required: ["form_id"],
+      additionalProperties: false,
+    },
+    requiredScopes: [FORMS_BODY, DRIVE],
+    handler: handlers.formsPublish,
+    min_tier: "share",
+  },
+  forms_unpublish: {
+    name: "forms_unpublish",
+    description:
+      "UNPUBLISH a Google Form so it stops accepting responses (WRITE OPERATION; forms.setPublishSettings; recovery action for forms_publish). Sets publishState {isPublished:false, isAcceptingResponses:false} with updateMask publish_state — allowlist-constructed body. Existing responses are kept. Returns {form_id, published, accepting_responses}. form_id MUST match /^[a-zA-Z0-9_-]{1,200}$/ (validated handler-side). Requires the forms.body scope.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        form_id: {
+          type: "string",
+          description: "Google Form ID (url-safe; /^[a-zA-Z0-9_-]{1,200}$/).",
+        },
+        account_id: {
+          type: "string",
+          description: "Email of the account to use; defaults to the most recently used account.",
+        },
+      },
+      required: ["form_id"],
+      additionalProperties: false,
+    },
+    requiredScopes: [FORMS_BODY],
+    handler: handlers.formsUnpublish,
     min_tier: "write",
   },
 };

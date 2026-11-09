@@ -232,8 +232,8 @@ v1.35**, n/h gap shut, Devanagari formally closed).
 
 14. ~~**`safespace exec` is a second chained-audit writer**~~ — **CLOSED**: CLI processes
     (`exec`, `send approve/deny`) write their own chain, `audit-cli.jsonl`; `audit.jsonl` has
-    the server as its only writer, and each server start anchors the CLI chain's verified
-    tip so deleting or cutting the CLI file is detected. Remaining limits (rows after the
+    the server as its only writer, and each server process anchors the CLI chain's verified
+    tip at its first audit write, so deleting or cutting the CLI file is detected. Remaining limits (rows after the
     last anchor, overlapping CLI processes, a server row followed by an offline `exec`, both
     files rolled back together) are listed in `docs/AUDIT-CHAIN.md`. `exec` still skips the
     server's refuse-to-start checks and the per-tool `min_tier` gate (handlers' own tier

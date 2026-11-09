@@ -105,6 +105,7 @@ export function classifyDestructive(
   | "calendar_delete_event"
   | "tasks_delete"
   | "youtube_playlist_delete"
+  | "drive_delete_file"
   | null {
   if (row.status !== "ok") return null; // tier-denied / SDK-error rows excluded
   // (1) YouTube comment delete
@@ -193,6 +194,14 @@ export function classifyDestructive(
   ) {
     return "youtube_playlist_delete";
   }
+  // (5) Drive permanent file delete (files.delete bypasses the trash). There is
+  // no dedicated meta channel (the allowlist denial rides the MCPError row), so
+  // discriminate on the tool name of a SUCCESSFUL row (status === "ok" is already
+  // enforced above). drive_trash_file is RECOVERABLE and deliberately NOT here —
+  // like tasks_clear / playlist_item_remove.
+  if (row.tool === "drive_delete_file") {
+    return "drive_delete_file";
+  }
   return null;
 }
 
@@ -204,6 +213,7 @@ export async function runAuditDeletes(args: string[], io: CliIO): Promise<void> 
   let countCalendar = 0;
   let countTasks = 0;
   let countPlaylist = 0;
+  let countDrive = 0;
 
   for await (const { row } of streamAuditSources({ warn: (m) => io.err(m) })) {
     if (typeof row.ts !== "string") continue;
@@ -214,8 +224,9 @@ export async function runAuditDeletes(args: string[], io: CliIO): Promise<void> 
     else if (cat === "calendar_delete_event") countCalendar++;
     else if (cat === "tasks_delete") countTasks++;
     else if (cat === "youtube_playlist_delete") countPlaylist++;
+    else if (cat === "drive_delete_file") countDrive++;
   }
-  const total = countYoutube + countCalendar + countTasks + countPlaylist;
+  const total = countYoutube + countCalendar + countTasks + countPlaylist + countDrive;
   const alert = total >= opts.threshold;
   // v1.24 Phase 2 Item 3 — explicit exit-code contract (mirror
   // suspicious.ts:471 / v1.23 Q3 LOCK). Reset to 0 on OK so a prior
@@ -235,6 +246,7 @@ export async function runAuditDeletes(args: string[], io: CliIO): Promise<void> 
         calendar_delete_event: countCalendar,
         tasks_delete: countTasks,
         youtube_playlist_delete: countPlaylist,
+        drive_delete_file: countDrive,
         total,
         threshold: opts.threshold,
         alert,
@@ -248,6 +260,7 @@ export async function runAuditDeletes(args: string[], io: CliIO): Promise<void> 
   io.out(`calendar_delete_event:   ${countCalendar}`);
   io.out(`tasks_delete:            ${countTasks}`);
   io.out(`youtube_playlist_delete: ${countPlaylist}`);
+  io.out(`drive_delete_file:       ${countDrive}`);
   io.out(`total destructive:       ${total}`);
   io.out(`threshold:               ${opts.threshold}`);
   io.out("");

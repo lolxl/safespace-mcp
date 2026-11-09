@@ -12,9 +12,11 @@
 // format-gated (echo the RULE, not the value).
 
 import { MCPError } from "../../errors";
-import { formsClientFromToken } from "../../google-api/client";
+import { driveClientFromToken, formsClientFromToken } from "../../google-api/client";
 import { toGoogleError } from "../../google-api/errors";
+import { requireSendApproval } from "../../policy/send-approval";
 import type { ToolContext } from "../types";
+import { enforceDriveShareWhitelist } from "./drive";
 import { requireGoogle, HEADER_INJECTION_RE } from "./shared";
 
 // Form / response ids are url-safe (the id segment from the form URL, NOT the
@@ -228,7 +230,9 @@ export async function formsCreate(
   }
   try {
     const forms = formsClientFromToken(requireGoogle(ctx).getAccessToken());
-    const res = await forms.forms.create({ requestBody: { info: { title: trimmed } } });
+    // `unpublished: true` is sent EXPLICITLY: the Forms API treats an unset value as
+    // "published and accepting responses", so we never rely on the server default.
+    const res = await forms.forms.create({ unpublished: true, requestBody: { info: { title: trimmed } } });
     return res.data;
   } catch (err) {
     throw toGoogleError(err, { tool: "forms_create", email: requireGoogle(ctx).accountId });
@@ -303,4 +307,84 @@ export async function formsModify(
   } catch (err) {
     throw toGoogleError(err, { tool: "forms_modify", email: requireGoogle(ctx).accountId });
   }
+}
+
+/* ───────── forms_publish / forms_unpublish ─────────
+ * Forms created via the API are UNPUBLISHED (accept no responses) until
+ * forms.setPublishSettings flips them. Both tools share ONE allowlist-
+ * constructed requestBody builder: only publishState{isPublished,
+ * isAcceptingResponses} + updateMask "publish_state" ever reach the wire (both
+ * state fields must be set; accepting=true with published=false is an API error,
+ * and neither tool can produce that combination). Caller args beyond form_id /
+ * account_id are never forwarded. */
+async function setPublishSettings(
+  ctx: ToolContext,
+  tool: "forms_publish" | "forms_unpublish",
+  formId: string,
+  state: boolean,
+): Promise<unknown> {
+  try {
+    const forms = formsClientFromToken(requireGoogle(ctx).getAccessToken());
+    const res = await forms.forms.setPublishSettings({
+      formId,
+      requestBody: {
+        publishSettings: { publishState: { isPublished: state, isAcceptingResponses: state } },
+        updateMask: "publish_state",
+      },
+    });
+    const publishState = res.data.publishSettings?.publishState;
+    return {
+      form_id: res.data.formId ?? formId,
+      published: publishState?.isPublished ?? null,
+      accepting_responses: publishState?.isAcceptingResponses ?? null,
+    };
+  } catch (err) {
+    throw toGoogleError(err, { tool, email: requireGoogle(ctx).accountId });
+  }
+}
+
+/** forms_publish (SHARE): publishing exposes the form to anyone with its responder
+ *  link, so it follows the drive_share_file `share_type=anyone` path exactly (a Google
+ *  Form id IS a Drive file id). Gate order, ALL before any setPublishSettings call:
+ *  ① handler-level tier re-check (closes `safespace exec`; same error as drive.ts)
+ *  ② Drive share-whitelist (shared `enforceDriveShareWhitelist`; fail-closed;
+ *     default-deny under SAFESPACE_AUTONOMOUS)
+ *  ③ supervised send-approval (no-op unless SAFESPACE_REQUIRE_SEND_APPROVAL; fixed
+ *     summary, no form content; target reuses the closed `drive_share` kind) */
+export async function formsPublish(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const formId = requireUrlSafeId("forms_publish", "form_id", args.form_id);
+  if (ctx.tier !== "share") {
+    throw new MCPError("share_target_forbidden", {
+      reason: "anyone_requires_share_tier",
+      current_tier: ctx.tier,
+      required_tier: "share",
+    });
+  }
+  try {
+    const drive = driveClientFromToken(requireGoogle(ctx).getAccessToken());
+    await enforceDriveShareWhitelist(ctx, drive, formId);
+  } catch (err) {
+    if (err instanceof MCPError) throw err;
+    throw toGoogleError(err, { tool: "forms_publish", email: requireGoogle(ctx).accountId });
+  }
+  await requireSendApproval(ctx, {
+    tool: "forms_publish",
+    recipients: [],
+    body: "",
+    target: { kind: "drive_share", file_id: formId, share_type: "anyone", role: "reader" },
+  });
+  return setPublishSettings(ctx, "forms_publish", formId, true);
+}
+
+/** forms_unpublish (WRITE): recovery action — no whitelist / approval (like
+ *  drive_unshare_file: recovery > policy). */
+export async function formsUnpublish(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const formId = requireUrlSafeId("forms_unpublish", "form_id", args.form_id);
+  return setPublishSettings(ctx, "forms_unpublish", formId, false);
 }

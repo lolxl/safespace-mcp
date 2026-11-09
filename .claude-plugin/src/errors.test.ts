@@ -3,7 +3,7 @@ import { ERROR_CODES, MCPError } from "./errors";
 import type { ConnectorApiFailedName } from "./auth/http/connector-error-contract";
 
 describe("ERROR_CODES table", () => {
-  test("contains 54 names (v1.128 added telegram_ack_denied_in_autonomous_mode; inbox_read_failed retired with the webhook listener)", () => {
+  test("contains 55 names (v1.128 added telegram_ack_denied_in_autonomous_mode; inbox_read_failed retired with the webhook listener)", () => {
     expect(Object.keys(ERROR_CODES).sort()).toEqual([
       "account_not_found",
       "batch_too_large",
@@ -12,6 +12,7 @@ describe("ERROR_CODES table", () => {
       "destructive_denied_in_autonomous_mode",
       "discord_api_failed",
       "download_stalled",
+      "drive_delete_denied_by_policy",
       "egress_destination_blocked",
       "file_too_large",
       "file_unsupported_binary",
@@ -133,8 +134,10 @@ describe("ERROR_CODES table", () => {
     // v1.113 (X/Twitter OAuth provider, class A — ZERO tools yet) added -32054 x_api_failed.
     // v1.115 (x_post_create) added -32056 x_post_denied_by_policy.
     // v1.128 Q5-B added -32057 telegram_ack_denied_in_autonomous_mode.
+    // Drive trash/delete allowlist added -32060 drive_delete_denied_by_policy (-32058/-32059 reserved).
     const codes = Object.values(ERROR_CODES).map((s) => s.code).sort((a, b) => a - b);
     expect(codes).toEqual([
+      -32060,
       -32057,
       -32056,
       -32055,

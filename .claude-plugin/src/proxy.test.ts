@@ -22,7 +22,8 @@ test("stdio is the only transport: the bootstrap opens no network listener", () 
   // SafeSpace serves MCP over stdio only. A regression that reintroduced a network
   // listener (an http/net server, or a transport module) would expose the tool
   // surface to the network without an identity layer — fail it here.
-  expect(proxySrc).toMatch(/new StdioServerTransport\(\)/);
+  expect(proxySrc).toMatch(/import\s+\{\s*createStdioTransport\s*\}\s+from\s+["']\.\/stdio-transport["']/);
+  expect(proxySrc).toMatch(/\.connect\(createStdioTransport\(\)\)/);
   expect(proxySrc).not.toMatch(/from\s+["']node:(http|https|net)["']/);
   expect(proxySrc).not.toMatch(/from\s+["']\.\/transport\//);
   expect(proxySrc).not.toMatch(/\b(createServer|listen)\(/);

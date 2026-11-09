@@ -110,6 +110,10 @@ export const ENV_RECIPIENT_ALLOW_EXTRA = "SAFESPACE_RECIPIENT_ALLOW_EXTRA";
 export const ENV_TASKS_DELETE_TARGETS = "SAFESPACE_TASKS_DELETE_TARGETS";
 /** Tasks-delete target allowlist shell-only overlay. */
 export const ENV_TASKS_DELETE_TARGETS_EXTRA = "SAFESPACE_TASKS_DELETE_TARGETS_EXTRA";
+/** Drive-delete target allowlist base (off→allow; gates drive_trash_file + drive_delete_file). */
+export const ENV_DRIVE_DELETE_TARGETS = "SAFESPACE_DRIVE_DELETE_TARGETS";
+/** Drive-delete target allowlist shell-only overlay. */
+export const ENV_DRIVE_DELETE_TARGETS_EXTRA = "SAFESPACE_DRIVE_DELETE_TARGETS_EXTRA";
 /** YouTube comment target allowlist base (off→DENY — public surface). */
 export const ENV_YOUTUBE_COMMENT_TARGETS = "SAFESPACE_YOUTUBE_COMMENT_TARGETS";
 /** YouTube comment target allowlist shell-only overlay. */

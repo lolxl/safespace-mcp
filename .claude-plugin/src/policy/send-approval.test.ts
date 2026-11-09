@@ -56,6 +56,7 @@ describe("requireSendApproval — opt-in + coverage", () => {
     expect([...APPROVAL_GATED_SENDS].sort()).toEqual([
       "discord_send_message",
       "drive_share_file",
+      "forms_publish",
       "gmail_send",
       "line_push_message",
       "mattermost_send_message",

@@ -65,11 +65,12 @@ export const getDeleteBurstLimit: () => number = makeBurstLimitReader({
 // PERMANENT-delete tool names → the (tighter) delete bucket. Aligned with the
 // `safespace audit deletes` classifier (cli/audit/deletes.ts: tasks_delete /
 // youtube_comment_delete / youtube_playlist_delete / calendar_delete_event)
-// PLUS gmail_delete_draft (drafts bypass Trash = permanent). RECOVERABLE
+// PLUS gmail_delete_draft (drafts bypass Trash = permanent) and drive_delete_file
+// (files.delete bypasses the trash). RECOVERABLE
 // mutations are deliberately NOT here — they fall in the write bucket:
 // youtube_playlist_item_remove (re-add), gmail trash/archive (recoverable),
 // gmail_delete_filter (recreate), tasks_clear (hide), drive_unshare_file
-// (recovery action). F4 (v1.54) reuses this exact set for its autonomous-mode
+// (recovery action), drive_trash_file (30-day Drive trash). F4 (v1.54) reuses this exact set for its autonomous-mode
 // hard-deny.
 export const PERMANENT_DELETE_TOOLS: ReadonlySet<string> = new Set([
   "tasks_delete",
@@ -77,6 +78,7 @@ export const PERMANENT_DELETE_TOOLS: ReadonlySet<string> = new Set([
   "youtube_playlist_delete",
   "calendar_delete_event",
   "gmail_delete_draft",
+  "drive_delete_file",
 ]);
 
 export type WriteBurstBucket = "exempt" | "write" | "delete";

@@ -40,6 +40,12 @@ const GATE_TABLE: Record<string, { handlerFile: string; gates: string[] }> = {
     handlerFile: "tools/handlers/drive.ts",
     gates: ["checkShareAllowed", "isRecipientAllowed", "requireSendApproval"],
   },
+  // forms_publish: the SAME anyone-link path (Form id = Drive file id) via the shared
+  // whitelist helper (which itself calls checkShareAllowed in drive.ts) + send-approval
+  forms_publish: {
+    handlerFile: "tools/handlers/forms.ts",
+    gates: ["enforceDriveShareWhitelist", "requireSendApproval"],
+  },
   // B6.1 wave A2b — the 3 YouTube public-surface writes MIGRATED to PIPELINE_TABLE
   // below (their gate blocks became composite wrappers fired by the choke point).
 };

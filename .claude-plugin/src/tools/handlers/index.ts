@@ -7,6 +7,7 @@ export * from "./cross-account";
 export * from "./docs";
 export * from "./discord";
 export * from "./drive";
+export * from "./drive-delete";
 export * from "./forms";
 export * from "./github";
 export * from "./gmail";

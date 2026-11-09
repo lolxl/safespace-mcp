@@ -128,6 +128,17 @@ share boundary (parent walk, depth-capped, per-process LRU cache). Malformed
 config **fails closed**. `drive_unshare_file` bypasses the whitelist
 unconditionally (recovery must beat policy).
 
+**`forms_publish` rides the same gate.** Publishing a Google Form exposes it to
+anyone with the responder link, so it is treated as an anyone-link share (a Form
+id is a Drive file id). It is `share` tier (re-checked in the handler, which
+also closes the `safespace exec` route), passes the **same** whitelist check
+(`enforceDriveShareWhitelist`, fail-closed, default-deny under
+`SAFESPACE_AUTONOMOUS`), and then supervised send-approval when
+`SAFESPACE_REQUIRE_SEND_APPROVAL` is on, in that order and all before the
+`setPublishSettings` call. `forms_unpublish` (write tier) bypasses all of it,
+like `drive_unshare_file`. `forms_create` sends `unpublished: true` explicitly,
+so a new form accepts no responses until it is published through this path.
+
 **Bounded assumption (v1.42 `drive_move_file`).** The whitelist constrains
 share-ability **by location** — "a file is shareable iff its parent chain
 reaches a whitelisted folder." `drive_move_file` (tier=`write`) can relocate
@@ -168,6 +179,34 @@ does not destroy them — so it is gated by the write tier alone (no allowlist),
 matching its bounded, reversible blast radius. The v1.47 `tasks_move`
 (`tasks.tasks.move`, within-list reparent/reorder) is likewise non-destructive
 and write-tier-gated; cross-list move (`destinationTasklist`) is not exposed.
+
+### 4a. Drive-delete target allowlist (`drive_trash_file`, `drive_delete_file`)
+Two-layer env config (`SAFESPACE_DRIVE_DELETE_TARGETS` / `..._EXTRA`),
+`folder:<id>` / `file:<id>` entries, gating both tools **above** the tier check.
+Default **unset = allow** (opt-in tightening, like §4); under
+`SAFESPACE_AUTONOMOUS=true` an unset list is deny-all. A `folder:` entry covers
+its whole subtree via a **fresh** parent walk on every call (never the §3 share
+cache), depth-capped; any walk failure **fails closed**. Shortcuts are not
+followed — only the shortcut's own parents count. Denial →
+`drive_delete_denied_by_policy` (`-32060`), fired **before** any mutating call,
+echoing no file id. `drive_trash_file` is recoverable (Drive trash, 30 days) and
+sits in the write burst bucket; `drive_delete_file` is permanent, refuses
+folders (and any file whose type it cannot confirm), and is in the
+permanent-delete set → the tighter delete burst bucket and the §5b autonomous
+hard-deny.
+
+**Bounded assumption (same class as §3's v1.42 `drive_move_file`).** The
+allowlist constrains deletability **by location**. A `write`-tier caller can
+`drive_move_file` a file **into** an allowlisted folder and then trash or delete
+it. Unlike §3, this *is* a capability the allowlist alone would otherwise deny,
+so it is stated plainly rather than argued away: it is **accepted, not closed**
+(Owner decision 2026-11-01, mirroring the v1.42 decision rather than gating
+`drive_move_file`). Residual exposure is bounded by: the move and the delete are
+two separate audited calls (`audit.jsonl`, hash-chained; `safespace audit
+deletes` counts the delete); permanent delete is hard-denied in autonomous mode
+and capped by the delete burst bucket; trash is recoverable. If you rely on this
+allowlist as a strict wall, do not run an interactive `write`-tier session
+against files that must never be deleted.
 
 ### 5. Blast-radius burst limiters
 Per-session counters cap prompt-injection-driven loops:
@@ -573,7 +612,7 @@ per-source last-used.
 
 **Notion has no scopes.** Every tool declares `requiredScopes: []` and the Source's
 `authorize()` is a deliberate no-op — an integration's capabilities are configured
-**Notion-side**, not requested per call. 8 tools: 5 read + 3 write.
+**Notion-side**, not requested per call. 10 tools: 7 read + 3 write.
 
 **There is deliberately NO target allowlist** — the one connector-shaped exception to the
 public-surface deny-default idiom, and the reason is worth stating plainly:
@@ -591,7 +630,7 @@ vs database-parent); `prepareNotionCreatePage` now picks the branch internally, 
 **single** descriptor covers both.
 
 Bodies are allowlist-constructed: `create_page` `{parent, properties, children}` ·
-`append_blocks` `{children}` · `update_page` `{properties?, archived?}`.
+`append_blocks` `{children}` · `update_page` `{properties?, in_trash?}` (the tool key stays `archived`; the wire field is `in_trash`).
 `buildNotionProperties` accepts only a closed set of writable property types (`title`,
 `rich_text`, `number`, `checkbox`, `url`, `email`, `phone_number`, `select`, `status`,
 `multi_select`, `date`) and **rejects** `relation` / `people` / `formula` / `rollup` /
@@ -603,18 +642,61 @@ agent's type string. A `url` property write is restricted to `http(s)://`, block
 **Inbound sanitize.** `NOTION_SKIP_FIELDS` (`tools/source.ts`) *replaces* the global skip
 set for this source, so it must enumerate every opaque/structural key the shapers emit:
 `id`, `object`, `type`, `parent_type`, `url`, `created_time`, `last_edited_time`,
-`next_cursor`. Everything attacker-influenced — title, text, property names *and* values,
+`next_cursor`, plus six LEAVES added with data sources (`data_source_id`, `database_id`,
+`parent_data_source_id`, `parent_database_id`, `parent_page_id`, `incomplete_reason`). A skipped key passes its
+whole subtree through unwrapped, so **no Notion skip key carries upstream-controlled text**:
+every skipped leaf is a canonical UUID, a closed enum member, a validated timestamp (ISO-8601,
+every component in range, round-trips `Date.parse`), an id-derived URL, or an opaque encoded
+cursor — never the raw upstream value. Concretely: `url` is REBUILT as
+`https://www.notion.so/<32 lowercase hex>` from the validated id (the upstream URL embeds the
+page title in its path, so it is never emitted; `null` without a valid id); `next_cursor` is
+`ssc1.` + base64url(utf8(upstream cursor)) — reversible with no server state, and
+`start_cursor` is accepted ONLY in that exact canonical shape and DECODED before it goes
+upstream (anything else is rejected before any network with a fixed error); a cursor that is
+not a non-empty string ≤ 1024 chars is dropped while `has_more` stays `true` and a fixed
+`pagination_note` says paging stopped; every `has_more` is `=== true`-coerced. No container key
+(`data_sources`, `parent`, `properties`, `results`) is ever skipped — a data source's `name`
+wraps. A database's `data_sources[]` is strict (any malformed entry fails closed), and every
+database / data-source retrieval is identity-checked before it is trusted: READ paths require
+`object` and the canonical id (`parent` is optional — Notion omits it without read-content
+capability and a synced source has `parent.type:"data_source_id"` — but must be an object when
+present); the create-page WRITE re-check additionally requires a parent (type `database_id` or
+`data_source_id`) whose `database_id` equals the requested database, since only that proves
+membership. Cursors round-trip losslessly (BOM preserved; a cursor with a lone surrogate is
+dropped like any other unusable one). Everything attacker-influenced — title, text, property names *and* values,
 column names, people names — stays out of it and is sanitize-wrapped. Database properties
 are returned as an **array of `{name, type, value}` rather than a keyed map**, specifically
 so an attacker-controlled column *name* is a wrapped value rather than an object key.
 
 `api.notion.com` is `enforcement: "enforced"` in the egress-destination registry and
 asserted before every fetch; the `Notion-Version` header is a pinned constant
-(`2022-06-28`). Failures raise `-32045 notion_api_failed` with a **closed-set** `reason`
+(`2026-03-11`). Failures raise `-32045 notion_api_failed` with a **closed-set** `reason`
 (`no_token` / `auth_failed` / `rate_limited` / `not_found` / `api_error`) — no token or id
 echoed. The consent flow narrows its error surface too: Notion's OAuth `error` field is
 echoed only if it matches `^[a-z_]{1,64}$`, else collapsed to `"unknown_error"`, so an
 `error_description` body can never surface.
+
+**Data sources (2026-03-11).** A database is a container of data sources; the schema and
+rows live on the data source. `notion_get_database` / `notion_query_database` /
+`notion_create_page(parent_database_id)` go through ONE resolver: exactly one data source →
+use it; zero or more than one → an error (decided on the TOTAL `data_sources` count before
+any per-source retrieval, so "two listed, one readable" is still rejected); a malformed single
+candidate fails closed; there is no retry and no fallback to another source or workspace.
+`notion_query_database` takes no `start_cursor` — continuation goes through
+`notion_query_data_source` with the returned `data_source_id`, so a cursor is never bound to
+a source by server-side state.
+
+*Bounded assumption — the create-page check-to-write window.* The 2026-03-11 *Create a page*
+reference lists a `database_id` parent in its schema but documents no behavior for it (and
+the 2025-09-03 upgrade guide says to "change these to use `data_source_id` parents instead"),
+so `parent_database_id` is sent as a `data_source_id` parent. Immediately before the POST the
+handler re-retrieves that data source with the same credential and requires its parent
+database to equal the requested database (mismatch or malformed → fail closed, zero POSTs).
+What remains: Notion exposes no atomic "create under this data source only if it still
+belongs to that database", so a data source moved to another database in the milliseconds
+between that re-retrieve and the POST would receive the row. The write is still bounded by
+what the integration was shared with, the `write` tier, F3a and `outboundSanitize`; use
+`parent_data_source_id` to name the target explicitly and remove the assumption.
 
 **Notable.** There is **no `notion_delete_page`** — deletion is modeled only as the
 reversible `archived: true` (move to Trash) via `notion_update_page`, so it is explicitly

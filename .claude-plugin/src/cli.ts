@@ -8,6 +8,7 @@
 // Security-review fix #4 (Step 2): validate email argv against a strict regex
 // before passing it anywhere downstream (mirrors auth/active.ts).
 
+import { assertSdkLoggingDisabled } from "./google-api/sdk-logging-guard"; // MUST stay first: strips GOOGLE_SDK_NODE_LOGGING before any Google lib loads
 import * as path from "node:path";
 import { clearActive, readActive, writeActive } from "./auth/active";
 import { consent } from "./auth/consent";
@@ -669,6 +670,9 @@ async function runDoctorCmd(rest: string[], io: CliIO): Promise<void> {
 // can import this module without triggering the dispatch.
 if (import.meta.main) {
   try {
+    // Fail closed if GOOGLE_SDK_NODE_LOGGING is set and the SDK logger could not be
+    // switched off; no-op otherwise. Renders as `error: <msg>` + exit code 1.
+    assertSdkLoggingDisabled();
     await runCli(process.argv.slice(2));
   } catch (e) {
     // Both CliError (usage) and other thrown errors (MCPError from auth,

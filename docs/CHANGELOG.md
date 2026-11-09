@@ -4,9 +4,9 @@
 > authoritative spec for each cycle), detailed status records, and PR-level
 > history live in the private development archive.
 
-**Current footprint:** 129 MCP tools — 11 connectors (Google Workspace 85 · GitHub 18 ·
-Notion 8 · X 3 · web-fetch · fs-read · LINE · Telegram 2 · Discord · Slack 5 · Mattermost 4) ·
-4 OAuth providers (Google / GitHub / Notion / X) · 54 `MCPError` codes · 8 audit channels ·
+**Current footprint:** 135 MCP tools — 11 connectors (Google Workspace 89 · GitHub 18 ·
+Notion 10 · X 3 · web-fetch · fs-read · LINE · Telegram 2 · Discord · Slack 5 · Mattermost 4) ·
+4 OAuth providers (Google / GitHub / Notion / X) · 55 `MCPError` codes · 8 audit channels ·
 11 Google SDK client factories · 17 CLI subcommands. (The inbound webhook listener and
 `inbox_read` were removed after v1.127, and the multi-operator HTTP transport ("Model B":
 Tailscale identity, operators registry, agent tokens) after that; SafeSpace is stdio-only.
@@ -21,6 +21,18 @@ History entries below still describe them.)
 > (19 subcommands incl. `exec` at the time; 17 since v2.0.0).
 
 ## Release history
+
+- **v2.2.0** — **New tools: Notion data sources, Drive trash/delete, Forms publish (129 → 135 MCP tools); Node ≥22.**
+  **Upgrade notes:** Node 22 or newer is now required (googleapis 189 / gaxios 8 /
+  google-auth-library 11). No new OAuth scope, so no re-consent. `notion_query_database` no
+  longer takes `start_cursor` (continue via `notion_query_data_source`). New opt-in setting
+  `SAFESPACE_DRIVE_DELETE_TARGETS` (+ `_EXTRA`); unset allows, deny-all under
+  `SAFESPACE_AUTONOMOUS`. One new error code: `-32060 drive_delete_denied_by_policy`.
+  **Dependencies:** `@modelcontextprotocol/sdk` ^1.32.2 (fix for GHSA-46jr-4wx8-v453),
+  `googleapis` ^189; GitHub REST API version `2026-03-10`.
+  **Notion: API 2022-06-28 → 2026-03-11 (data sources) → 135 MCP tools.** `Notion-Version` is now `2026-03-11`. A database is a container of data sources, so `notion_get_database` / `notion_query_database` become compatibility wrappers over ONE shared resolver (exactly one data source → use it; 0 or >1 → an error, never picks, no fallback), and two new read tools address a source explicitly: `notion_get_data_source` and `notion_query_data_source` (10,000-result cap, `request_status`, wiki results). `notion_query_database` returns the resolved `data_source_id` and no longer takes `start_cursor` (continue via `notion_query_data_source`). `notion_search` sends `data_source` (the `database` filter stays as an alias) and shapes data-source hits as `{object, id, title, database_id}`. `notion_create_page` gains `parent_data_source_id` (mutually exclusive with the other parents; a `parent_database_id` is resolved to its sole source and re-verified before the POST). `archived` stays the tool-level key; the wire field is `in_trash`. Every emitted id / `type` / `parent_type` / `next_cursor` is now rebuilt from a validated UUID or closed enum; five id LEAF keys join the Notion `skipFields`. No new scope, error code or write capability. Notion 8 → **10** tools.
+  **Drive: `drive_trash_file` + `drive_delete_file`, behind an opt-in target allowlist.** Two new write-tier tools: `drive_trash_file` (recoverable 30-day trash, folders allowed) and `drive_delete_file` (permanent; folders refused, member of `PERMANENT_DELETE_TOOLS` so it lands in the delete burst bucket, is denied under `SAFESPACE_AUTONOMOUS`, and is counted by `audit deletes`). Both are gated first by `SAFESPACE_DRIVE_DELETE_TARGETS` (+ `_EXTRA`; `folder:<id>` / `file:<id>`; default OFF = allow, deny-all under autonomous mode): a fresh, uncached, fail-closed ancestor walk; denial is `-32060 drive_delete_denied_by_policy` with no id echoed. `doctor --posture` gains a `drive-delete` row. No new OAuth scope.
+  **Forms: `forms_publish` + `forms_unpublish`.** Forms created through the API have been unpublished by default since 2026-06-30 and accept no responses until `forms.setPublishSettings` flips them. `forms_publish` (**share** tier: it exposes the form to anyone with its link, so it follows the `drive_share_file` anyone-link path: handler tier re-check, the Drive share whitelist with the Form id as a Drive file id, then supervised send-approval, all before the API call; it also declares the `drive` scope for the ancestry walk) sets `publishState {isPublished: true, isAcceptingResponses: true}`; `forms_unpublish` (write tier, the recovery action) sets both false. Both send an allowlist-constructed body (`publishSettings.publishState` + `updateMask: "publish_state"`; caller args are never forwarded) and return `{form_id, published, accepting_responses}` from the API response. `forms_create` now sends `unpublished: true` explicitly (the API treats unset as published) and its description says new forms are unpublished. Rides the existing `forms.body` scope, so no new OAuth scope and no re-consent.
 
 - **v2.1.0** — **Audit: one writer per chain file, strict chains, and a commitment beside the salt.**
   **CLI chain:** `safespace exec` and `send approve/deny` write their own chain,

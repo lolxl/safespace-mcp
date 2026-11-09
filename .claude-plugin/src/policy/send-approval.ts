@@ -35,6 +35,7 @@ export type { ApprovalTarget };
  *  public-surface writes (v1.128 Q3-B). Deliberately EXCLUDES `gmail_create_draft` (a
  *  draft is not delivered). `drive_share_file` is in the set; the handler only CALLS
  *  this gate when `share_type === "anyone"` (`user` stays on the recipient allowlist).
+ *  `forms_publish` is too (a published form is reachable by anyone with its link).
  *  A coverage sentinel requires every `direction:"outbound-write"` tool AND every
  *  HANDLER_GATED_EXTERNAL tool to be here or in APPROVAL_EXCLUDED_WRITES. */
 export const APPROVAL_GATED_SENDS: ReadonlySet<string> = new Set([
@@ -48,6 +49,7 @@ export const APPROVAL_GATED_SENDS: ReadonlySet<string> = new Set([
   "youtube_comment_reply",
   "x_post_create",
   "drive_share_file",
+  "forms_publish",
 ]);
 
 /** outbound-write + HANDLER_GATED_EXTERNAL tools that are NOT approval-gated, with

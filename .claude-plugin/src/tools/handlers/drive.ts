@@ -2,6 +2,7 @@
 // src/tools/handlers.ts (mechanical per-API split; function bodies byte-identical).
 // Re-exported via ./index.ts so existing `./handlers` import paths are unchanged.
 
+import { Readable } from "node:stream";
 import { auditRecipientDeniedEvent, auditShareDeniedEvent, auditShareEvent, hashTargetEmail } from "../../audit";
 import { configDir as resolveConfigDir } from "../../auth/keychain";
 import { MCPError } from "../../errors";
@@ -240,6 +241,93 @@ const ALLOWED_SHARE_ROLES: ReadonlySet<string> = new Set(["reader", "commenter"]
 const MIN_EXPIRATION_DAYS = 1;
 const MAX_EXPIRATION_DAYS = 365;
 
+/** The v2.1 Drive share-whitelist gate, shared by drive_share_file and forms_publish
+ *  (a Google Form id IS a Drive file id). Walks the file's ancestry via the Drive API
+ *  (`files.get` - needs the full `drive` scope), consults the whitelist state/cache,
+ *  and on a miss audits `share_denied_by_policy` + throws `share_denied_by_policy`.
+ *  Fail-closed exactly as checkShareAllowed. Returns normally only when allowed. */
+export async function enforceDriveShareWhitelist(
+  ctx: ToolContext,
+  drive: ReturnType<typeof driveClientFromToken>,
+  fileId: string,
+): Promise<void> {
+  const whitelistStartMs = Date.now();
+  // resolveConfigDir() returns the same value for the lifetime of the proxy
+  // process (env var read at module load + a stable default fallback), so
+  // the getWhitelistState singleton's "first-call wins" contract is safe.
+  // Tests that exercise multiple configDirs must call
+  // __internal.resetSingletons in beforeEach.
+  const whitelistState = await getWhitelistState(resolveConfigDir());
+  const ancestorCache = getAncestorCache();
+
+  // Both the parent-walk metadata lookup AND the final permissions.create
+  // use the same SDK client. Whitelist LRU cache + walk depth-limit
+  // semantics live in policy/drive-whitelist.ts.
+  const ancestorFetcher: AncestorFetcher = async (id: string) => {
+    try {
+      const metaRes = await drive.files.get({
+        fileId: id,
+        fields: "parents,mimeType,shortcutDetails",
+        supportsAllDrives: true,
+      });
+      const meta = metaRes.data as {
+        parents?: string[];
+        mimeType?: string;
+        shortcutDetails?: { targetId?: string };
+      } | null;
+      if (meta === null) return { kind: "not_found" };
+      const isShortcut = meta.mimeType === "application/vnd.google-apps.shortcut";
+      const resolvedTargetId =
+        isShortcut && typeof meta.shortcutDetails?.targetId === "string"
+          ? meta.shortcutDetails.targetId
+          : undefined;
+      return {
+        kind: "ok",
+        parents: Array.isArray(meta.parents) ? meta.parents : [],
+        ...(resolvedTargetId !== undefined && { resolvedTargetId }),
+      };
+    } catch (err) {
+      // 404 = file not visible to this account (or gone). Convert to a
+      // typed result so checkShareAllowed returns walk_failed without
+      // caching (retry possible after the user re-shares to this account).
+      // GaxiosError.response.status carries the 404; UpstreamError shape kept
+      // as a fallback for callers that route through mapGoogleError first.
+      const httpStatus =
+        (err as { httpStatus?: number }).httpStatus ??
+        (err as { response?: { status?: number } }).response?.status;
+      if (httpStatus === 404) return { kind: "not_found" };
+      // Other errors (auth, network, 5xx, GaxiosError without status)
+      // propagate. checkShareAllowed catches the throw and returns
+      // walk_failed without caching. Do NOT add a timeout-specific branch
+      // that converts to not_found — timeouts should not poison the
+      // negative cache.
+      throw err;
+    }
+  };
+
+  const decision = await checkShareAllowed(
+    fileId,
+    whitelistState,
+    ancestorFetcher,
+    ancestorCache,
+    isAutonomousMode(),
+  );
+  if (!decision.allowed) {
+    // Best-effort audit append (mirrors auditShareEvent pattern — never
+    // block on append failure).
+    await auditShareDeniedEvent({
+      email: requireGoogle(ctx).accountId,
+      file_id: fileId,
+      ancestors_walked: decision.ancestorsWalked,
+      duration_ms: Date.now() - whitelistStartMs,
+    });
+    throw new MCPError("share_denied_by_policy", {
+      file_id: fileId,
+      reason: decision.reason,
+    });
+  }
+}
+
 export async function driveShareFile(
   ctx: ToolContext,
   args: Record<string, unknown>,
@@ -372,83 +460,10 @@ export async function driveShareFile(
   // On deny we record one `share_denied_by_policy` audit event with NO
   // target_email or share_type — those were never validated, and we don't
   // want to leak target intent for a refused call.
-  const whitelistStartMs = Date.now();
-  // resolveConfigDir() returns the same value for the lifetime of the proxy
-  // process (env var read at module load + a stable default fallback), so
-  // the getWhitelistState singleton's "first-call wins" contract is safe.
-  // Tests that exercise multiple configDirs must call
-  // __internal.resetSingletons in beforeEach.
-  const whitelistState = await getWhitelistState(resolveConfigDir());
-  const ancestorCache = getAncestorCache();
-
-  // Both the parent-walk metadata lookup AND the final permissions.create
-  // use the same SDK client. Whitelist LRU cache + walk depth-limit
-  // semantics live in policy/drive-whitelist.ts.
+  // Both the parent-walk metadata lookup AND the final permissions.create use the
+  // same SDK client.
   const drive = driveClientFromToken(requireGoogle(ctx).getAccessToken());
-
-  const ancestorFetcher: AncestorFetcher = async (id: string) => {
-    try {
-      const metaRes = await drive.files.get({
-        fileId: id,
-        fields: "parents,mimeType,shortcutDetails",
-        supportsAllDrives: true,
-      });
-      const meta = metaRes.data as {
-        parents?: string[];
-        mimeType?: string;
-        shortcutDetails?: { targetId?: string };
-      } | null;
-      if (meta === null) return { kind: "not_found" };
-      const isShortcut = meta.mimeType === "application/vnd.google-apps.shortcut";
-      const resolvedTargetId =
-        isShortcut && typeof meta.shortcutDetails?.targetId === "string"
-          ? meta.shortcutDetails.targetId
-          : undefined;
-      return {
-        kind: "ok",
-        parents: Array.isArray(meta.parents) ? meta.parents : [],
-        ...(resolvedTargetId !== undefined && { resolvedTargetId }),
-      };
-    } catch (err) {
-      // 404 = file not visible to this account (or gone). Convert to a
-      // typed result so checkShareAllowed returns walk_failed without
-      // caching (retry possible after the user re-shares to this account).
-      // GaxiosError.response.status carries the 404; UpstreamError shape kept
-      // as a fallback for callers that route through mapGoogleError first.
-      const httpStatus =
-        (err as { httpStatus?: number }).httpStatus ??
-        (err as { response?: { status?: number } }).response?.status;
-      if (httpStatus === 404) return { kind: "not_found" };
-      // Other errors (auth, network, 5xx, GaxiosError without status)
-      // propagate. checkShareAllowed catches the throw and returns
-      // walk_failed without caching. Do NOT add a timeout-specific branch
-      // that converts to not_found — timeouts should not poison the
-      // negative cache.
-      throw err;
-    }
-  };
-
-  const decision = await checkShareAllowed(
-    fileId,
-    whitelistState,
-    ancestorFetcher,
-    ancestorCache,
-    isAutonomousMode(),
-  );
-  if (!decision.allowed) {
-    // Best-effort audit append (mirrors auditShareEvent pattern — never
-    // block on append failure).
-    await auditShareDeniedEvent({
-      email: requireGoogle(ctx).accountId,
-      file_id: fileId,
-      ancestors_walked: decision.ancestorsWalked,
-      duration_ms: Date.now() - whitelistStartMs,
-    });
-    throw new MCPError("share_denied_by_policy", {
-      file_id: fileId,
-      reason: decision.reason,
-    });
-  }
+  await enforceDriveShareWhitelist(ctx, drive, fileId);
 
   // v1.128 Q3-B — supervised approval for share_type=anyone only (user shares stay
   // on the recipient allowlist). LAST before the SDK so a whitelist miss never
@@ -922,7 +937,12 @@ export async function driveCreateFile(
         mimeType,
         ...(parentId !== undefined && { parents: [parentId] }),
       },
-      media: { mimeType, body: content },
+      // Pass a STREAM, never the raw string. googleapis-common wraps a string media
+      // body in a PassThrough ended with push(null); gaxios 8 then sends
+      // Readable.toWeb(<that stream>), which NEVER reaches EOF on Bun (1.3.x) and
+      // the upload hangs. A Readable.from(...) source terminates correctly (and
+      // takes googleapis-common's isStream branch). Pinned by real-transport.test.ts.
+      media: { mimeType, body: Readable.from([Buffer.from(content, "utf8")]) },
       fields: "id,name,mimeType,parents,webViewLink,size",
       supportsAllDrives: true,
     });

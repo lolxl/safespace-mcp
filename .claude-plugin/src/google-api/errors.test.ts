@@ -252,3 +252,116 @@ describe("toGoogleError — v1.64 B4 handler catch boundary (RETURNS, never thro
     expect(returned.httpStatus).toBe(thrown.httpStatus);
   });
 });
+
+// gaxios >= 7 delivers `response.data` as the RAW STRING for responseType
+// "text" (gmail batch) and for non-2xx "stream" (drive downloads). The mapper
+// must read the Google error envelope out of that string.
+describe("toGoogleError — string response bodies (gaxios 8 text/stream)", () => {
+  const withBody = (status: number, data: unknown, message = "boom"): Error =>
+    Object.assign(new Error(message), { response: { status, data } });
+
+  test("403 insufficientPermissions in a JSON STRING body → scope_mismatch", () => {
+    const body = JSON.stringify({
+      error: { code: 403, status: "PERMISSION_DENIED", errors: [{ reason: "insufficientPermissions" }] },
+    });
+    const out = toGoogleError(withBody(403, body), ctx);
+    expect(out).toBeInstanceOf(MCPError);
+    expect((out as MCPError).errorName).toBe("scope_mismatch");
+  });
+
+  test("403 quotaExceeded in a JSON STRING body → youtube_quota_exceeded", () => {
+    const body = JSON.stringify({ error: { errors: [{ reason: "quotaExceeded" }] } });
+    const out = toGoogleError(withBody(403, body), ctx);
+    expect((out as MCPError).errorName).toBe("youtube_quota_exceeded");
+  });
+
+  test("string body message is used for the upstream message", () => {
+    const body = JSON.stringify({ error: { message: "Backend Error" } });
+    const out = toGoogleError(withBody(500, body, "raw gaxios message"), ctx) as Error & { httpStatus?: number };
+    expect(out.httpStatus).toBe(500);
+    expect(out.message).toBe("google_api_upstream_500_test_tool: Backend Error");
+  });
+
+  // gaxios 8 sets err.message to the RAW response body, so model message == body.
+  test("non-JSON string (HTML) / malformed JSON / oversized / non-object → fixed `HTTP <status>`, body NEVER echoed, never throws", () => {
+    const big = "{" + " ".repeat(70_000) + "}";
+    for (const data of ["<html>Forbidden SECRET-BODY</html>", '{"error": {', big, "[1,2]", "null", ""]) {
+      const out = toGoogleError(withBody(403, data, data), ctx) as Error & { httpStatus?: number };
+      expect(out).not.toBeInstanceOf(MCPError);
+      expect(out.httpStatus).toBe(403);
+      expect(out.message).toBe("google_api_403_test_tool: HTTP 403");
+    }
+  });
+
+  test("JSON string that is an object without `error` → fixed fallback (body not echoed)", () => {
+    const body = '{"foo":"SECRET-BODY"}';
+    const out = toGoogleError(withBody(404, body, body), ctx) as Error & { httpStatus?: number };
+    expect(out.httpStatus).toBe(404);
+    expect(out.message).toBe("google_api_404_test_tool: HTTP 404");
+  });
+
+  test("envelope message is truncated to a small bound", () => {
+    const body = JSON.stringify({ error: { message: "m".repeat(5000) } });
+    const out = toGoogleError(withBody(500, body, body), ctx) as Error & { httpStatus?: number };
+    expect(out.httpStatus).toBe(500);
+    expect(out.message.length).toBeLessThan(600);
+    expect(out.message.startsWith("google_api_upstream_500_test_tool: mmmm")).toBe(true);
+  });
+
+  test("network error (no response) keeps err.message but truncated", () => {
+    const out = toGoogleError(new Error("e".repeat(5000)), ctx) as Error & { httpStatus?: number };
+    expect(out.httpStatus).toBeUndefined();
+    expect(out.message.length).toBeLessThan(600);
+  });
+
+  // The upstream body is attacker-influenced: wrong-typed fields must be ignored,
+  // never trusted and never able to make the mapper throw.
+  test("wrong-typed envelope fields are ignored; mapper returns with the right httpStatus", () => {
+    const hostile: unknown[] = [
+      { error: { message: { toString: null } } },
+      { error: { message: 42, status: ["PERMISSION_DENIED"], errors: "nope" } },
+      { error: { errors: [null] } },
+      { error: { errors: [{ reason: { toString: null } }] } },
+      { error: { errors: [["insufficientPermissions"]] } },
+      { error: "PERMISSION_DENIED" },
+      { error: null },
+      { error: [] },
+      [],
+      null,
+      42,
+    ];
+    for (const data of hostile) {
+      for (const encode of [false, true]) {
+        const wire = encode ? JSON.stringify(data) : data;
+        const out = toGoogleError(withBody(403, wire, "x"), ctx) as Error & { httpStatus?: number };
+        expect(out).not.toBeInstanceOf(MCPError); // hostile types must NOT be granted scope_mismatch
+        expect(out.httpStatus).toBe(403);
+        expect(out.message).toBe("google_api_403_test_tool: HTTP 403");
+      }
+    }
+  });
+
+  test("non-number response.status is treated as a network error; hostile code/message never throw", () => {
+    const e = Object.assign(new Error("x"), {
+      code: { toString: null },
+      message: { toString: null },
+      response: { status: "403", data: {} },
+    });
+    const out = toGoogleError(e, ctx) as Error & { httpStatus?: number };
+    expect(out.httpStatus).toBeUndefined();
+    expect(out.message).toBe("google_api_network_unknown_test_tool: (no message)");
+  });
+
+  test("valid envelope with one valid + well-typed fields still works alongside junk siblings", () => {
+    const body = { error: { message: "ok msg", status: "PERMISSION_DENIED", errors: [{ reason: "forbidden", message: 5 }] } };
+    const out = toGoogleError(withBody(403, body, "x"), ctx);
+    expect((out as MCPError).errorName).toBe("scope_mismatch");
+  });
+
+  test("gaxios 8 numeric error.code on a response-less error still maps as network error", () => {
+    const e = Object.assign(new Error("x"), { code: 28 });
+    const out = toGoogleError(e, ctx) as Error & { httpStatus?: number };
+    expect(out.httpStatus).toBeUndefined();
+    expect(out.message).toBe("google_api_network_28_test_tool: x");
+  });
+});

@@ -13,19 +13,21 @@ AI agent ──stdio MCP (local)───────────────▶
    hardening · audit ──────────────────────────────┘
 ```
 
-**Status:** v1.80.0 — **108 tools** across **8 connectors**: **Google Workspace** (Gmail · Drive · Docs · Calendar · Contacts · YouTube + Analytics · Tasks · Sheets · Slides · Forms — the flagship reference connector, 84 tools), **GitHub** (14), **Notion** (5, multi-workspace), **web-fetch** + **fs-read** (keyless), and **LINE · Telegram · Discord** push (service-token). Three connector classes — **OAuth-account · service-token · keyless**. Runs locally over stdio. Apache-2.0 licensed.
+**Status:** v2.2.0 — **135 tools** across **11 connectors**: **Google Workspace** (Gmail · Drive · Docs · Calendar · Contacts · YouTube + Analytics · Tasks · Sheets · Slides · Forms — the flagship reference connector, 89 tools), **GitHub** (18), **Notion** (10, multi-workspace), **X** (3), **web-fetch** + **fs-read** (keyless), and **LINE · Telegram · Discord · Slack · Mattermost** (service-token). Three connector classes — **OAuth-account · service-token · keyless**. Runs locally over stdio. Apache-2.0 licensed.
 
 | Connector | Class | Tools | Auth |
 |-----------|-------|------:|------|
-| Google Workspace | OAuth-account | 84 | OAuth — multi-account |
-| GitHub | OAuth-account | 14 | GitHub OAuth App — single account |
-| Notion | OAuth-account | 5 | Notion public integration — multi-workspace |
+| Google Workspace | OAuth-account | 89 | OAuth — multi-account |
+| GitHub | OAuth-account | 18 | GitHub OAuth App — single account |
+| Notion | OAuth-account | 10 | Notion public integration — multi-workspace |
 | X (Twitter) | OAuth-account | 3 | X OAuth 2.0 PKCE — multi-account (`x_get_me` + `x_search_recent` + `x_post_create`) |
 | web-fetch | keyless | 1 | none — SSRF-gated |
 | fs-read | keyless | 1 | none — default-deny path allowlist |
 | LINE Official Account | service-token | 1 | channel token in `SecretBackend` |
-| Telegram Bot | service-token | 1 | bot token in `SecretBackend` |
+| Telegram Bot | service-token | 2 | bot token in `SecretBackend` |
 | Discord Bot | service-token | 1 | bot token in `SecretBackend` |
+| Slack | service-token | 5 | bot token in `SecretBackend` |
+| Mattermost (self-hosted) | service-token | 4 | access token in `SecretBackend`; owner-configured server URL |
 
 > Per-version history lives in [`docs/CHANGELOG.md`](docs/CHANGELOG.md). The north-star framing is in [`docs/safety-gateway-thesis.md`](docs/safety-gateway-thesis.md). This README describes the current release.
 
@@ -101,7 +103,7 @@ The **GitHub** connector uses GitHub's flat OAuth scopes — `read:user` + `repo
 
 ## Prerequisites
 
-- **A runtime** — **Bun** 1.3+ for the Claude Code plugin path (`brew install oven-sh/bun/bun`); or **Node ≥ 20** for the `npx` / other-MCP-client path (the published package ships a prebuilt bundle, so consumers need no Bun — see [`docs/CLIENTS.md`](docs/CLIENTS.md)).
+- **A runtime** — **Bun** 1.3+ for the Claude Code plugin path (`brew install oven-sh/bun/bun`); or **Node ≥ 22** for the `npx` / other-MCP-client path (the published package ships a prebuilt bundle, so consumers need no Bun — see [`docs/CLIENTS.md`](docs/CLIENTS.md)).
 - **Google Cloud OAuth client** (Desktop app type) — `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` in `.env`. See [`.env.example`](.env.example).
   - ⚠️ **Publish the OAuth consent screen to "In production"** (Google Cloud Console → *APIs & Services → OAuth consent screen* → **Publish app**). An app left in the default **"Testing"** status issues **refresh tokens that expire after 7 days** — you would have to re-run `safespace consent` every week. Because SafeSpace is **self-hosted with _your own_ OAuth client**, the "Google hasn't verified this app" prompt is expected and correct — you are the app's author *and* its only user, so you are the right party to trust it; click *Advanced → Go to \<app\>*. **No Google verification is required** (that process targets public multi-tenant SaaS, which SafeSpace is not). **Google Workspace users** can instead set the **user type to "Internal"** — no 7-day expiry and no warning at all, but it requires a Workspace org and confines the app to that org's accounts. After changing either setting, re-run `safespace consent <email> --re-auth` to mint a fresh long-lived token.
 - **GCP APIs enabled** in the same project as the OAuth client: Gmail, Drive, Docs, Calendar, People (Contacts), YouTube Data API v3 + YouTube Analytics API, Tasks, Sheets, Slides, and Forms.
@@ -192,7 +194,7 @@ npx -y -p safespace-mcp safespace consent you@example.com
 npx -y -p safespace-mcp safespace doctor
 ```
 
-The npm tarball ships a prebuilt Node bundle, so consumers need only **Node ≥ 20** (Bun is a build-time tool, not a runtime dependency). Per-client config (Codex `config.toml`, Antigravity/Gemini + Cursor/Desktop `mcpServers` JSON), the required env block, and Windows notes are in **[Running from any client → `docs/CLIENTS.md`](docs/CLIENTS.md)**.
+The npm tarball ships a prebuilt Node bundle, so consumers need only **Node ≥ 22** (Bun is a build-time tool, not a runtime dependency). Per-client config (Codex `config.toml`, Antigravity/Gemini + Cursor/Desktop `mcpServers` JSON), the required env block, and Windows notes are in **[Running from any client → `docs/CLIENTS.md`](docs/CLIENTS.md)**.
 
 ---
 

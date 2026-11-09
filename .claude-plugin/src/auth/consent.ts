@@ -3,6 +3,7 @@
 // Security-review fixes (2026-04-30): explicit PKCE wiring, signed id_token verify
 // with audience, file lock for concurrent consent, scope check on tokens.scope
 // (NOT granted_scopes which is implicit-flow only).
+import { assertSdkLoggingDisabled } from "../google-api/sdk-logging-guard"; // MUST stay before google-auth-library (it logs token bodies when GOOGLE_SDK_NODE_LOGGING is set)
 import { CodeChallengeMethod, OAuth2Client } from "google-auth-library";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -269,6 +270,7 @@ export async function acquireConsentLock(email: string): Promise<{ release: () =
 /* ───────── orchestrator ───────── */
 
 export async function consent(email: string, opts: ConsentOptions = {}): Promise<void> {
+  assertSdkLoggingDisabled(); // fail closed before any token-bearing call (see sdk-logging-guard.ts)
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   if (!clientId || !clientSecret) {

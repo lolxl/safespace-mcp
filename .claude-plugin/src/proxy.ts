@@ -1,7 +1,8 @@
 // Entry point: the MCP server bootstrap. Runs the startup guards, then connects the
 // server over stdio. The server DEFINITION lives in ./server.ts (`createMcpServer`) so
 // tests can import it without triggering this file's startup side effects.
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { assertSdkLoggingDisabled } from "./google-api/sdk-logging-guard"; // MUST stay first: strips GOOGLE_SDK_NODE_LOGGING before any Google lib loads
+import { createStdioTransport } from "./stdio-transport";
 import { configDir } from "./auth/keychain";
 import { enforceAutonomousTokenStorage } from "./auth/select-backend";
 import { validateConnectors } from "./policy/connector-toggle";
@@ -32,6 +33,9 @@ import { writeStartupMarker } from "./startup-marker";
 // still sets one expects a removed feature, e.g. a bound inbound webhook socket or the
 // former SAFESPACE_ENFORCED refuse-to-start checklist.
 try {
+  // Fail closed if GOOGLE_SDK_NODE_LOGGING is set and the SDK logger could not be
+  // switched off (it would print tokens / API data to stderr). No-op otherwise.
+  assertSdkLoggingDisabled();
   enforceNoRetiredSettings();
   validateConnectors();
   enforceAutonomousTokenStorage();
@@ -41,7 +45,7 @@ try {
 }
 
 // MCP over stdio — the only transport.
-await createMcpServer().connect(new StdioServerTransport());
+await createMcpServer().connect(createStdioTransport());
 
 // v1.8.2 #7 / cold-path: write the startup marker AFTER the transport is
 // connected, not before the handshake.

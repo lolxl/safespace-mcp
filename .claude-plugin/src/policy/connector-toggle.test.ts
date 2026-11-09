@@ -263,11 +263,11 @@ describe("v1.127 resolution + fail-safe", () => {
 // BEHAVIORAL — through a real in-memory MCP client.
 // ───────────────────────────────────────────────────────────────────────────────
 describe("v1.127 tools/list", () => {
-  test("UNSET exposes every connector — 68 / 124 / 129 tools, registry order", async () => {
-    expect((await listToolNames("read")).length).toBe(68);
-    expect((await listToolNames("write")).length).toBe(124);
+  test("UNSET exposes every connector — 70 / 129 / 135 tools, registry order", async () => {
+    expect((await listToolNames("read")).length).toBe(70);
+    expect((await listToolNames("write")).length).toBe(129);
     const share = await listToolNames("share");
-    expect(share.length).toBe(129);
+    expect(share.length).toBe(135);
     expect(share).toEqual(
       implementedDefs.map((d) => d.name), // registry order preserved on the wire
     );
@@ -286,7 +286,7 @@ describe("v1.127 tools/list", () => {
   test("the alias exposes all of google-workspace and no other connector", async () => {
     process.env[ENV] = GOOGLE_ALIAS;
     const names = await listToolNames("share");
-    expect(names.length).toBe(85);
+    expect(names.length).toBe(89);
     expect(names).not.toContain("github_list_repos");
   });
 
@@ -320,7 +320,7 @@ describe("v1.127 tools/list", () => {
 
     expect(a.every((n) => n.startsWith("github_"))).toBe(true);
     expect(b.every((n) => n.startsWith("notion_"))).toBe(true);
-    expect(c.length).toBe(129);
+    expect(c.length).toBe(135);
     expect(d).toEqual(a); // re-selecting the first set returns the same projection
   });
 });

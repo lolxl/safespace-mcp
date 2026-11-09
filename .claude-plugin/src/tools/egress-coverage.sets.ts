@@ -57,7 +57,8 @@
 //   notion_create_page / _append_blocks / _update_page
 //                           → enforceNotionWriteEgressGates (B6.1 wave A; CHECK-ONLY; model
 //                              B: F3a secret-shape, NO target allowlist; notion_create_page's
-//                              extract covers BOTH the page-parent and db-parent gate inputs)
+//                              extract covers the page-, database- and data-source-parent gate inputs; the two
+//                              data-source READ tools are inbound-read and NOT in this set)
 export const PIPELINE_EGRESS: ReadonlySet<string> = new Set([
   "line_push_message",
   "telegram_send_message",
@@ -91,12 +92,17 @@ export const PIPELINE_EGRESS: ReadonlySet<string> = new Set([
 //                                 share_type values) + policy/recipient-allowlist
 //                                 (isRecipientAllowed on share_type=user); both
 //                                 fail-closed.  [handlers/drive.ts]
+//   forms_publish              → the SAME anyone-link path (a Form id IS a Drive file
+//                                 id): handler tier re-check → enforceDriveShareWhitelist
+//                                 (policy/drive-whitelist, fail-closed) → requireSendApproval
+//                                 → setPublishSettings.  [handlers/forms.ts]
 // (B6.1 wave A2b — the 3 YouTube public-surface writes MIGRATED to PIPELINE_EGRESS:
 //  their bespoke handler gate blocks became the composite wrappers
 //  enforceYoutubeCommentEgressGates / enforceYoutubeVideoUpdateEgressGates in
 //  tools/egress.ts, fired by withToolContext via each tool's egress descriptor.)
 export const HANDLER_GATED_EXTERNAL: ReadonlySet<string> = new Set([
   "drive_share_file",
+  "forms_publish",
 ]);
 
 // ── Bucket 3: OWN_DATA_WRITE ──────────────────────────────────────────────────
@@ -120,16 +126,22 @@ export const OWN_DATA_WRITE: ReadonlySet<string> = new Set([
   "docs_create",
   "docs_append_text",
   "docs_modify_structured",
-  // drive — own files (sharing is drive_share_file, bucket 2)
+  // drive — own files (sharing is drive_share_file, bucket 2; trash/delete carry the
+  // drive-delete target allowlist)
   "drive_create_folder",
   "drive_move_file",
   "drive_create_file",
   "drive_copy_file",
   "drive_rename_file",
+  "drive_trash_file",
+  "drive_delete_file",
   // forms — own forms (forms_create = bare form, no item payload; the
-  // SSRF-exclusion deep-gate is on forms_modify's item requests)
+  // SSRF-exclusion deep-gate is on forms_modify's item requests).
+  // forms_unpublish only REVOKES exposure (recovery action, like drive_unshare_file;
+  // forms_publish is the outbound share, in HANDLER_GATED_EXTERNAL).
   "forms_create",
   "forms_modify",
+  "forms_unpublish",
   // gmail — own mailbox (filter forward rejected; batch TRASH/SPAM blocked)
   "gmail_create_label",
   "gmail_modify_message",

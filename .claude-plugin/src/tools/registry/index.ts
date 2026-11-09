@@ -106,6 +106,8 @@ const TOOL_ORDER: readonly string[] = [
   "drive_create_file",
   "drive_copy_file",
   "drive_rename_file",
+  "drive_trash_file",
+  "drive_delete_file",
   "docs_get_content",
   "docs_create",
   "docs_append_text",
@@ -156,6 +158,8 @@ const TOOL_ORDER: readonly string[] = [
   "forms_get_response",
   "forms_create",
   "forms_modify",
+  "forms_publish",
+  "forms_unpublish",
   "tasks_lists",
   "tasks_list",
   "tasks_get",
@@ -222,6 +226,9 @@ const TOOL_ORDER: readonly string[] = [
   "notion_get_block_children",
   "notion_query_database",
   "notion_get_database",
+  // Notion-Version 2026-03-11 — explicit data-source READ tools (the two above are wrappers).
+  "notion_get_data_source",
+  "notion_query_data_source",
   // v1.96 — Notion WRITE (text-only, egress-gated).
   "notion_create_page",
   "notion_append_blocks",

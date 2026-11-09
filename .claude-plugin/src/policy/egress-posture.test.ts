@@ -4,6 +4,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { classifyEgress, evaluateEgressPosture, type EgressRow } from "./egress-posture";
 import { __internal as recipientInternal } from "./recipient-allowlist";
 import { __internal as tasksInternal } from "./tasks-delete-targets";
+import { __internal as driveDeleteInternal } from "./drive-delete-targets";
 import { __internal as ytInternal } from "./youtube-comment-targets";
 import { __internal as ghWriteInternal } from "./github-write-targets";
 import { __internal as ghMergeInternal } from "./github-merge-targets";
@@ -18,6 +19,7 @@ const ENV_VARS = [
   "SAFESPACE_AUTONOMOUS",
   "SAFESPACE_RECIPIENT_ALLOW", "SAFESPACE_RECIPIENT_ALLOW_EXTRA",
   "SAFESPACE_TASKS_DELETE_TARGETS", "SAFESPACE_TASKS_DELETE_TARGETS_EXTRA",
+  "SAFESPACE_DRIVE_DELETE_TARGETS", "SAFESPACE_DRIVE_DELETE_TARGETS_EXTRA",
   "SAFESPACE_YOUTUBE_COMMENT_TARGETS", "SAFESPACE_YOUTUBE_COMMENT_TARGETS_EXTRA",
   "SAFESPACE_LINE_RECIPIENT_ALLOW", "SAFESPACE_LINE_RECIPIENT_ALLOW_EXTRA",
   "SAFESPACE_TELEGRAM_RECIPIENT_ALLOW", "SAFESPACE_TELEGRAM_RECIPIENT_ALLOW_EXTRA",
@@ -33,6 +35,7 @@ const ENV_VARS = [
 function resetCaches(): void {
   recipientInternal.resetSingletons();
   tasksInternal.resetSingletons();
+  driveDeleteInternal.resetSingletons();
   ytInternal.resetSingletons();
   ghWriteInternal.resetSingletons();
   ghMergeInternal.resetSingletons();
@@ -90,10 +93,10 @@ describe("classifyEgress (pure)", () => {
 const rowOf = (rows: EgressRow[], name: string): EgressRow => rows.find((r) => r.connector.startsWith(name))!;
 
 describe("evaluateEgressPosture", () => {
-  test("enumerates all 15 connectors", async () => {
+  test("enumerates all 16 connectors", async () => {
     const rows = await evaluateEgressPosture();
-    expect(rows.length).toBe(15);
-    for (const name of ["recipient", "tasks-delete", "youtube-comment", "youtube-video", "line", "telegram", "discord", "slack", "mattermost", "github-write", "github-merge", "github-approve", "x-post", "fs-read", "web-fetch"]) {
+    expect(rows.length).toBe(16);
+    for (const name of ["recipient", "tasks-delete", "drive-delete", "youtube-comment", "youtube-video", "line", "telegram", "discord", "slack", "mattermost", "github-write", "github-merge", "github-approve", "x-post", "fs-read", "web-fetch"]) {
       expect(rows.some((r) => r.connector.startsWith(name)), name).toBe(true);
     }
   });
@@ -101,7 +104,7 @@ describe("evaluateEgressPosture", () => {
   test("all-unset + INTERACTIVE: off→allow = OPEN warn, off→deny = deny-all pass", async () => {
     const rows = await evaluateEgressPosture();
     // off→allow lists, unset + not autonomous → warn
-    for (const n of ["recipient", "tasks-delete", "line", "telegram", "discord", "slack", "mattermost", "web-fetch"]) {
+    for (const n of ["recipient", "tasks-delete", "drive-delete", "line", "telegram", "discord", "slack", "mattermost", "web-fetch"]) {
       expect(rowOf(rows, n).status, n).toBe("warn");
     }
     // off→deny lists, unset → pass (deny-all)
@@ -123,6 +126,15 @@ describe("evaluateEgressPosture", () => {
     const row = rowOf(await evaluateEgressPosture(), "github-write");
     expect(row.status).toBe("pass");
     expect(row.detail).toBe("restricted — 1 entry allowlisted");
+  });
+
+  test("drive-delete populated allowlist → restricted pass with the count, ids never echoed", async () => {
+    process.env.SAFESPACE_DRIVE_DELETE_TARGETS = "folder:1FolderSecretAAAAAAAAAAAA,file:1FileSecretAAAAAAAAAAAAAA";
+    resetCaches();
+    const row = rowOf(await evaluateEgressPosture(), "drive-delete");
+    expect(row.status).toBe("pass");
+    expect(row.detail).toBe("restricted — 2 entries allowlisted");
+    expect(row.detail).not.toContain("Secret");
   });
 
   test("x-post populated allowlist → restricted pass with the count", async () => {
@@ -174,9 +186,9 @@ describe("service-token posture rows — byte-identity pin (pack step 2)", () =>
 
   const OPEN = "OPEN (unset + interactive → unrestricted; set the allowlist or enable SAFESPACE_AUTONOMOUS)";
 
-  test("order is line, telegram, discord, slack, mattermost at indices 4..8", async () => {
+  test("order is line, telegram, discord, slack, mattermost at indices 5..9 (after drive-delete)", async () => {
     const rows = await evaluateEgressPosture();
-    expect(rows.slice(4, 9).map((r) => r.connector)).toEqual([
+    expect(rows.slice(5, 10).map((r) => r.connector)).toEqual([
       "line", "telegram", "discord", "slack", "mattermost",
     ]);
   });

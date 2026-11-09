@@ -2,7 +2,7 @@
 //
 // docs/v1.52-autonomy-hardening.md §4.2. ONE deployment-mode switch
 // (`SAFESPACE_AUTONOMOUS`) that flips the three `OFF=allow` allowlists
-// (recipient / drive-share / tasks-delete) to DENY-BY-DEFAULT for unattended
+// (recipient / drive-share / tasks-delete / drive-delete) to DENY-BY-DEFAULT for unattended
 // agents — "before you hand the box to an autonomous agent, set
 // SAFESPACE_AUTONOMOUS=true; now nothing leaves unless you listed it." The
 // flag is the umbrella that F4 (v1.54) permanent-delete deny will also key off.
@@ -51,7 +51,8 @@ export function isAutonomousMode(): boolean {
 // in F1's PERMANENT_DELETE_TOOLS set is denied at the choke point, BEFORE the
 // SDK call (and before F1's burst counter, so a denied delete does not consume
 // burst budget). RECOVERABLE mutations — gmail trash/archive, tasks_clear,
-// youtube_playlist_item_remove, gmail_delete_filter, drive_unshare_file — are in
+// youtube_playlist_item_remove, gmail_delete_filter, drive_unshare_file,
+// drive_trash_file — are in
 // the write bucket, NOT this set, and are unaffected.
 //
 // Classifier reuse (locked Q5 = option (a)): F4 does NOT introduce its own

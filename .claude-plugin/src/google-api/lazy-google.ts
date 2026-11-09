@@ -22,6 +22,7 @@
  * NO runtime SDK load — only this `google` VALUE accessor defers anything.
  */
 
+import { assertSdkLoggingDisabled } from "./sdk-logging-guard"; // strips GOOGLE_SDK_NODE_LOGGING before the lazy require("googleapis") below can ever run
 import { createRequire } from "node:module";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -30,6 +31,7 @@ let mod: GoogleApis | null = null;
 
 /** The googleapis `google` namespace, resolved + memoized on first call. */
 export function getGoogle(): GoogleApis["google"] {
+  assertSdkLoggingDisabled(); // fail closed (fixed message) if SDK logging is requested but could not be disabled
   return (mod ??= nodeRequire("googleapis") as GoogleApis).google;
 }
 

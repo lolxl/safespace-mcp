@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { NOOP_AUDIT } from "../test-audit";
+import { notionRouter } from "../test-notion-router";
 import type { Credential, ToolContext } from "../types";
 import { TOOL_REGISTRY } from "../registry";
 import { notionAppendBlocks, notionCreatePage, notionUpdatePage } from "./notion";
@@ -210,10 +211,15 @@ describe("notion write — credential narrow (R8) + token-no-leak", () => {
 /* ── v1.105 — db-parent create, arbitrary type-tagged properties, archive ── */
 
 const DB = "33333333-3333-3333-3333-333333333333";
+const DS = "55555555-5555-5555-5555-555555555555";
 
-describe("notion_create_page — db-parent + properties (v1.105)", () => {
-  test("POSTs a row under a database with allowlist-constructed properties", async () => {
-    const f = fetchStub();
+describe("notion_create_page — db-parent + properties (v1.105; data sources 2026-03-11)", () => {
+  test("POSTs a row under a database (resolved to its sole data source) with allowlist-constructed properties", async () => {
+    const f = notionRouter([
+      { method: "GET", path: `/v1/databases/${DB}`, body: { object: "database", id: DB, data_sources: [{ id: DS, name: "Tasks" }] } },
+      { method: "GET", path: `/v1/data_sources/${DS}`, body: { object: "data_source", id: DS, parent: { type: "database_id", database_id: DB } } },
+      { method: "POST", path: "/v1/pages", body: { object: "page", id: PAGE } },
+    ]);
     await notionCreatePage(
       ctx(),
       {
@@ -231,9 +237,11 @@ describe("notion_create_page — db-parent + properties (v1.105)", () => {
       },
       { fetchImpl: f.impl },
     );
-    const body = JSON.parse(f.calls[0]!.init.body as string);
+    expect(f.trace()).toEqual([`GET /v1/databases/${DB}`, `GET /v1/data_sources/${DS}`, "POST /v1/pages"]);
+    expect(f.unexpected).toEqual([]);
+    const body = f.calls[2]!.body as Record<string, any>;
     expect(Object.keys(body).sort()).toEqual(["children", "parent", "properties"]);
-    expect(body.parent).toEqual({ database_id: DB });
+    expect(body.parent).toEqual({ type: "data_source_id", data_source_id: DS });
     expect(body.properties.Name).toEqual({ title: [{ type: "text", text: { content: "Task A" } }] });
     expect(body.properties.Status).toEqual({ select: { name: "Done" } });
     expect(body.properties.Priority).toEqual({ number: 3 });
@@ -265,7 +273,7 @@ describe("notion_create_page — db-parent + properties (v1.105)", () => {
 
 describe("notion properties — type allowlist + value-shape validation (v1.105)", () => {
   const mk = (props: Record<string, unknown>) => ({
-    parent_database_id: DB,
+    parent_data_source_id: DS,
     properties: { Name: { type: "title", value: "t" }, ...props },
   });
 
@@ -341,13 +349,14 @@ describe("notion_update_page — properties + archived (v1.105)", () => {
     expect(JSON.parse(f.calls[0]!.init.body as string)).toEqual({ properties: { Status: { select: { name: "Done" } } } });
   });
 
-  test("archived true / false PATCHes { archived } (reversible)", async () => {
+  test("archived true / false PATCHes { in_trash } (reversible)", async () => {
     const f = fetchStub();
     await notionUpdatePage(ctx(), { page_id: PAGE, archived: true }, { fetchImpl: f.impl });
-    expect(JSON.parse(f.calls[0]!.init.body as string)).toEqual({ archived: true });
+    // 2026-03-11: the tool key stays `archived`; the WIRE field is `in_trash`.
+    expect(JSON.parse(f.calls[0]!.init.body as string)).toEqual({ in_trash: true });
     const f2 = fetchStub();
     await notionUpdatePage(ctx(), { page_id: PAGE, archived: false }, { fetchImpl: f2.impl });
-    expect(JSON.parse(f2.calls[0]!.init.body as string)).toEqual({ archived: false });
+    expect(JSON.parse(f2.calls[0]!.init.body as string)).toEqual({ in_trash: false });
   });
 
   test("title + properties + archived combine into one PATCH", async () => {
@@ -358,7 +367,8 @@ describe("notion_update_page — properties + archived (v1.105)", () => {
       { fetchImpl: f.impl },
     );
     const body = JSON.parse(f.calls[0]!.init.body as string);
-    expect(body.archived).toBe(false);
+    expect(body.in_trash).toBe(false);
+    expect(body.archived).toBeUndefined();
     expect(body.properties.title).toEqual({ title: [{ type: "text", text: { content: "Renamed" } }] });
     expect(body.properties.P).toEqual({ number: 1 });
   });

@@ -768,10 +768,18 @@ export async function gmailModifyMessagesBatch(
     // Gmail returns the outer response with its OWN boundary in
     // Content-Type. We re-parse it from the response header to avoid any
     // assumption that Gmail echoes our boundary back.
+    // gaxios >= 7 returns a WHATWG `Headers`; the test mock still yields a
+    // plain object. Accept both.
+    const respHeaders = res.headers as unknown;
     const respCT =
-      (res.headers as Record<string, string | undefined>)?.["content-type"] ??
-      (res.headers as Record<string, string | undefined>)?.["Content-Type"] ??
-      "";
+      (typeof (respHeaders as Headers | undefined)?.get === "function"
+        ? (respHeaders as Headers).get("content-type")
+        : ((respHeaders as Record<string, string | undefined> | undefined)?.[
+            "content-type"
+          ] ??
+          (respHeaders as Record<string, string | undefined> | undefined)?.[
+            "Content-Type"
+          ])) ?? "";
     const respBoundaryMatch = respCT.match(/boundary=([^;]+)/i);
     // Per CR PR #95 M2: if Google's response is missing boundary, surface
     // upstream_malformed directly instead of silently falling back to our

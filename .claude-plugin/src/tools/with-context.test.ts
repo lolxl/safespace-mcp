@@ -2255,6 +2255,30 @@ describe("withToolContext — v1.54 F4 autonomous permanent-delete deny wiring",
     expect(handlerCalls).toBe(1);
   });
 
+  test("autonomous ON + drive_delete_file → -32033 at the choke point; drive_trash_file (recoverable) is NOT F4-denied", async () => {
+    process.env.SAFESPACE_AUTONOMOUS = "true";
+    const fk = makeDeps();
+    let handlerCalls = 0;
+    const handler = async () => {
+      handlerCalls++;
+      return { ok: true };
+    };
+    const args = { file_id: "1FileAAAAAAAAAAAAAAAAAA", account_id: "alice@example.com" };
+
+    let caught: unknown;
+    try {
+      await withToolContext("drive_delete_file", args, handler, fk.deps);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(MCPError);
+    expect((caught as MCPError).errorName).toBe("destructive_denied_in_autonomous_mode");
+    expect(handlerCalls).toBe(0);
+
+    await withToolContext("drive_trash_file", args, handler, fk.deps);
+    expect(handlerCalls).toBe(1);
+  });
+
   test("autonomous ON denies the delete BEFORE the F1 counter (denied call does not burn delete budget)", async () => {
     // F4 fires before enforceWriteBurst: with the delete cap at 1, a denied
     // permanent-delete must not consume that single unit — so a SECOND denied

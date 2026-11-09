@@ -24,8 +24,9 @@ import { assertEgressHost } from "../../policy/egress-destinations";
 import { MAX_RESPONSE_BYTES, readBounded } from "../http/bounded-read";
 
 const NOTION_API = "https://api.notion.com";
-/** Pinned Notion API version (stable). Sent on every request. */
-const NOTION_VERSION = "2022-06-28";
+/** Pinned Notion API version (stable). Sent on every request. 2026-03-11 = data sources
+ *  (2025-09-03) + `archived` → `in_trash` + block `position` (SafeSpace sends none). */
+const NOTION_VERSION = "2026-03-11";
 const USER_AGENT = "safespace-mcp";
 const DEFAULT_TIMEOUT_MS = 10_000;
 

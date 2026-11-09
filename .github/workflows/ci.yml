@@ -137,7 +137,7 @@ jobs:
       # supported runtime, not just the newest.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install
         run: bun install --frozen-lockfile

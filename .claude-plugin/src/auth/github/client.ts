@@ -25,6 +25,8 @@ import { MAX_RESPONSE_BYTES, readBounded } from "../http/bounded-read";
 
 const GITHUB_API = "https://api.github.com";
 const USER_AGENT = "safespace-mcp";
+/** GitHub REST API version pinned on every request (single source; consent.ts imports it). */
+export const GITHUB_API_VERSION = "2026-03-10";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 /** The closed-set operational reason for a `github_api_failed` (-32041). `no_token`
@@ -96,7 +98,7 @@ async function githubApiRequest(opts: {
     Authorization: `Bearer ${opts.token}`,
     Accept: "application/vnd.github+json",
     "User-Agent": USER_AGENT,
-    "X-GitHub-Api-Version": "2022-11-28",
+    "X-GitHub-Api-Version": GITHUB_API_VERSION,
   };
   // Serialize BEFORE the try: a non-serializable body is a caller bug that should
   // surface as a clear synchronous throw, not be masked as a network api_error.

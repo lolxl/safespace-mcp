@@ -220,8 +220,16 @@ describe("Source descriptor — notion (v1.78 — the 3rd OAuth source)", () => 
     for (const k of ["id", "object", "type", "parent_type", "url", "created_time", "last_edited_time", "next_cursor"]) {
       expect(notion.skipFields.has(k)).toBe(true);
     }
+    // 2026-03-11 data-source id LEAVES (handler-validated UUIDs only):
+    for (const k of ["data_source_id", "database_id", "parent_data_source_id", "parent_database_id", "parent_page_id", "incomplete_reason"]) {
+      expect(notion.skipFields.has(k)).toBe(true);
+    }
     // attacker-influenced content stays OUT of the set → it wraps:
     for (const k of ["title", "text", "name", "value", "plain_text"]) {
+      expect(notion.skipFields.has(k)).toBe(false);
+    }
+    // …and NEVER a container key (a skipped key passes its whole subtree unwrapped):
+    for (const k of ["data_sources", "parent", "properties", "results", "blocks", "request_status"]) {
       expect(notion.skipFields.has(k)).toBe(false);
     }
   });

@@ -22,7 +22,7 @@ describe("notionApiGet/Post — construction + auth headers", () => {
     expect(f.calls[0]!.url).toBe("https://api.notion.com/v1/pages/abc?page_size=30");
     const h = f.calls[0]!.init.headers as Record<string, string>;
     expect(h.Authorization).toBe("Bearer ntn_TOK");
-    expect(h["Notion-Version"]).toBe("2022-06-28");
+    expect(h["Notion-Version"]).toBe("2026-03-11");
     expect(out).toEqual({ ok: true });
   });
 

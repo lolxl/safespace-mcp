@@ -431,7 +431,20 @@ const NOTION_SKIP_FIELDS: ReadonlySet<string> = new Set([
   "id", // opaque Notion UUID — the agent needs it raw for the next call
   "object", // controlled enum: "page" | "database" | "block" | "list"
   "type", // controlled enum: the block type / property type
-  "parent_type", // controlled enum: "page_id" | "database_id" | "workspace"
+  "parent_type", // controlled enum: "page_id" | "database_id" | "data_source_id" | "workspace" | "block_id"
+  // 2026-03-11 data-source ids — LEAF keys only, each emitted by handlers/notion.ts ONLY after
+  // canonical-UUID validation (null / omitted otherwise), so the agent can feed them straight
+  // into the data-source tools / `parent_data_source_id`. NEVER a container key (data_sources /
+  // parent / properties / results): a skipped key passes its WHOLE subtree through unwrapped
+  // (sanitize/index.ts walk invariant), and `data_sources[].name` etc. must keep wrapping.
+  "data_source_id", // notion_query_database's resolved source id
+  "database_id", // a data source / search hit's container database id
+  "parent_data_source_id",
+  "parent_database_id",
+  "parent_page_id",
+  // `request_status.incomplete_reason`: emitted ONLY from the documented closed set
+  // (shapeRequestStatus), so it is a validated enum LEAF — skipped so the agent can compare it.
+  "incomplete_reason",
   "url", // Notion-constructed page URL (skip, like github html_url)
   "created_time",
   "last_edited_time",

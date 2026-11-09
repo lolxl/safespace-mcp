@@ -40,10 +40,15 @@ describe("write-burst F1 — classifier", () => {
     for (const t of PERMANENT_DELETE_TOOLS) {
       expect(classifyWriteTool(t, "write")).toBe("delete");
     }
-    // the canonical 5 are present
+    // the canonical 6 are present
     expect(PERMANENT_DELETE_TOOLS.has("tasks_delete")).toBe(true);
     expect(PERMANENT_DELETE_TOOLS.has("calendar_delete_event")).toBe(true);
     expect(PERMANENT_DELETE_TOOLS.has("gmail_delete_draft")).toBe(true);
+    expect(PERMANENT_DELETE_TOOLS.has("drive_delete_file")).toBe(true);
+    // drive_trash_file is RECOVERABLE → NOT permanent
+    expect(PERMANENT_DELETE_TOOLS.has("drive_trash_file")).toBe(false);
+    expect(classifyWriteTool("drive_delete_file", "write")).toBe("delete");
+    expect(classifyWriteTool("drive_trash_file", "write")).toBe("write");
   });
 
   test("other state-changing tools → write bucket (incl. recoverable deletes)", () => {

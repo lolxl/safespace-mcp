@@ -9,7 +9,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { oauthCred, NOOP_AUDIT } from "./test-audit";
 import { currentTier } from "../tier";
-import { formsCreate, formsGet, formsGetResponse, formsListResponses, formsModify } from "./handlers";
+import {
+  formsCreate,
+  formsGet,
+  formsGetResponse,
+  formsListResponses,
+  formsModify,
+  formsUnpublish,
+} from "./handlers";
+import { TOOL_REGISTRY } from "./registry";
+import { tierSatisfies } from "../tier";
+import { classifyWriteTool } from "../policy/write-burst";
+import type { Tier } from "../tier";
 import { FORMS_MODIFY_ALLOWED_REQUEST_TYPES } from "./handlers/forms";
 import type { ToolContext } from "./types";
 
@@ -116,6 +127,8 @@ describe("forms_create", () => {
   test("valid title → forms.create with {info:{title}} (trimmed); gates reject", async () => {
     await formsCreate(CTX, { title: "  Signup form  " });
     expect((captured?.data as { info?: { title?: string } })?.info?.title).toBe("Signup form"); // trimmed
+    // explicit unpublished:true query param (Forms treats unset as published)
+    expect(captured?.params?.unpublished).toBe(true);
     await expect(formsCreate(CTX, { title: "   " })).rejects.toThrow(/non-empty/);
     await expect(formsCreate(CTX, { title: "bad\r\ntitle" })).rejects.toThrow(/CR\/LF/);
     await expect(formsCreate(CTX, { title: "x".repeat(1001) })).rejects.toThrow(/exceeds 1000 bytes/);
@@ -196,5 +209,91 @@ describe("forms_modify — allowlist gate + DEEP SSRF/fileUpload exclusion", () 
     for (let i = 0; i < 5001; i++) deep = { wrap: deep };
     await expect(formsModify(CTX, REQ({ createItem: { item: deep } }))).rejects.toThrow(/node budget exceeded/);
     expect(captured).toBeUndefined(); // rejected before any SDK call
+  });
+});
+
+/* ═════════════ forms_publish / forms_unpublish (setPublishSettings) ═════════════ */
+
+const UNPUBLISHED_RESPONSE = {
+  formId: FID,
+  publishSettings: { publishState: { isPublished: false, isAcceptingResponses: false } },
+};
+
+async function respondWith(data: unknown): Promise<void> {
+  const { setGaxiosHandler } = await import("../google-api/test-utils");
+  setGaxiosHandler(async (o) => {
+    captured = o as CapturedOpts;
+    return { data, status: 200 };
+  });
+}
+
+describe("forms_unpublish", () => {
+  test("POST :setPublishSettings with {false,false}; injected args ignored; returns the API state", async () => {
+    await respondWith(UNPUBLISHED_RESPONSE);
+    const res = await formsUnpublish(CTX, { form_id: FID, updateMask: "*", requestBody: { x: 1 } });
+    expect(captured?.method).toBe("POST");
+    expect(captured?.url).toContain(`/forms/${FID}:setPublishSettings`);
+    expect(captured?.data).toEqual({
+      publishSettings: { publishState: { isPublished: false, isAcceptingResponses: false } },
+      updateMask: "publish_state",
+    });
+    expect(res).toEqual({ form_id: FID, published: false, accepting_responses: false });
+  });
+
+  test("recovery > policy: works at write tier with a deny-all whitelist and send-approval ON (no gate fires)", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "safespace-forms-unpub-"));
+    const saved = { dir: process.env.SAFESPACE_CONFIG_DIR, appr: process.env.SAFESPACE_REQUIRE_SEND_APPROVAL };
+    process.env.SAFESPACE_CONFIG_DIR = tmp;
+    process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = "true";
+    await fs.writeFile(
+      path.join(tmp, "drive-whitelist.json"),
+      JSON.stringify({ schema_version: 1, updated_at: "x", entries: [] }),
+      { mode: 0o600 },
+    );
+    try {
+      await respondWith(UNPUBLISHED_RESPONSE);
+      const res = await formsUnpublish({ ...CTX, tier: "write" }, { form_id: FID });
+      expect(res).toEqual({ form_id: FID, published: false, accepting_responses: false });
+      expect(captured?.url).toContain(":setPublishSettings");
+    } finally {
+      if (saved.dir === undefined) delete process.env.SAFESPACE_CONFIG_DIR;
+      else process.env.SAFESPACE_CONFIG_DIR = saved.dir;
+      if (saved.appr === undefined) delete process.env.SAFESPACE_REQUIRE_SEND_APPROVAL;
+      else process.env.SAFESPACE_REQUIRE_SEND_APPROVAL = saved.appr;
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("invalid form_id rejected before any request; API error carries the unpublish tool name", async () => {
+    await expect(formsUnpublish(CTX, { form_id: "bad id" })).rejects.toThrow(/forms_unpublish: 'form_id' must match/);
+    expect(captured).toBeUndefined();
+    const { setGaxiosHandler, makeGaxiosError } = await import("../google-api/test-utils");
+    setGaxiosHandler(async () => {
+      throw makeGaxiosError({ status: 404, errorMessage: "Form not found" });
+    });
+    await expect(formsUnpublish(CTX, { form_id: FID })).rejects.toThrow(/google_api_404_forms_unpublish/);
+  });
+});
+
+describe("forms_publish / forms_unpublish — tier visibility", () => {
+  const visible = (tool: string, tier: Tier): boolean =>
+    tierSatisfies(tier, TOOL_REGISTRY[tool]!.min_tier);
+  test("forms_publish is hidden at read+write, shown at share; forms_unpublish shown at write+share, hidden at read", () => {
+    expect(visible("forms_publish", "read")).toBe(false);
+    expect(visible("forms_publish", "write")).toBe(false);
+    expect(visible("forms_publish", "share")).toBe(true);
+    expect(visible("forms_unpublish", "read")).toBe(false);
+    expect(visible("forms_unpublish", "write")).toBe(true);
+    expect(visible("forms_unpublish", "share")).toBe(true);
+  });
+});
+
+describe("forms_publish / forms_unpublish — burst bucket", () => {
+  test("both count in the WRITE bucket (neither is a permanent delete)", () => {
+    expect(classifyWriteTool("forms_publish", TOOL_REGISTRY.forms_publish!.min_tier)).toBe("write");
+    expect(classifyWriteTool("forms_unpublish", TOOL_REGISTRY.forms_unpublish!.min_tier)).toBe("write");
   });
 });

@@ -40,20 +40,72 @@ import { MCPError } from "../errors";
 // DO NOT repoint this at the `../tools/handlers` barrel.
 import type { UpstreamError } from "../tools/handlers/shared";
 
+/**
+ * The validated subset of Google's `{error:{...}}` envelope the mapper uses. Every
+ * field is runtime-checked (the input is untrusted upstream data, possibly a
+ * string, possibly shaped to break the mapper); anything of the wrong type is
+ * dropped, never trusted.
+ */
+interface GoogleApiErrorEnvelope {
+  message?: string;
+  status?: string;
+  /** `errors[0].reason`, only when it is a string. */
+  reason?: string;
+}
+
 interface GaxiosLikeError {
   response?: {
-    status?: number;
-    data?: {
-      error?: {
-        code?: number;
-        message?: string;
-        status?: string;
-        errors?: Array<{ reason?: string; message?: string; domain?: string }>;
-      };
-    };
+    status?: unknown;
+    /**
+     * Object for JSON responses, but a RAW STRING when the request set
+     * `responseType: "text"` (gmail batch) or "stream" (drive downloads: gaxios
+     * buffers a non-2xx stream body into a string before building the error).
+     */
+    data?: unknown;
   };
-  code?: string;
-  message?: string;
+  /** gaxios >= 7 sets this to the HTTP status NUMBER on HTTP errors. */
+  code?: unknown;
+  /** NOT trustworthy for HTTP errors: gaxios 8 sets it to the RAW response body. */
+  message?: unknown;
+}
+
+/** Google error JSON is tiny; refuse to JSON.parse anything larger (e.g. an HTML error page). */
+const MAX_ERROR_BODY_PARSE_BYTES = 64 * 1024;
+/** Upper bound on any upstream-derived text that reaches an error message. */
+const MAX_ERROR_TEXT = 500;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+const clip = (s: string): string => (s.length > MAX_ERROR_TEXT ? `${s.slice(0, MAX_ERROR_TEXT)}…` : s);
+
+/**
+ * Validate `err.response.data` into the Google error envelope. A string body is
+ * parsed as JSON when it plausibly is one; anything else (HTML, plain text,
+ * oversized, malformed, wrong-typed fields) yields no field, so callers fall back
+ * to the HTTP status — never a throw from inside the error mapper.
+ */
+function errorBody(err: GaxiosLikeError): GoogleApiErrorEnvelope | undefined {
+  let data = err.response?.data;
+  if (typeof data === "string") {
+    const trimmed = data.trimStart();
+    if (trimmed.length > MAX_ERROR_BODY_PARSE_BYTES || !trimmed.startsWith("{")) {
+      return undefined;
+    }
+    try {
+      data = JSON.parse(trimmed) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+  if (!isPlainObject(data) || !isPlainObject(data["error"])) return undefined;
+  const e = data["error"];
+  const first: unknown = Array.isArray(e["errors"]) ? e["errors"][0] : undefined;
+  return {
+    ...(typeof e["message"] === "string" && { message: e["message"] }),
+    ...(typeof e["status"] === "string" && { status: e["status"] }),
+    ...(isPlainObject(first) && typeof first["reason"] === "string" && { reason: first["reason"] }),
+  };
 }
 
 export interface GoogleErrorContext {
@@ -68,7 +120,8 @@ export interface GoogleErrorContext {
  * for network errors (no HTTP response received).
  */
 function extractStatus(err: GaxiosLikeError): number | undefined {
-  return err.response?.status;
+  const s = err.response?.status;
+  return typeof s === "number" && Number.isFinite(s) ? s : undefined;
 }
 
 /**
@@ -79,15 +132,21 @@ function extractStatus(err: GaxiosLikeError): number | undefined {
  * specific and worth checking first.
  */
 function extractReason(err: GaxiosLikeError): string | undefined {
-  return err.response?.data?.error?.errors?.[0]?.reason;
+  return errorBody(err)?.reason;
 }
 
-function extractMessage(err: GaxiosLikeError): string {
-  return (
-    err.response?.data?.error?.message ??
-    err.message ??
-    "(no message)"
-  );
+/**
+ * Upstream-derived message text, always bounded. HTTP errors (status defined) use
+ * ONLY the validated JSON envelope message, else a fixed `HTTP <status>`: gaxios 8
+ * sets `err.message` to the raw response body, so it must not be echoed (an HTML
+ * page / oversized body would reach the MCP error message unsanitized). Only a
+ * genuine network error (no response status) may use `err.message`.
+ */
+function extractMessage(err: GaxiosLikeError, status: number | undefined): string {
+  const fromEnvelope = errorBody(err)?.message;
+  if (fromEnvelope !== undefined) return clip(fromEnvelope);
+  if (status !== undefined) return `HTTP ${status}`;
+  return typeof err.message === "string" ? clip(err.message) : "(no message)";
 }
 
 /**
@@ -138,14 +197,15 @@ function mapGoogleErrorImpl(err: unknown, ctx: GoogleErrorContext): Error {
   const e = (err ?? {}) as GaxiosLikeError;
   const status = extractStatus(e);
   const reason = extractReason(e);
-  const errorStatus = e.response?.data?.error?.status;
-  const message = extractMessage(e);
+  const errorStatus = errorBody(e)?.status;
+  const message = extractMessage(e, status);
   const tool = ctx.tool;
 
   // Network errors — no HTTP status. UpstreamError without httpStatus is
   // treated as a generic upstream failure (no retry, no auth fallout).
   if (status === undefined) {
-    const code = e.code ?? "unknown";
+    const code =
+      typeof e.code === "number" || typeof e.code === "string" ? clip(String(e.code)) : "unknown";
     return makeUpstream(`google_api_network_${code}_${tool}: ${message}`);
   }
 

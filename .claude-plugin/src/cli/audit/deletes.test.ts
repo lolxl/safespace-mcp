@@ -334,6 +334,24 @@ describe("audit deletes", () => {
     expect(text).not.toContain("ALERT");
   });
 
+  /* ── drive_delete_file (permanent) counted; drive_trash_file (recoverable) + failures excluded ── */
+
+  test("drive_delete_file ok rows counted; drive_trash_file / error rows / allowlist denials excluded", async () => {
+    const at = (m: number): string => new Date(Date.now() - m * 60_000).toISOString();
+    const base = { account: "a@example.com", duration_ms: 50 };
+    await writeAuditLines([
+      { ...base, ts: at(1), tool: "drive_delete_file", status: "ok" },
+      { ...base, ts: at(2), tool: "drive_delete_file", status: "ok" },
+      { ...base, ts: at(3), tool: "drive_delete_file", status: "error", error_code: -32060 },
+      { ...base, ts: at(4), tool: "drive_trash_file", status: "ok" },
+    ]);
+    const { io, out } = captureIO();
+    await runCli(["audit", "deletes", "--threshold", "5"], io);
+    const text = out.join("\n");
+    expect(text).toContain("drive_delete_file:       2");
+    expect(text).toContain("total destructive:       2");
+  });
+
   /* ── v1.19 Phase 2b — tasks_delete extension to density alert ── */
 
   test("v1.19 sec-H2 — 3-tool destructive mix (youtube + calendar + tasks) at threshold=3 → ALERT", async () => {

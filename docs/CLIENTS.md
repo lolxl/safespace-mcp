@@ -7,7 +7,7 @@ There are two ways to start it:
 | Path | Runtime | Best for |
 | --- | --- | --- |
 | **Claude Code plugin** | Bun (bundled with the plugin) | Claude Code — zero config, see the [README](../README.md) |
-| **`npx` / npm** | **plain Node ≥ 20** | Google Antigravity / Gemini, OpenAI Codex, Cursor, Claude Desktop, any other MCP client |
+| **`npx` / npm** | **plain Node ≥ 22** | Google Antigravity / Gemini, OpenAI Codex, Cursor, Claude Desktop, any other MCP client |
 
 The npm package ships a prebuilt bundle (`dist/`), so **the npx path needs only
 Node — Bun is not required** on the consumer machine.
@@ -16,7 +16,7 @@ Node — Bun is not required** on the consumer machine.
 
 ## 1. Prerequisites (npx path)
 
-- **Node ≥ 20.**
+- **Node ≥ 22.**
 - A **Google Cloud OAuth client** of type *Desktop app* →
   `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET`. (Only for the Google connectors;
   GitHub / Notion / service-token connectors are optional and configured the
@@ -135,9 +135,9 @@ above (e.g. Claude Desktop's `claude_desktop_config.json`). Drop the same
   enforced at the `tools/list` boundary, so disallowed tools are invisible to the
   agent. Start at `read`; raise it only for the surface you want the agent to
   write to.
-- **Context cost, and how to cut it (v1.127).** SafeSpace exposes 129 tools; a
+- **Context cost, and how to cut it (v1.127).** SafeSpace exposes 135 tools; a
   client that does not lazy-load tool schemas pays for **all** of them on every
-  session (~22k tokens at `read`, ~52k at `share`), and Google Workspace alone is
+  session (~22k tokens at `read`, ~52k at `share`, measured at v1.127 with 129 tools), and Google Workspace alone is
   ~39k of that. Claude Code defers tool schemas and does not pay this — Codex,
   Grok, Antigravity, and Cursor do. Narrow the surface with
   **`SAFESPACE_CONNECTORS`**, a comma-separated list of connectors and/or Google
